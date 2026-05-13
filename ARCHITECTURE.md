@@ -96,6 +96,7 @@ Names below are grep-able. They live in `alvr/server_core/src/connection.rs` and
 | `video_send_thread` | `connection.rs` | Pulls `VideoPacket`s off the encoder channel and ships them on the `VIDEO` stream. The hot path for latency. |
 | `tracking_receive_thread` | `connection.rs` | Receives `TrackingData` on the `TRACKING` stream, hands it to `TrackingManager`. |
 | `statistics_thread` | `connection.rs` | Receives `ClientStatistics`; drives `BitrateManager`. |
+| `metrics_exporter` | `metrics_exporter.rs` | Optional. Aggregates per-frame stats into min/max/avg over a configurable window and POSTs JSON to an external HTTP endpoint (Grafana / TSDB ingest). Spawned only when `extra.metrics_export` is enabled. |
 | `real_time_update_thread` | `connection.rs` | Periodically (`REAL_TIME_UPDATE_INTERVAL = 1s`) pushes `RealTimeConfig` updates to the client. |
 | `keepalive_thread` | `connection.rs` | Sends keepalives at `KEEPALIVE_INTERVAL` over the control socket. |
 | `control_receive_thread` | `connection.rs` | Demuxes `ClientControlPacket`s — buttons, statistics, view config changes, disconnect. |

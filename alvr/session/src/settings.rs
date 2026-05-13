@@ -1611,6 +1611,40 @@ pub struct NewVersionPopupConfig {
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct MetricsExportConfig {
+    #[schema(strings(
+        display_name = "Endpoint URL",
+        help = "Full URL of the HTTP endpoint that will receive a JSON POST every interval."
+    ))]
+    pub url: String,
+
+    #[schema(strings(display_name = "Push interval"))]
+    #[schema(suffix = "ms")]
+    #[schema(gui(slider(min = 100, max = 60000, step = 100)))]
+    pub interval_ms: u64,
+
+    #[schema(strings(
+        display_name = "HTTP timeout",
+        help = "POST timeout. Must be smaller than the push interval."
+    ))]
+    #[schema(suffix = "ms")]
+    #[schema(gui(slider(min = 50, max = 30000, step = 50)))]
+    pub timeout_ms: u64,
+
+    #[schema(strings(
+        display_name = "HTTP headers",
+        help = "Extra HTTP headers attached to every POST (for example Authorization tokens)."
+    ))]
+    pub headers: Vec<(String, String)>,
+
+    #[schema(strings(
+        help = "Static key/value pairs that are copied verbatim into the JSON `tags` field of every \
+                snapshot. Useful for Grafana dimensions like host, headset, room."
+    ))]
+    pub tags: Vec<(String, String)>,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct ExtraConfig {
     #[schema(strings(display_name = "SteamVR Launcher"))]
     pub steamvr_launcher: SteamvrLauncher,
@@ -1627,6 +1661,13 @@ It does not update in real time.")
 
     pub open_setup_wizard: bool,
     pub new_version_popup: Switch<NewVersionPopupConfig>,
+
+    #[schema(strings(
+        display_name = "Metrics export",
+        help = "Push aggregated streaming statistics to an external HTTP endpoint (e.g. for \
+                Grafana). Settings are read on client reconnect."
+    ))]
+    pub metrics_export: Switch<MetricsExportConfig>,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2290,6 +2331,26 @@ pub fn session_settings_default() -> SettingsDefault {
                 enabled: alvr_common::is_stable(),
                 content: NewVersionPopupConfigDefault {
                     hide_while_version: ALVR_VERSION.to_string(),
+                },
+            },
+            metrics_export: SwitchDefault {
+                enabled: false,
+                content: MetricsExportConfigDefault {
+                    url: "http://127.0.0.1:8086/api/metrics".into(),
+                    interval_ms: 1000,
+                    timeout_ms: 500,
+                    headers: DictionaryDefault {
+                        gui_collapsed: true,
+                        key: "".into(),
+                        value: "".into(),
+                        content: vec![],
+                    },
+                    tags: DictionaryDefault {
+                        gui_collapsed: true,
+                        key: "".into(),
+                        value: "".into(),
+                        content: vec![],
+                    },
                 },
             },
         },

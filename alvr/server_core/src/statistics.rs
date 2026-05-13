@@ -1,6 +1,8 @@
+use crate::metrics_exporter::{self, Sample};
 use alvr_common::{HEAD_ID, SlidingWindowAverage};
 use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
 use alvr_packets::ClientStatistics;
+use flume::Sender;
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
@@ -56,6 +58,7 @@ pub struct StatisticsManager {
     last_vsync_time: Instant,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
+    metrics_sender: Option<Sender<Sample>>,
 }
 
 impl StatisticsManager {
@@ -64,6 +67,7 @@ impl StatisticsManager {
         max_history_size: usize,
         nominal_server_frame_interval: Duration,
         steamvr_pipeline_frames: f32,
+        metrics_sender: Option<Sender<Sample>>,
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(),
@@ -86,6 +90,7 @@ impl StatisticsManager {
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+            metrics_sender,
         }
     }
 
@@ -166,10 +171,26 @@ impl StatisticsManager {
             gauge_value,
             is_plugged,
         };
+
+        if device_id == *HEAD_ID
+            && let Some(sender) = &self.metrics_sender
+        {
+            metrics_exporter::try_push(
+                sender,
+                Sample::Battery {
+                    hmd_pct: (gauge_value * 100.0) as u32,
+                    hmd_plugged: is_plugged,
+                },
+            );
+        }
     }
 
     pub fn report_throughput_stats(&mut self, stats: BitrateDirectives) {
-        self.last_throughput_directives = stats;
+        self.last_throughput_directives = stats.clone();
+
+        if let Some(sender) = &self.metrics_sender {
+            metrics_exporter::try_push(sender, Sample::Bitrate(stats));
+        }
     }
 
     // Called every frame. Some statistics are reported once every frame
@@ -264,7 +285,7 @@ impl StatisticsManager {
 
             // todo: use target timestamp in nanoseconds. the dashboard needs to use the first
             // timestamp as the graph time origin.
-            alvr_events::send_event(EventType::GraphStatistics(GraphStatistics {
+            let graph_stats = GraphStatistics {
                 total_pipeline_latency_s: client_stats.total_pipeline_latency.as_secs_f32(),
                 game_time_s: game_time_latency.as_secs_f32(),
                 server_compositor_s: server_compositor_latency.as_secs_f32(),
@@ -279,7 +300,19 @@ impl StatisticsManager {
                 bitrate_directives: self.last_throughput_directives.clone(),
                 throughput_bps,
                 bitrate_bps,
-            }));
+            };
+            alvr_events::send_event(EventType::GraphStatistics(graph_stats.clone()));
+
+            if let Some(sender) = &self.metrics_sender {
+                metrics_exporter::try_push(
+                    sender,
+                    Sample::Frame {
+                        stats: graph_stats,
+                        video_packets_total: self.video_packets_total as u64,
+                        video_bytes_total: self.video_bytes_total as u64,
+                    },
+                );
+            }
 
             (network_latency, game_time_latency)
         } else {

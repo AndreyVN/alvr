@@ -5,6 +5,7 @@ mod hand_gestures;
 mod haptics;
 mod input_mapping;
 mod logging_backend;
+mod metrics_exporter;
 mod sockets;
 mod statistics;
 mod tracking;
@@ -199,6 +200,7 @@ impl ServerCoreContext {
             } else {
                 0.0
             },
+            None,
         );
 
         let connection_context = Arc::new(ConnectionContext {

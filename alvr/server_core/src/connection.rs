@@ -814,6 +814,22 @@ fn connection_pipeline(
     }
     dbg_connection!("connection_pipeline: Got StreamReady packet");
 
+    let (metrics_sender, metrics_exporter_thread) =
+        if let Switch::Enabled(config) = &initial_settings.extra.metrics_export {
+            let (tx, rx) = crate::metrics_exporter::channel();
+            let exporter_config = crate::metrics_exporter::ExporterConfig {
+                url: config.url.clone(),
+                interval: Duration::from_millis(config.interval_ms),
+                timeout: Duration::from_millis(config.timeout_ms),
+                headers: config.headers.clone(),
+                tags: config.tags.iter().cloned().collect(),
+            };
+            let handle = crate::metrics_exporter::spawn_exporter_thread(rx, exporter_config);
+            (Some(tx), Some(handle))
+        } else {
+            (None, None)
+        };
+
     *ctx.statistics_manager.write() = Some(StatisticsManager::new(
         initial_settings.connection.statistics_history_size,
         Duration::from_secs_f32(1.0 / fps),
@@ -822,6 +838,7 @@ fn connection_pipeline(
         } else {
             0.0
         },
+        metrics_sender,
     ));
 
     *ctx.bitrate_manager.lock() =
@@ -1434,6 +1451,13 @@ fn connection_pipeline(
     stream_receive_thread.join().ok();
     keepalive_thread.join().ok();
     lifecycle_check_thread.join().ok();
+
+    // Drop the StatisticsManager so the metrics_sender is released; the exporter thread
+    // then sees `Disconnected` on its receiver and exits cleanly.
+    if let Some(handle) = metrics_exporter_thread {
+        *ctx.statistics_manager.write() = None;
+        handle.join().ok();
+    }
 
     ctx.events_sender
         .send(ServerCoreEvent::ClientDisconnected)
