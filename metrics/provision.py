@@ -8,6 +8,7 @@ Usage:
 """
 from __future__ import annotations
 
+import io
 import sys
 import textwrap
 from pathlib import Path
@@ -52,11 +53,18 @@ https://packages.clickhouse.com/deb stable main" \\
 
         # users config — creates both `default` and the SSH user so the
         # same credentials work for nginx basic-auth AND the Play UI login.
+        # replace="replace" ensures this block fully replaces the default
+        # user entry in users.xml (which may have <no_password/> or an empty
+        # <password>), preventing auth conflicts on config merge.
         mkdir -p /etc/clickhouse-server/users.d
+        # ClickHouse auto-generates this file on first install with a random
+        # password. It sorts after alvr_users.xml (d > a) so it would override
+        # our password — delete it so our config wins.
+        rm -f /etc/clickhouse-server/users.d/default-password.xml
         cat > /etc/clickhouse-server/users.d/alvr_users.xml <<'CHEOF'
 <clickhouse>
   <users>
-    <default>
+    <default replace="replace">
       <password>{ch_pass}</password>
       <networks><ip>::/0</ip></networks>
       <profile>default</profile>
@@ -71,7 +79,8 @@ https://packages.clickhouse.com/deb stable main" \\
   </users>
 </clickhouse>
 CHEOF
-        systemctl enable --now clickhouse-server
+        systemctl enable clickhouse-server
+        systemctl restart clickhouse-server
 
         # ── 3. Grafana ────────────────────────────────────────────────────────
         # Direct .deb download — apt.grafana.com (Fastly) may be geo-blocked.
@@ -99,50 +108,8 @@ GFEOF
         systemctl enable --now grafana-server
 
         # ── 4. nginx config ───────────────────────────────────────────────────
-        # All services on port 80, different paths.
-        # Internal ports:  Grafana=3000  ClickHouse=8123  FastAPI=8087
         echo "[4/5] nginx config"
-        cat > /etc/nginx/sites-available/alvr-metrics <<'NGEOF'
-server {{
-    listen 80;
-
-    # Grafana dashboard
-    location /grafana/ {{
-        proxy_pass         http://127.0.0.1:3000/;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_http_version 1.1;
-        proxy_set_header   Upgrade $http_upgrade;
-        proxy_set_header   Connection "upgrade";
-    }}
-
-    # ClickHouse Play UI POSTs queries back to its own path (/clickhouse/play).
-    # Rewrite those POSTs to /clickhouse/ so they hit the HTTP query API.
-    location = /clickhouse/play {{
-        if ($request_method = POST) {{
-            rewrite ^/clickhouse/play$ /clickhouse/ last;
-        }}
-        proxy_pass       http://127.0.0.1:8123/play;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }}
-
-    location /clickhouse/ {{
-        proxy_pass       http://127.0.0.1:8123/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }}
-
-    # ALVR metrics ingest (FastAPI / uvicorn on 127.0.0.1:8087)
-    location /metrics/ {{
-        proxy_pass         http://127.0.0.1:8087/;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-    }}
-}}
-NGEOF
+        cp /tmp/alvr-metrics.nginx /etc/nginx/sites-available/alvr-metrics
         ln -sf /etc/nginx/sites-available/alvr-metrics \\
                /etc/nginx/sites-enabled/alvr-metrics
         rm -f /etc/nginx/sites-enabled/default
@@ -164,10 +131,59 @@ NGEOF
         echo
         echo "============================================================"
         echo "  Provision complete."
+        echo "  ClickHouse -> http://{host}/play   ({ng_user}/{ch_pass})"
         echo "  Grafana    -> http://{host}/grafana/   (admin/admin)"
-        echo "  ClickHouse -> http://{host}/clickhouse/ ({ng_user}/{ch_pass})"
+        echo "  Metrics    -> http://{host}/metrics/"
         echo "============================================================"
     """)
+
+
+def build_nginx_conf(host: str) -> str:
+    return """\
+server {
+    listen 80;
+
+    location /grafana/ {
+        proxy_pass         http://127.0.0.1:3000/grafana/;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+    }
+
+    location = /metrics { return 301 /metrics/; }
+
+    location /metrics/ {
+        proxy_pass         http://127.0.0.1:8087/;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location = /play {
+        proxy_pass http://127.0.0.1:8123/play?url=http://$host/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location = / {
+        if ($request_method = GET) {
+            return 302 /play;
+        }
+        proxy_pass http://127.0.0.1:8123/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8123/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+"""
 
 
 def main() -> None:
@@ -180,6 +196,11 @@ def main() -> None:
     print(f"Connecting to {user}@{host}:{port} ...")
     client = connect(host, port, user, passwd)
     print("Connected.\n")
+
+    sftp = client.open_sftp()
+    nginx_conf = build_nginx_conf(host).replace("\r\n", "\n")
+    sftp.putfo(io.BytesIO(nginx_conf.encode()), "/tmp/alvr-metrics.nginx")
+    sftp.close()
 
     step(1, 1, "Provision server (nginx + ClickHouse + Grafana)")
     rc = run_script(client, build_script(cfg), passwd)

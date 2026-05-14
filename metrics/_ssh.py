@@ -44,7 +44,7 @@ def run_script(client: paramiko.SSHClient, script: str,
                sudo_password: str, timeout: int = 600) -> int:
     """Upload script as /tmp/_alvr_run.sh, execute as root, stream output."""
     sftp = client.open_sftp()
-    sftp.putfo(io.BytesIO(script.encode()), "/tmp/_alvr_run.sh")
+    sftp.putfo(io.BytesIO(script.replace("\r\n", "\n").encode()), "/tmp/_alvr_run.sh")
     sftp.chmod("/tmp/_alvr_run.sh", 0o700)
     sftp.close()
 
