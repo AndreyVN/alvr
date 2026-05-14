@@ -15,7 +15,8 @@ import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _ssh import connect, load_env, run_script, step, upload_tree
+from _ssh import connect, fix_stdout, load_env, run_script, step, upload_tree
+fix_stdout()
 
 METRICS_DIR = Path(__file__).parent
 DEPLOY_DIR  = "/opt/alvr-metrics"

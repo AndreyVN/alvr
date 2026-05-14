@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import provision
 import deploy
-from _ssh import load_env
+from _ssh import fix_stdout, load_env
+fix_stdout()
 
 METRICS_DIR = Path(__file__).parent
 

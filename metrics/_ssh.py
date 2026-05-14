@@ -10,7 +10,10 @@ from typing import Optional
 
 import paramiko
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+def fix_stdout() -> None:
+    """Call once per script entry-point to make stdout UTF-8 safe on Windows."""
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 
 def load_env(env_file: Optional[Path] = None) -> dict[str, str]:

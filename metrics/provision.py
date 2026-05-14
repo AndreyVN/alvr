@@ -13,7 +13,8 @@ import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _ssh import connect, load_env, run_script, step
+from _ssh import connect, fix_stdout, load_env, run_script, step
+fix_stdout()
 
 # ---------------------------------------------------------------------------
 METRICS_DIR = Path(__file__).parent
@@ -109,7 +110,10 @@ server {{
         proxy_set_header   Connection "upgrade";
     }}
 
-    # ClickHouse HTTP API (basic-auth)
+    # ClickHouse — bare path redirects to the built-in Play UI
+    location = /clickhouse/ {{
+        return 302 /clickhouse/play;
+    }}
     location /clickhouse/ {{
         auth_basic           "ClickHouse";
         auth_basic_user_file /etc/nginx/clickhouse.htpasswd;
