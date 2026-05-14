@@ -117,13 +117,10 @@ server {{
         proxy_set_header   Connection "upgrade";
     }}
 
-    # ClickHouse — bare path redirects to the built-in Play UI
-    location = /clickhouse/ {{
-        return 302 /clickhouse/play;
-    }}
+    # ClickHouse — protected by its own user/password (no nginx basic-auth
+    # here because it would forward the Authorization header and conflict
+    # with ClickHouse's own auth in the Play UI).
     location /clickhouse/ {{
-        auth_basic           "ClickHouse";
-        auth_basic_user_file /etc/nginx/clickhouse.htpasswd;
         proxy_pass           http://127.0.0.1:8123/;
         proxy_set_header     Host $host;
         proxy_set_header     X-Real-IP $remote_addr;
