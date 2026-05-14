@@ -45,12 +45,15 @@ def run_script(client: paramiko.SSHClient, script: str,
     sftp.chmod("/tmp/_alvr_run.sh", 0o700)
     sftp.close()
 
-    _, stdout, _ = client.exec_command(
+    stdin, stdout, _ = client.exec_command(
         "sudo -S bash /tmp/_alvr_run.sh 2>&1",
         timeout=timeout,
         get_pty=True,
     )
-    stdout.channel.sendall((sudo_password + "\n").encode())
+    # Give sudo a moment to start and print its password prompt before we write.
+    time.sleep(0.5)
+    stdin.write(sudo_password + "\n")
+    stdin.flush()
 
     while not stdout.channel.exit_status_ready():
         if stdout.channel.recv_ready():
