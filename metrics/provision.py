@@ -162,21 +162,6 @@ server {
         proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    location = /play {
-        proxy_pass http://127.0.0.1:8123/play?url=http://$host/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    location = / {
-        if ($request_method = GET) {
-            return 302 /play;
-        }
-        proxy_pass http://127.0.0.1:8123/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
     location / {
         proxy_pass http://127.0.0.1:8123/;
         proxy_set_header Host $host;
