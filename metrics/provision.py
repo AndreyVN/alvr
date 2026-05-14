@@ -50,9 +50,10 @@ https://packages.clickhouse.com/deb stable main" \\
         apt-get update -qq
         apt-get install -y clickhouse-server clickhouse-client
 
-        # password config (idempotent — overwrites the file each run)
+        # users config — creates both `default` and the SSH user so the
+        # same credentials work for nginx basic-auth AND the Play UI login.
         mkdir -p /etc/clickhouse-server/users.d
-        cat > /etc/clickhouse-server/users.d/alvr_password.xml <<'CHEOF'
+        cat > /etc/clickhouse-server/users.d/alvr_users.xml <<'CHEOF'
 <clickhouse>
   <users>
     <default>
@@ -61,6 +62,12 @@ https://packages.clickhouse.com/deb stable main" \\
       <profile>default</profile>
       <quota>default</quota>
     </default>
+    <{ng_user}>
+      <password>{ch_pass}</password>
+      <networks><ip>::/0</ip></networks>
+      <profile>default</profile>
+      <quota>default</quota>
+    </{ng_user}>
   </users>
 </clickhouse>
 CHEOF
