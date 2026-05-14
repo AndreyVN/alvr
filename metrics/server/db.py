@@ -20,7 +20,8 @@ TABLE = "alvr.streaming_metrics"
 
 COLUMNS: Tuple[str, ...] = (
     "ts",
-    "tags",
+    "device",
+    "session",
     "window_ms",
     "frames",
     "dropped_samples",
@@ -81,7 +82,8 @@ def snapshot_to_row(s: Snapshot) -> List[Any]:
 
     row: List[Any] = [
         s.ts,
-        s.tags,
+        s.device,
+        s.session,
         s.window_ms,
         s.frames,
         s.dropped_samples,

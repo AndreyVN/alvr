@@ -8,7 +8,7 @@ when the corresponding accumulator is empty are typed as Optional.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -76,7 +76,8 @@ class Snapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     ts: datetime
-    tags: Dict[str, str] = Field(default_factory=dict)
+    device: str = ""
+    session: str = ""
     window_ms: int
     frames: int
     dropped_samples: int

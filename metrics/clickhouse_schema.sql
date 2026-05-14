@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
 (
     -- ───── identity ─────
     ts                                      DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
-    tags                                    Map(LowCardinality(String), String),
+    device                                  LowCardinality(String),
+    session                                 LowCardinality(String),
     window_ms                               UInt64,
     frames                                  UInt32,
     dropped_samples                         UInt64,
@@ -131,6 +132,6 @@ CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
-ORDER BY (ts)
+ORDER BY (device, ts)
 TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
