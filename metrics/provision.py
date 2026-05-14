@@ -117,13 +117,21 @@ server {{
         proxy_set_header   Connection "upgrade";
     }}
 
-    # ClickHouse — protected by its own user/password (no nginx basic-auth
-    # here because it would forward the Authorization header and conflict
-    # with ClickHouse's own auth in the Play UI).
+    # ClickHouse Play UI POSTs queries back to its own path (/clickhouse/play).
+    # Rewrite those POSTs to /clickhouse/ so they hit the HTTP query API.
+    location = /clickhouse/play {{
+        if ($request_method = POST) {{
+            rewrite ^/clickhouse/play$ /clickhouse/ last;
+        }}
+        proxy_pass       http://127.0.0.1:8123/play;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }}
+
     location /clickhouse/ {{
-        proxy_pass           http://127.0.0.1:8123/;
-        proxy_set_header     Host $host;
-        proxy_set_header     X-Real-IP $remote_addr;
+        proxy_pass       http://127.0.0.1:8123/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
     }}
 
     # ALVR metrics ingest (FastAPI / uvicorn on 127.0.0.1:8087)
