@@ -87,11 +87,14 @@ fn classify(root: &Node) -> (CpuSensors, GpuSensors) {
     let mut gpu = GpuSensors::default();
 
     fn walk(node: &Node, cpu: &mut CpuSensors, gpu: &mut GpuSensors, kind: HardwareKind) {
-        // Re-classify at hardware-level nodes (those with an ImageURL).
-        let kind = if !node.image_url.is_empty() {
-            HardwareKind::of(&node.image_url, &node.text)
-        } else {
-            kind
+        // ImageURL is set on hardware nodes AND on group nodes (e.g.
+        // `images/temperature.png`). Only override the inherited kind if we
+        // actually recognise the new node as a hardware root; otherwise we
+        // would lose track of which CPU/GPU we are inside once we descend
+        // into Temperatures/Fans/Powers/etc. groups.
+        let kind = match HardwareKind::of(&node.image_url, &node.text) {
+            HardwareKind::Unknown => kind,
+            other => other,
         };
         for child in &node.children {
             walk(child, cpu, gpu, kind);
