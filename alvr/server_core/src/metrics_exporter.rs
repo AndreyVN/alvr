@@ -2,11 +2,8 @@ use alvr_common::{info, warn};
 use alvr_events::{BitrateDirectives, GraphStatistics};
 use flume::{Receiver, RecvTimeoutError, Sender};
 use serde_json::{Map, Value, json};
-use std::{
-    collections::HashMap,
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
-};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 const SAMPLE_CHANNEL_CAPACITY: usize = 4096;
 const WARN_RATE_LIMIT: Duration = Duration::from_secs(30);
@@ -30,7 +27,7 @@ pub struct ExporterConfig {
     pub interval: Duration,
     pub timeout: Duration,
     pub headers: Vec<(String, String)>,
-    pub tags: HashMap<String, String>,
+    pub device: String,
 }
 
 #[derive(Default)]
@@ -147,7 +144,7 @@ impl Aggregator {
         }
     }
 
-    fn flush(&mut self, window: Duration, tags: &HashMap<String, String>) -> Value {
+    fn flush(&mut self, window: Duration, device: &str) -> Value {
         let window_secs = window.as_secs_f64().max(f64::EPSILON);
         let packets_in_window = self
             .video_packets_total
@@ -199,8 +196,6 @@ impl Aggregator {
                 "hmd_plugged": self.last_battery_hmd_plugged,
             })
         });
-
-        let device = tags.get("device").map(String::as_str).unwrap_or("");
 
         let snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -309,7 +304,7 @@ fn exporter_loop(receiver: Receiver<Sample>, config: ExporterConfig) {
         // Account for any samples dropped at the producer side. We can't see them directly,
         // but a backlog of len() == capacity implies producers may be try_send-failing.
         let window = Instant::now().saturating_duration_since(window_start);
-        let snapshot = agg.flush(window, &config.tags);
+        let snapshot = agg.flush(window, &config.device);
         window_start = Instant::now();
         next_flush = window_start + config.interval;
 

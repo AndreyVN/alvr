@@ -822,7 +822,7 @@ fn connection_pipeline(
                 interval: Duration::from_millis(config.interval_ms),
                 timeout: Duration::from_millis(config.timeout_ms),
                 headers: config.headers.clone(),
-                tags: config.tags.iter().cloned().collect(),
+                device: config.device.clone(),
             };
             let handle = crate::metrics_exporter::spawn_exporter_thread(rx, exporter_config);
             (Some(tx), Some(handle))

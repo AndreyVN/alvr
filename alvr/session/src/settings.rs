@@ -1638,10 +1638,11 @@ pub struct MetricsExportConfig {
     pub headers: Vec<(String, String)>,
 
     #[schema(strings(
-        help = "Static key/value pairs that are copied verbatim into the JSON `tags` field of every \
-                snapshot. Useful for Grafana dimensions like host, headset, room."
+        display_name = "Device",
+        help = "Device label attached to every snapshot (e.g. headset model or player name). \
+                Appears as the `device` dimension in Grafana."
     ))]
-    pub tags: Vec<(String, String)>,
+    pub device: String,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2345,12 +2346,7 @@ pub fn session_settings_default() -> SettingsDefault {
                         value: "".into(),
                         content: vec![],
                     },
-                    tags: DictionaryDefault {
-                        gui_collapsed: true,
-                        key: "".into(),
-                        value: "".into(),
-                        content: vec![],
-                    },
+                    device: "".into(),
                 },
             },
         },
