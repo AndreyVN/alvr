@@ -5,11 +5,13 @@ use super::{
 use crate::dashboard::ServerRequest;
 use alvr_gui_common::{DisplayString, theme};
 use alvr_session::{SessionSettings, Settings};
-use eframe::egui::{Align, Frame, Grid, Layout, RichText, ScrollArea, Ui};
+use eframe::egui::{Align, Align2, Frame, Grid, Layout, RichText, ScrollArea, Ui, Vec2};
 #[cfg(target_arch = "wasm32")]
 use instant::Instant;
 use serde_json as json;
 use settings_schema::SchemaNode;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -36,6 +38,11 @@ pub struct SettingsTab {
     top_level_entries: Vec<TopLevelEntry>,
     session_settings_json: Option<json::Value>,
     last_update_instant: Instant,
+    #[cfg(not(target_arch = "wasm32"))]
+    metrics_test_result: Arc<Mutex<Option<String>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    metrics_test_running: bool,
+    metrics_dialog_text: Option<String>,
 }
 
 impl SettingsTab {
@@ -83,6 +90,11 @@ impl SettingsTab {
             top_level_entries,
             session_settings_json: None,
             last_update_instant: Instant::now(),
+            #[cfg(not(target_arch = "wasm32"))]
+            metrics_test_result: Arc::new(Mutex::new(None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            metrics_test_running: false,
+            metrics_dialog_text: None,
         }
     }
 
@@ -111,6 +123,15 @@ impl SettingsTab {
 
     pub fn ui(&mut self, ui: &mut Ui) -> Vec<ServerRequest> {
         let mut requests = vec![];
+
+        // Collect result from the background test thread.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.metrics_test_running {
+            if let Some(text) = self.metrics_test_result.lock().unwrap().take() {
+                self.metrics_dialog_text = Some(text);
+                self.metrics_test_running = false;
+            }
+        }
 
         let now = Instant::now();
         if now > self.last_update_instant + DATA_UPDATE_INTERVAL {
@@ -220,6 +241,89 @@ impl SettingsTab {
 
         if !path_value_pairs.is_empty() {
             requests.push(ServerRequest::SetSessionValues(path_value_pairs));
+        }
+
+        // "Test" button shown at the bottom of the Extra tab.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.selected_top_tab_id == "extra" {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            let url_opt = self
+                .session_settings_json
+                .as_ref()
+                .and_then(|j| j.pointer("/extra/metrics_export/content/url"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+
+            let button_label = if self.metrics_test_running {
+                "Testing…"
+            } else {
+                "Test metrics connection"
+            };
+            let enabled = url_opt.is_some() && !self.metrics_test_running;
+
+            if ui
+                .add_enabled(enabled, eframe::egui::Button::new(button_label))
+                .clicked()
+            {
+                let url = url_opt.unwrap();
+                let result_arc = Arc::clone(&self.metrics_test_result);
+                let ctx = ui.ctx().clone();
+                self.metrics_test_running = true;
+
+                std::thread::spawn(move || {
+                    let payload = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339_opts(
+                            chrono::SecondsFormat::Millis, true),
+                        "device": "test",
+                        "window_ms": 1000_u64,
+                        "frames": 0_u32,
+                        "dropped_samples": 0_u64,
+                        "latency_ms": {},
+                        "fps": {},
+                        "throughput": {
+                            "video_packets_per_sec": 0.0_f64,
+                            "video_mbits_per_sec": 0.0_f64
+                        },
+                        "totals": {
+                            "video_packets": 0_u64,
+                            "video_mbytes": 0_u64
+                        },
+                        "bitrate_directives": {
+                            "requested_bitrate_bps": 0.0_f32
+                        },
+                        "exporter": { "failed_posts": 0_u64 }
+                    });
+
+                    let text = match ureq::post(&url).send_json(&payload) {
+                        Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
+                        Err(e) => format!("✗  {e}"),
+                    };
+
+                    *result_arc.lock().unwrap() = Some(text);
+                    ctx.request_repaint();
+                });
+            }
+        }
+
+        // Dialog shown when a test result is ready.
+        if let Some(text) = self.metrics_dialog_text.clone() {
+            let mut open = true;
+            let resp = eframe::egui::Window::new("Metrics connection test")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(&text);
+                    ui.add_space(8.0);
+                    ui.button("Close").clicked()
+                });
+            if !open || resp.is_some_and(|r| r.inner == Some(true)) {
+                self.metrics_dialog_text = None;
+            }
         }
 
         requests
