@@ -90,6 +90,16 @@ pub struct MemorySample {
     pub swap_used_mb: u64,
     /// Working set of the streamer process in MB, when found.
     pub vrserver_working_set_mb: Option<u64>,
+    /// Per-DIMM info reported by LHM (`/memory/dimm/*`).
+    pub dimms: Vec<DimmSample>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DimmSample {
+    /// Module identifier as reported by LHM (vendor + part + slot index).
+    pub slot: String,
+    pub capacity_gb: Option<f32>,
+    pub temp_c: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

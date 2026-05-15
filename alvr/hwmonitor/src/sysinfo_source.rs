@@ -69,6 +69,7 @@ impl SysinfoSource {
             swap_total_mb: self.sys.total_swap() / MB,
             swap_used_mb: self.sys.used_swap() / MB,
             vrserver_working_set_mb: self.find_vrserver_working_set_mb(),
+            dimms: Vec::new(),
         }
     }
 

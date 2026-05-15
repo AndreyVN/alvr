@@ -45,6 +45,21 @@ pub struct CpuSensors {
 }
 
 #[derive(Default, Debug, Clone)]
+pub struct LhmReadings {
+    pub cpu: CpuSensors,
+    pub gpu: GpuSensors,
+    pub storages: Vec<StorageSensors>,
+    pub dimms: Vec<DimmSensors>,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct DimmSensors {
+    pub slot: String,
+    pub capacity_gb: Option<f32>,
+    pub temp_c: Option<f32>,
+}
+
+#[derive(Default, Debug, Clone)]
 pub struct StorageSensors {
     pub device: String,
     pub temp_c: Option<f32>,
@@ -91,20 +106,20 @@ impl LhmSource {
         })
     }
 
-    pub fn read(&self) -> anyhow::Result<(CpuSensors, GpuSensors, Vec<StorageSensors>)> {
+    pub fn read(&self) -> anyhow::Result<LhmReadings> {
         let root: Node = self.agent.get(&self.url).call()?.body_mut().read_json()?;
-        let (cpu, gpu, storages) = classify(&root);
+        let readings = classify(&root);
         debug!(
-            "hwmonitor: LHM pkg_temp={:?} pkg_pwr={:?} cores_pwr={:?} cpu_fans={} | gpu_temp={:?} gpu_pwr={:?} | storages={}",
-            cpu.package_temp_c,
-            cpu.package_power_w,
-            cpu.cores_power_w,
-            cpu.fans_rpm.len(),
-            gpu.temp_c,
-            gpu.power_w,
-            storages.len(),
+            "hwmonitor: LHM pkg_temp={:?} pkg_pwr={:?} cores_pwr={:?} | gpu_temp={:?} gpu_pwr={:?} | storages={} dimms={}",
+            readings.cpu.package_temp_c,
+            readings.cpu.package_power_w,
+            readings.cpu.cores_power_w,
+            readings.gpu.temp_c,
+            readings.gpu.power_w,
+            readings.storages.len(),
+            readings.dimms.len(),
         );
-        Ok((cpu, gpu, storages))
+        Ok(readings)
     }
 }
 
@@ -114,6 +129,7 @@ enum HardwareKind {
     Gpu,
     Mainboard,
     Storage,
+    MemoryDimm,
     Unknown,
 }
 
@@ -131,6 +147,8 @@ impl HardwareKind {
             || id.starts_with("/storage/")
         {
             Self::Storage
+        } else if id.starts_with("/memory/dimm/") {
+            Self::MemoryDimm
         } else {
             Self::Unknown
         }
@@ -149,11 +167,13 @@ struct Scratch {
     /// pushes a new entry every time it enters a `/nvme/*` or `/hdd/*` node
     /// and routes that subtree's leaves into the last entry.
     storages: Vec<StorageSensors>,
+    /// Same pattern for `/memory/dimm/*`.
+    dimms: Vec<DimmSensors>,
 }
 
 /// Walks the LHM tree using `HardwareId` to track which hardware we're inside
 /// and `Type` to decide how to interpret each leaf.
-fn classify(root: &Node) -> (CpuSensors, GpuSensors, Vec<StorageSensors>) {
+fn classify(root: &Node) -> LhmReadings {
     let mut cpu = CpuSensors::default();
     let mut gpu = GpuSensors::default();
     let mut scratch = Scratch::default();
@@ -179,7 +199,12 @@ fn classify(root: &Node) -> (CpuSensors, GpuSensors, Vec<StorageSensors>) {
         };
     }
 
-    (cpu, gpu, scratch.storages)
+    LhmReadings {
+        cpu,
+        gpu,
+        storages: scratch.storages,
+        dimms: scratch.dimms,
+    }
 }
 
 fn walk(
@@ -205,6 +230,12 @@ fn walk(
                     // subtree route to the last (just-pushed) entry.
                     scratch.storages.push(StorageSensors {
                         device: node.text.clone(),
+                        ..Default::default()
+                    });
+                }
+                HardwareKind::MemoryDimm => {
+                    scratch.dimms.push(DimmSensors {
+                        slot: node.text.clone(),
                         ..Default::default()
                     });
                 }
@@ -257,6 +288,19 @@ fn apply_leaf(
                     }
                 }
             }
+            HardwareKind::MemoryDimm => {
+                // Skip the static sensor metadata exposed by LHM
+                // ("Temperature Sensor Resolution", "Thermal Sensor *Limit").
+                if name_l.contains("limit")
+                    || name_l.contains("resolution")
+                    || name_l.contains("threshold")
+                {
+                    return;
+                }
+                if let Some(d) = scratch.dimms.last_mut() {
+                    d.temp_c = Some(value);
+                }
+            }
             HardwareKind::Unknown => {}
         },
         "Fan" => match kind {
@@ -268,7 +312,7 @@ fn apply_leaf(
                     cpu.fans_rpm.push((node.text.clone(), value as u32));
                 }
             }
-            HardwareKind::Storage | HardwareKind::Unknown => {}
+            HardwareKind::Storage | HardwareKind::MemoryDimm | HardwareKind::Unknown => {}
         },
         "Power" => match kind {
             HardwareKind::Cpu => {
@@ -378,6 +422,14 @@ fn apply_leaf(
                 } else if name_l == "free space" {
                     s.free_gb = Some(gb);
                 }
+            }
+        }
+        "Data" | "SmallData" if matches!(kind, HardwareKind::MemoryDimm) => {
+            if name_l == "capacity"
+                && let Some(gb) = parse_data_gb(&node.value)
+                && let Some(d) = scratch.dimms.last_mut()
+            {
+                d.capacity_gb = Some(gb);
             }
         }
         _ => {}

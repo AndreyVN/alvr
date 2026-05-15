@@ -1,6 +1,6 @@
 use alvr_hwmonitor::{
-    CpuSample, GpuSample, Hwmonitor, HwmonitorConfig, MemorySample, NamedValue, NetSample,
-    Snapshot, StorageSample,
+    CpuSample, DimmSample, GpuSample, Hwmonitor, HwmonitorConfig, MemorySample, NamedValue,
+    NetSample, Snapshot, StorageSample,
 };
 use eframe::egui::{CollapsingHeader, Grid, RichText, ScrollArea, Ui};
 use std::time::Duration;
@@ -206,6 +206,34 @@ impl HwmonitorTab {
                             .unwrap_or_else(|| "—".to_string()),
                     );
                 });
+
+                if !mem.dimms.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("DIMMs").strong());
+                    self.draw_dimms(ui, &mem.dimms);
+                }
+            });
+    }
+
+    fn draw_dimms(&self, ui: &mut Ui, dimms: &[DimmSample]) {
+        Grid::new("hw_dimms")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label(RichText::new("Slot").strong());
+                ui.label(RichText::new("Capacity").strong());
+                ui.label(RichText::new("Temperature").strong());
+                ui.end_row();
+                for d in dimms {
+                    ui.label(&d.slot);
+                    ui.label(
+                        d.capacity_gb
+                            .map(|g| format!("{g:.1} GB"))
+                            .unwrap_or_else(|| "—".to_string()),
+                    );
+                    ui.label(opt_temp(d.temp_c));
+                    ui.end_row();
+                }
             });
     }
 

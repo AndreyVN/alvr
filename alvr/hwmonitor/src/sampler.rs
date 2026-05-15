@@ -4,7 +4,7 @@
 use crate::lhm::{LhmSource, DEFAULT_URL as LHM_DEFAULT_URL};
 use crate::nvidia_smi::NvidiaSmiSource;
 use crate::sysinfo_source::SysinfoSource;
-use crate::{NamedValue, Snapshot, StorageSample};
+use crate::{DimmSample, NamedValue, Snapshot, StorageSample};
 use alvr_common::{info, warn};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -142,20 +142,34 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
 
         let mut cpu = sysinfo.cpu();
         let mut gpu = nvidia.as_ref().and_then(|n| n.latest());
-        let memory = Some(sysinfo.memory());
+        let mut memory = Some(sysinfo.memory());
         let mut storage = Vec::new();
         #[allow(unused_mut)]
         let mut network = Vec::new();
 
         if let Some(l) = lhm.as_ref() {
             match l.read() {
-                Ok((cpu_sensors, gpu_sensors, storage_sensors)) => {
+                Ok(readings) => {
+                    let cpu_sensors = readings.cpu;
+                    let gpu_sensors = readings.gpu;
+                    let storage_sensors = readings.storages;
+                    let dimm_sensors = readings.dimms;
                     cpu.package_temp_c = cpu_sensors.package_temp_c;
                     cpu.per_core_temp_c = cpu_sensors.per_core_temp_c;
                     cpu.package_power_w = cpu_sensors.package_power_w;
                     cpu.cores_power_w = cpu_sensors.cores_power_w;
                     cpu.per_core_power_w = cpu_sensors.per_core_power_w;
                     cpu.fans_rpm = named_values(cpu_sensors.fans_rpm);
+                    if let Some(m) = memory.as_mut() {
+                        m.dimms = dimm_sensors
+                            .into_iter()
+                            .map(|d| DimmSample {
+                                slot: d.slot,
+                                capacity_gb: d.capacity_gb,
+                                temp_c: d.temp_c,
+                            })
+                            .collect();
+                    }
                     let g = gpu.get_or_insert_with(Default::default);
                     // Prefer nvidia-smi values where present (more accurate);
                     // fall back to LHM (covers AMD / Intel / no-NVIDIA hosts).
