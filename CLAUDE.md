@@ -29,7 +29,9 @@ cargo xtask bump --version <X.Y.Z> [--nightly]
 cargo xtask kill-oculus                                             # Windows only: kills OVR* processes before debugging
 ```
 
-Important flags: `--gpl` bundles FFmpeg on Windows (always on for Linux); `--no-nvidia` strips NVENC support on Linux `prepare-deps`; `--ci` enables CI tweaks; `--keep-config` preserves `session.json` between rebuilds. Artifacts land in `./build/` (not `./target/`); native deps live in `./deps/` and are managed by `prepare-deps` — never modify them by hand.
+Important flags: `--gpl` bundles FFmpeg on Windows (always on for Linux); `--no-nvidia` strips NVENC support on Linux `prepare-deps`; `--ci` enables CI tweaks — most importantly it skips the elevated `choco install` step in Windows `prepare-deps`, so use it when the host already has zip/unzip/llvm/vulkan-sdk/pkgconfiglite/cmake on PATH (no UAC prompt that way); `--keep-config` preserves `session.json` between rebuilds. Artifacts land in `./build/` (not `./target/`); native deps live in `./deps/` and are managed by `prepare-deps` — never modify them by hand.
+
+For the exact list of host-side tools, versions, and env vars that make these commands work on Windows, see `install.txt` at the repo root (toolchain audit from one fully-working setup). It covers VS Build Tools components (incl. the ATL workload that Intel VPL needs), Chocolatey + its packages, the Android NDK r26b + full SDK layout (`ANDROID_HOME` with `platforms;android-32` + `build-tools;32.0.0` — `cargo-apk` requires both, not just the NDK), and the gotchas hit while bootstrapping.
 
 ## Core verification & run commands
 

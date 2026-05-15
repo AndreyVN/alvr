@@ -17,6 +17,7 @@ The user spec mentions `alvr/client` and `alvr/vr_compositor`; those names don't
 ## Coding rules
 
 - The Android client is built via `cargo xtask build-client` (uses `cargo-apk`). The `package.metadata.android` block in `alvr/client_openxr/Cargo.toml` is the single source of truth for permissions, store features (Meta/Pico/Vive/YVR/AndroidXR), `min_sdk_version` (28), and the runtime library directory (`../../deps/android_openxr`). Don't fork manifest values into another file.
+- Toolchain requirements: `ANDROID_NDK_HOME` (NDK r26b — pinned by CI) **and** `ANDROID_HOME` pointing at a full SDK with `platforms;android-32` + `build-tools;32.0.0`. `cargo-apk` needs `aapt2` from build-tools and `android.jar` from platforms — having only the NDK fails with "Android SDK is not found". A JDK (17 is fine) must be on `PATH`/`JAVA_HOME` because cargo-apk signs the APK with `keytool`/`jarsigner`. See `install.txt` for the full host setup record.
 - `android-activity` is **pinned to `=0.6.0`** in `alvr/client_openxr/Cargo.toml` because 0.6.1 changed `ndk-context` initialization in a way that freezes the app. Don't bump without verifying on hardware.
 - Frame-critical paths must avoid allocation on the render thread. `video_decoder/android.rs` already runs a dedicated `dequeue_thread`; new decode/render work should follow that split.
 - All logging is `alvr_common::{info, warn, error, debug}`. The Android log backend forwards through the `log` crate to Android logcat; the tag is `ALVR` — see `alvr_client_core::logging_backend`.

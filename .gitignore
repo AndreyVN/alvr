@@ -73,3 +73,7 @@ CMakeLists.txt
 cmake-build-debug/
 
 *.jks
+
+# Credentials — never commit
+metrics/.env
+.env
