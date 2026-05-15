@@ -814,7 +814,7 @@ fn connection_pipeline(
     }
     dbg_connection!("connection_pipeline: Got StreamReady packet");
 
-    let (metrics_sender, metrics_exporter_thread) =
+    let (metrics_sender, metrics_exporter_thread, hwmonitor_exporter_thread) =
         if let Switch::Enabled(config) = &initial_settings.metrics.metrics_export {
             let (tx, rx) = crate::metrics_exporter::channel();
             let exporter_config = crate::metrics_exporter::ExporterConfig {
@@ -822,12 +822,26 @@ fn connection_pipeline(
                 interval: Duration::from_millis(config.interval_ms),
                 timeout: Duration::from_millis(config.timeout_ms),
                 headers: config.headers.clone(),
-                device: config.device.clone(),
+                host: config.host.clone(),
             };
             let handle = crate::metrics_exporter::spawn_exporter_thread(rx, exporter_config);
-            (Some(tx), Some(handle))
+
+            let hw_handle = if !config.hw_url.is_empty() {
+                let hw_config = crate::hwmonitor_exporter::HwExporterConfig {
+                    url: config.hw_url.clone(),
+                    interval: Duration::from_millis(config.interval_ms),
+                    timeout: Duration::from_millis(config.timeout_ms),
+                    headers: config.headers.clone(),
+                    host: config.host.clone(),
+                };
+                Some(crate::hwmonitor_exporter::spawn(hw_config))
+            } else {
+                None
+            };
+
+            (Some(tx), Some(handle), hw_handle)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
     *ctx.statistics_manager.write() = Some(StatisticsManager::new(
@@ -1457,6 +1471,9 @@ fn connection_pipeline(
     if let Some(handle) = metrics_exporter_thread {
         *ctx.statistics_manager.write() = None;
         handle.join().ok();
+    }
+    if let Some(handle) = hwmonitor_exporter_thread {
+        handle.shutdown();
     }
 
     ctx.events_sender

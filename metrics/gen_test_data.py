@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _ssh import load_env
 
 
-DEVICES = [f"Device{n}" for n in range(1, 11)]
+HOSTS = [f"Host{n}" for n in range(1, 11)]
 
 
 def acc(base: float, spread: float = 0.1) -> dict:
@@ -42,7 +42,7 @@ def make_snapshot(ts: datetime, i: int) -> dict:
 
     return {
         "ts": ts.isoformat(),
-        "device": DEVICES[i % len(DEVICES)],
+        "host": HOSTS[i % len(HOSTS)],
         "window_ms": 1000,
         "frames": random.randint(70, 75),
         "dropped_samples": random.randint(0, 2),

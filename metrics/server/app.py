@@ -1,8 +1,9 @@
-"""FastAPI server for ALVR streaming metrics.
+"""FastAPI server for ALVR streaming + hardware metrics.
 
-The ALVR server's metrics exporter POSTs aggregated snapshots to
-`metrics_export.url`. Point that URL at this service (POST /metrics) and
-each snapshot is flattened and inserted into `alvr.streaming_metrics`.
+Two exporters on the streamer side push to this service:
+
+* `metrics_export.url`     → POST /metrics      → alvr.streaming_metrics
+* `metrics_export.hw_url`  → POST /hw_metrics   → alvr.hw_* tables
 
 Run:
     pip install -r metrics/server/requirements.txt
@@ -19,12 +20,12 @@ import logging
 
 from fastapi import FastAPI, HTTPException, Response, status
 
-from .db import get_client, insert
-from .models import Snapshot
+from .db import get_client, insert, insert_hw
+from .models import HwSnapshot, Snapshot
 
 log = logging.getLogger("alvr.metrics.ingest")
 
-app = FastAPI(title="ALVR metrics ingest", version="1.0.0")
+app = FastAPI(title="ALVR metrics ingest", version="1.1.0")
 
 
 @app.get("/health")
@@ -42,5 +43,15 @@ def ingest_metrics(snapshot: Snapshot) -> Response:
         insert(snapshot)
     except Exception as e:
         log.exception("clickhouse insert failed")
+        raise HTTPException(status_code=500, detail=f"insert failed: {e}") from e
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/hw_metrics", status_code=status.HTTP_204_NO_CONTENT)
+def ingest_hw_metrics(snapshot: HwSnapshot) -> Response:
+    try:
+        insert_hw(snapshot)
+    except Exception as e:
+        log.exception("clickhouse hw insert failed")
         raise HTTPException(status_code=500, detail=f"insert failed: {e}") from e
     return Response(status_code=status.HTTP_204_NO_CONTENT)

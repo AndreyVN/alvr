@@ -4,8 +4,8 @@ Steps:
   1. Install grafana-clickhouse-datasource plugin on the server (via SSH)
   2. Create / update the ClickHouse data source in Grafana
   3. Create / update the ALVR dashboard:
-       - $device variable: multi-select dropdown with an "All" option
-       - Panel: total pipeline latency over time, one series per device
+       - $host variable: multi-select dropdown with an "All" option
+       - Panel: total pipeline latency over time, one series per host
 
 Usage:
     python metrics/setup_grafana.py
@@ -101,11 +101,11 @@ def build_dashboard(ds_uid: str) -> dict:
     ds_ref = {"type": "grafana-clickhouse-datasource", "uid": ds_uid}
 
     variable = {
-        "name": "device",
-        "label": "Device",
+        "name": "host",
+        "label": "Host",
         "type": "query",
         "datasource": ds_ref,
-        "query": "SELECT DISTINCT device FROM alvr.streaming_metrics ORDER BY device",
+        "query": "SELECT DISTINCT host FROM alvr.streaming_metrics ORDER BY host",
         "multi": True,
         "includeAll": True,
         "allValue": "",
@@ -116,7 +116,7 @@ def build_dashboard(ds_uid: str) -> dict:
         "hide": 0,
     }
 
-    DF = "device IN ($device)"   # device filter
+    HF = "host IN ($host)"       # host filter
     TF = "$__timeFilter(ts)"     # time filter
     T  = "toStartOfMinute(ts) AS time"
 
@@ -157,19 +157,19 @@ def build_dashboard(ds_uid: str) -> dict:
             "panels": [],
         }
 
-    # per-device time series (one series per device)
+    # per-host time series (one series per host)
     def dev(col: str, agg: str = "avg") -> str:
-        return (f"SELECT {T}, device, {agg}({col}) AS value\n"
+        return (f"SELECT {T}, host, {agg}({col}) AS value\n"
                 f"FROM alvr.streaming_metrics\n"
-                f"WHERE {TF} AND {DF}\n"
-                f"GROUP BY time, device\nORDER BY time")
+                f"WHERE {TF} AND {HF}\n"
+                f"GROUP BY time, host\nORDER BY time")
 
-    # multi-column breakdown (one series per metric column, averaged across devices)
+    # multi-column breakdown (one series per metric column, averaged across hosts)
     def breakdown(cols: dict[str, str]) -> str:
         selects = ",\n    ".join(f"avg({col}) AS \"{label}\"" for col, label in cols.items())
         return (f"SELECT {T},\n    {selects}\n"
                 f"FROM alvr.streaming_metrics\n"
-                f"WHERE {TF} AND {DF}\n"
+                f"WHERE {TF} AND {HF}\n"
                 f"GROUP BY time\nORDER BY time")
 
     STAGES = {
@@ -190,7 +190,7 @@ def build_dashboard(ds_uid: str) -> dict:
         # ── Latency ────────────────────────────────────────────────────────
         row_panel("Latency", 100, 0),
 
-        ts_panel("Total Pipeline Latency — per device (avg ms)",
+        ts_panel("Total Pipeline Latency — per host (avg ms)",
                  dev("total_pipeline_avg_ms"), "ms", 1, 0, 1, 24, 8),
 
         row_panel("Latency — Average", 110, 9),
@@ -317,7 +317,7 @@ def main() -> None:
     url = setup_dashboard(grafana, gf_user, gf_pass, ds_uid)
 
     print(f"\nDone.  Dashboard -> http://{host}/grafana{url}")
-    print(f"       Use the Device dropdown to filter by device or select All.")
+    print(f"       Use the Host dropdown to filter by host or select All.")
 
 
 if __name__ == "__main__":

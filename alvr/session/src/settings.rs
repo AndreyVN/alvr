@@ -1638,11 +1638,20 @@ pub struct MetricsExportConfig {
     pub headers: Vec<(String, String)>,
 
     #[schema(strings(
-        display_name = "Device",
-        help = "Device label attached to every snapshot (e.g. headset model or player name). \
-                Appears as the `device` dimension in Grafana."
+        display_name = "Host",
+        help = "Host label attached to every snapshot (e.g. PC name). \
+                Acts as the primary aggregation key across the `streaming_metrics` and `hw_*` \
+                tables in ClickHouse."
     ))]
-    pub device: String,
+    pub host: String,
+
+    #[schema(strings(
+        display_name = "Hardware metrics endpoint URL",
+        help = "Full URL of the HTTP endpoint that will receive a JSON POST of hardware \
+                telemetry (CPU/GPU/DRAM/storage/network) every interval. Leave empty to \
+                disable hardware metrics export."
+    ))]
+    pub hw_url: String,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2353,7 +2362,8 @@ pub fn session_settings_default() -> SettingsDefault {
                         value: "".into(),
                         content: vec![],
                     },
-                    device: "".into(),
+                    host: "".into(),
+                    hw_url: "http://127.0.0.1:8086/api/hw_metrics".into(),
                 },
             },
         },

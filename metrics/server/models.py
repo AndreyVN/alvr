@@ -1,16 +1,26 @@
-"""Pydantic models for the ALVR metrics snapshot payload.
+"""Pydantic models for ALVR metrics ingest payloads.
 
-Mirrors the JSON produced by `Aggregator::flush` in
-`alvr/server_core/src/metrics_exporter.rs`. Fields the exporter may omit
-when the corresponding accumulator is empty are typed as Optional.
+Two endpoints, two top-level payloads:
+
+* `Snapshot`  — streaming-stat snapshot pushed by
+  `alvr/server_core/src/metrics_exporter.rs::Aggregator::flush`.
+* `HwSnapshot` — host hardware telemetry pushed by
+  `alvr/server_core/src/hwmonitor_exporter.rs::build_payload`. Each
+  section maps to its own ClickHouse table; all are joined by `host`.
+
+Fields the exporter may omit when the corresponding source is unavailable
+are typed as Optional.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# ─────────────────────────── streaming metrics ──────────────────────────
 
 
 class AccStats(BaseModel):
@@ -76,7 +86,7 @@ class Snapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     ts: datetime
-    device: str = ""
+    host: str = ""
     window_ms: int
     frames: int
     dropped_samples: int
@@ -87,3 +97,92 @@ class Snapshot(BaseModel):
     battery: Optional[Battery] = None
     bitrate_directives: BitrateDirectives
     exporter: ExporterHealth
+
+
+# ─────────────────────────── hardware metrics ───────────────────────────
+
+
+class HwCpu(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    total_pct: Optional[float] = None
+    freq_mhz: Optional[int] = None
+    vrserver_pct: Optional[float] = None
+    package_temp_c: Optional[float] = None
+    package_power_w: Optional[float] = None
+    cores_power_w: Optional[float] = None
+
+
+class HwCpuCore(BaseModel):
+    index: int
+    load_pct: Optional[float] = None
+    temp_c: Optional[float] = None
+    power_w: Optional[float] = None
+
+
+class HwGpu(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: Optional[str] = None
+    util_pct: Optional[float] = None
+    encoder_util_pct: Optional[float] = None
+    decoder_util_pct: Optional[float] = None
+    mem_used_mb: Optional[int] = None
+    mem_total_mb: Optional[int] = None
+    temp_c: Optional[float] = None
+    power_w: Optional[float] = None
+    power_limit_w: Optional[float] = None
+    clock_graphics_mhz: Optional[int] = None
+    clock_memory_mhz: Optional[int] = None
+    clock_video_mhz: Optional[int] = None
+    fan_pct: Optional[float] = None
+
+
+class HwDram(BaseModel):
+    total_mb: int
+    used_mb: int
+    available_mb: int
+    used_pct: float
+    swap_total_mb: int
+    swap_used_mb: int
+    vrserver_working_set_mb: Optional[int] = None
+
+
+class HwDimm(BaseModel):
+    slot: str
+    capacity_gb: Optional[float] = None
+    temp_c: Optional[float] = None
+
+
+class HwStorage(BaseModel):
+    device: str
+    temp_c: Optional[float] = None
+    used_pct: Optional[float] = None
+    life_left_pct: Optional[float] = None
+    total_gb: Optional[float] = None
+    free_gb: Optional[float] = None
+
+
+class HwNetwork(BaseModel):
+    adapter: str
+    bytes_sent_per_sec: int
+    bytes_recv_per_sec: int
+    packets_sent_per_sec: int
+    packets_recv_per_sec: int
+    outbound_errors: int
+    outbound_discarded: int
+    current_bandwidth_bps: int
+
+
+class HwSnapshot(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ts: datetime
+    host: str = ""
+    cpu: Optional[HwCpu] = None
+    cpu_cores: List[HwCpuCore] = Field(default_factory=list)
+    gpu: Optional[HwGpu] = None
+    dram: Optional[HwDram] = None
+    dimms: List[HwDimm] = Field(default_factory=list)
+    storage: List[HwStorage] = Field(default_factory=list)
+    network: List[HwNetwork] = Field(default_factory=list)

@@ -3,6 +3,7 @@ mod c_api;
 mod connection;
 mod hand_gestures;
 mod haptics;
+mod hwmonitor_exporter;
 mod input_mapping;
 mod logging_backend;
 mod metrics_exporter;

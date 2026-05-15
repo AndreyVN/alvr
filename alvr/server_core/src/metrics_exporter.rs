@@ -27,7 +27,7 @@ pub struct ExporterConfig {
     pub interval: Duration,
     pub timeout: Duration,
     pub headers: Vec<(String, String)>,
-    pub device: String,
+    pub host: String,
 }
 
 #[derive(Default)]
@@ -144,7 +144,7 @@ impl Aggregator {
         }
     }
 
-    fn flush(&mut self, window: Duration, device: &str) -> Value {
+    fn flush(&mut self, window: Duration, host: &str) -> Value {
         let window_secs = window.as_secs_f64().max(f64::EPSILON);
         let packets_in_window = self
             .video_packets_total
@@ -199,7 +199,7 @@ impl Aggregator {
 
         let snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            "device": device,
+            "host": host,
             "window_ms": window.as_millis() as u64,
             "frames": self.frames,
             "dropped_samples": self.dropped_samples,
@@ -304,7 +304,7 @@ fn exporter_loop(receiver: Receiver<Sample>, config: ExporterConfig) {
         // Account for any samples dropped at the producer side. We can't see them directly,
         // but a backlog of len() == capacity implies producers may be try_send-failing.
         let window = Instant::now().saturating_duration_since(window_start);
-        let snapshot = agg.flush(window, &config.device);
+        let snapshot = agg.flush(window, &config.host);
         window_start = Instant::now();
         next_flush = window_start + config.interval;
 

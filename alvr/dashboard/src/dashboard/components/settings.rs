@@ -271,7 +271,7 @@ impl SettingsTab {
                                 let payload = serde_json::json!({
                                     "ts": chrono::Utc::now().to_rfc3339_opts(
                                         chrono::SecondsFormat::Millis, true),
-                                    "device": "test",
+                                    "host": "test",
                                     "window_ms": 1000_u64,
                                     "frames": 0_u32,
                                     "dropped_samples": 0_u64,

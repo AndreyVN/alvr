@@ -1,41 +1,31 @@
--- ClickHouse schema for ALVR streaming metrics.
+-- ClickHouse schema for ALVR streaming + host hardware metrics.
 --
--- Stores one row per snapshot pushed by the server-side metrics exporter
--- (alvr/server_core/src/metrics_exporter.rs). The exporter POSTs a JSON
--- document every `extra.metrics_export.interval_ms`; this schema mirrors
--- every numeric field in that document so a single INSERT per snapshot
--- captures the full payload without re-shaping at ingest time.
+-- The streamer side has two exporters (`alvr/server_core/src/metrics_exporter.rs`
+-- and `alvr/server_core/src/hwmonitor_exporter.rs`). Each POSTs a JSON
+-- document every `extra.metrics_export.interval_ms`. The streaming exporter
+-- targets `streaming_metrics`; the hardware exporter is fanned out into
+-- the `hw_*` tables. All tables share a `host` column, which is the
+-- aggregation key for joins/dashboards across resource types.
 --
 -- Usage:
 --   clickhouse-client --multiquery < metrics/clickhouse_schema.sql
---
--- Snapshot shape (see metrics_exporter::Aggregator::flush):
---   {
---     "ts": "<RFC3339 ms>", "tags": {...}, "window_ms": u64,
---     "frames": u32, "dropped_samples": u64,
---     "latency_ms": { "<stage>": {"min","max","avg","n"} ... },
---     "fps":        { "client"|"server": {"min","max","avg","n"} | null },
---     "throughput": { "throughput_bps"|"bitrate_bps": {min/max/avg/n} | null,
---                     "video_packets_per_sec": f64, "video_mbits_per_sec": f64 },
---     "totals":     { "video_packets": u64, "video_mbytes": u64 },
---     "battery":    { "hmd_pct": u32, "hmd_plugged": bool } | null,
---     "bitrate_directives": {...},
---     "exporter":   { "failed_posts": u64 }
---   }
 
 CREATE DATABASE IF NOT EXISTS alvr;
+
+-- ─────────────────────────────────────────────────────────────────────
+--                      STREAMING METRICS (per-frame stats)
+-- ─────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
 (
     -- ───── identity ─────
     ts                                      DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
-    device                                  LowCardinality(String),
+    host                                    LowCardinality(String),
     window_ms                               UInt64,
     frames                                  UInt32,
     dropped_samples                         UInt64,
 
     -- ───── latency_ms.<stage> (min / max / avg / n) ─────
-    -- A NULL min/max/avg means no frame sample arrived for this stage in the window.
     total_pipeline_min_ms                   Nullable(Float32),
     total_pipeline_max_ms                   Nullable(Float32),
     total_pipeline_avg_ms                   Nullable(Float32),
@@ -112,7 +102,7 @@ CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
 
     -- ───── battery (last value, NULL until first Battery sample) ─────
     battery_hmd_pct                         Nullable(UInt8),
-    battery_hmd_plugged                     Nullable(UInt8),  -- 0/1; ClickHouse has no Bool
+    battery_hmd_plugged                     Nullable(UInt8),
 
     -- ───── bitrate_directives (last value) ─────
     bd_scaled_calculated_throughput_bps     Nullable(Float32),
@@ -131,6 +121,154 @@ CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
-ORDER BY (device, ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- Rename `device` to `host` on existing deployments (no-op once renamed).
+ALTER TABLE alvr.streaming_metrics RENAME COLUMN IF EXISTS device TO host;
+
+
+-- ─────────────────────────────────────────────────────────────────────
+--                         HARDWARE METRICS
+-- One row per snapshot per host for the singleton tables, one row per
+-- (snapshot, dimension) for the per-N tables. Joined by (host, ts).
+-- ─────────────────────────────────────────────────────────────────────
+
+-- CPU aggregate (one row per snapshot).
+CREATE TABLE IF NOT EXISTS alvr.hw_cpu
+(
+    ts                  DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                LowCardinality(String),
+    total_pct           Nullable(Float32),
+    freq_mhz            Nullable(UInt32),
+    vrserver_pct        Nullable(Float32),
+    package_temp_c      Nullable(Float32),
+    package_power_w     Nullable(Float32),
+    cores_power_w       Nullable(Float32),
+    ingested_at         DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- CPU per-core (one row per (snapshot, core_index)).
+CREATE TABLE IF NOT EXISTS alvr.hw_cpu_cores
+(
+    ts                  DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                LowCardinality(String),
+    core_index          UInt16,
+    load_pct            Nullable(Float32),
+    temp_c              Nullable(Float32),
+    power_w             Nullable(Float32),
+    ingested_at         DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, core_index, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- GPU (one row per snapshot).
+CREATE TABLE IF NOT EXISTS alvr.hw_gpu
+(
+    ts                  DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                LowCardinality(String),
+    name                LowCardinality(String) DEFAULT '',
+    util_pct            Nullable(Float32),
+    encoder_util_pct    Nullable(Float32),
+    decoder_util_pct    Nullable(Float32),
+    mem_used_mb         Nullable(UInt32),
+    mem_total_mb        Nullable(UInt32),
+    temp_c              Nullable(Float32),
+    power_w             Nullable(Float32),
+    power_limit_w       Nullable(Float32),
+    clock_graphics_mhz  Nullable(UInt32),
+    clock_memory_mhz    Nullable(UInt32),
+    clock_video_mhz     Nullable(UInt32),
+    fan_pct             Nullable(Float32),
+    ingested_at         DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- DRAM aggregate (one row per snapshot).
+CREATE TABLE IF NOT EXISTS alvr.hw_dram
+(
+    ts                          DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                        LowCardinality(String),
+    total_mb                    UInt64,
+    used_mb                     UInt64,
+    available_mb                UInt64,
+    used_pct                    Float32,
+    swap_total_mb               UInt64,
+    swap_used_mb                UInt64,
+    vrserver_working_set_mb     Nullable(UInt64),
+    ingested_at                 DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- DIMMs (one row per (snapshot, slot)).
+CREATE TABLE IF NOT EXISTS alvr.hw_dimms
+(
+    ts                  DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                LowCardinality(String),
+    slot                LowCardinality(String),
+    capacity_gb         Nullable(Float32),
+    temp_c              Nullable(Float32),
+    ingested_at         DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, slot, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- Storage / HDD / SSD (one row per (snapshot, device)).
+CREATE TABLE IF NOT EXISTS alvr.hw_storage
+(
+    ts                  DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                LowCardinality(String),
+    device              LowCardinality(String),
+    temp_c              Nullable(Float32),
+    used_pct            Nullable(Float32),
+    life_left_pct       Nullable(Float32),
+    total_gb            Nullable(Float32),
+    free_gb             Nullable(Float32),
+    ingested_at         DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, device, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- Network (one row per (snapshot, adapter)).
+CREATE TABLE IF NOT EXISTS alvr.hw_network
+(
+    ts                      DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                    LowCardinality(String),
+    adapter                 LowCardinality(String),
+    bytes_sent_per_sec      UInt64,
+    bytes_recv_per_sec      UInt64,
+    packets_sent_per_sec    UInt64,
+    packets_recv_per_sec    UInt64,
+    outbound_errors         UInt64,
+    outbound_discarded      UInt64,
+    current_bandwidth_bps   UInt64,
+    ingested_at             DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, adapter, ts)
 TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
