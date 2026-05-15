@@ -235,77 +235,77 @@ impl SettingsTab {
 
                                 ui.end_row();
                             }
-                        })
+                        });
+
+                    // "Test metrics connection" button at the bottom of the Extra tab.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if self.selected_top_tab_id == "extra" {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        let url_opt = self
+                            .session_settings_json
+                            .as_ref()
+                            .and_then(|j| j.pointer("/extra/metrics_export/content/url"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+
+                        let button_label = if self.metrics_test_running {
+                            "Testing…"
+                        } else {
+                            "Test metrics connection"
+                        };
+                        let enabled = url_opt.is_some() && !self.metrics_test_running;
+
+                        if ui
+                            .add_enabled(enabled, eframe::egui::Button::new(button_label))
+                            .clicked()
+                        {
+                            let url = url_opt.unwrap();
+                            let result_arc = Arc::clone(&self.metrics_test_result);
+                            let ctx = ui.ctx().clone();
+                            self.metrics_test_running = true;
+
+                            std::thread::spawn(move || {
+                                let payload = serde_json::json!({
+                                    "ts": chrono::Utc::now().to_rfc3339_opts(
+                                        chrono::SecondsFormat::Millis, true),
+                                    "device": "test",
+                                    "window_ms": 1000_u64,
+                                    "frames": 0_u32,
+                                    "dropped_samples": 0_u64,
+                                    "latency_ms": {},
+                                    "fps": {},
+                                    "throughput": {
+                                        "video_packets_per_sec": 0.0_f64,
+                                        "video_mbits_per_sec": 0.0_f64
+                                    },
+                                    "totals": {
+                                        "video_packets": 0_u64,
+                                        "video_mbytes": 0_u64
+                                    },
+                                    "bitrate_directives": {
+                                        "requested_bitrate_bps": 0.0_f32
+                                    },
+                                    "exporter": { "failed_posts": 0_u64 }
+                                });
+
+                                let text = match ureq::post(&url).send_json(&payload) {
+                                    Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
+                                    Err(e) => format!("✗  {e}"),
+                                };
+
+                                *result_arc.lock().unwrap() = Some(text);
+                                ctx.request_repaint();
+                            });
+                        }
+                    }
                 });
         }
 
         if !path_value_pairs.is_empty() {
             requests.push(ServerRequest::SetSessionValues(path_value_pairs));
-        }
-
-        // "Test" button shown at the bottom of the Extra tab.
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.selected_top_tab_id == "extra" {
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            let url_opt = self
-                .session_settings_json
-                .as_ref()
-                .and_then(|j| j.pointer("/extra/metrics_export/content/url"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-
-            let button_label = if self.metrics_test_running {
-                "Testing…"
-            } else {
-                "Test metrics connection"
-            };
-            let enabled = url_opt.is_some() && !self.metrics_test_running;
-
-            if ui
-                .add_enabled(enabled, eframe::egui::Button::new(button_label))
-                .clicked()
-            {
-                let url = url_opt.unwrap();
-                let result_arc = Arc::clone(&self.metrics_test_result);
-                let ctx = ui.ctx().clone();
-                self.metrics_test_running = true;
-
-                std::thread::spawn(move || {
-                    let payload = serde_json::json!({
-                        "ts": chrono::Utc::now().to_rfc3339_opts(
-                            chrono::SecondsFormat::Millis, true),
-                        "device": "test",
-                        "window_ms": 1000_u64,
-                        "frames": 0_u32,
-                        "dropped_samples": 0_u64,
-                        "latency_ms": {},
-                        "fps": {},
-                        "throughput": {
-                            "video_packets_per_sec": 0.0_f64,
-                            "video_mbits_per_sec": 0.0_f64
-                        },
-                        "totals": {
-                            "video_packets": 0_u64,
-                            "video_mbytes": 0_u64
-                        },
-                        "bitrate_directives": {
-                            "requested_bitrate_bps": 0.0_f32
-                        },
-                        "exporter": { "failed_posts": 0_u64 }
-                    });
-
-                    let text = match ureq::post(&url).send_json(&payload) {
-                        Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
-                        Err(e) => format!("✗  {e}"),
-                    };
-
-                    *result_arc.lock().unwrap() = Some(text);
-                    ctx.request_repaint();
-                });
-            }
         }
 
         // Dialog shown when a test result is ready.
