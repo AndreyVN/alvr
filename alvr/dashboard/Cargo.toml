@@ -28,6 +28,7 @@ settings-schema = { git = "https://github.com/alvr-org/settings-schema-rs", rev 
 statrs = "0.18"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+alvr_hwmonitor.workspace = true
 alvr_server_io.workspace = true
 sysinfo = "0.38"
 tungstenite = "0.29"

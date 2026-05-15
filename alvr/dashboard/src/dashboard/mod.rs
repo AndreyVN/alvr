@@ -48,6 +48,8 @@ pub enum ServerRequest {
 enum Tab {
     Devices,
     Statistics,
+    #[cfg(not(target_arch = "wasm32"))]
+    Hwmonitor,
     Settings,
     #[cfg(not(target_arch = "wasm32"))]
     Installation,
@@ -65,6 +67,8 @@ pub struct Dashboard {
     tab_labels: BTreeMap<Tab, &'static str>,
     connections_tab: DevicesTab,
     statistics_tab: StatisticsTab,
+    #[cfg(not(target_arch = "wasm32"))]
+    hwmonitor_tab: components::HwmonitorTab,
     settings_tab: SettingsTab,
     #[cfg(not(target_arch = "wasm32"))]
     installation_tab: components::InstallationTab,
@@ -91,6 +95,8 @@ impl Dashboard {
             tab_labels: [
                 (Tab::Devices, "🔌  Devices"),
                 (Tab::Statistics, "📈  Statistics"),
+                #[cfg(not(target_arch = "wasm32"))]
+                (Tab::Hwmonitor, "🖥  HWMonitor"),
                 (Tab::Settings, "🔧  Settings"),
                 #[cfg(not(target_arch = "wasm32"))]
                 (Tab::Installation, "💾  Installation"),
@@ -102,6 +108,8 @@ impl Dashboard {
             .collect(),
             connections_tab: DevicesTab::new(),
             statistics_tab: StatisticsTab::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            hwmonitor_tab: components::HwmonitorTab::new(),
             settings_tab: SettingsTab::new(),
             #[cfg(not(target_arch = "wasm32"))]
             installation_tab: components::InstallationTab::new(),
@@ -304,6 +312,8 @@ impl eframe::App for Dashboard {
                                     requests.push(request);
                                 }
                             }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            Tab::Hwmonitor => self.hwmonitor_tab.ui(ui),
                             Tab::Settings => {
                                 requests.extend(self.settings_tab.ui(ui));
                             }

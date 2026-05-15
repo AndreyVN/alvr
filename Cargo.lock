@@ -294,6 +294,7 @@ dependencies = [
  "alvr_events",
  "alvr_filesystem",
  "alvr_gui_common",
+ "alvr_hwmonitor",
  "alvr_packets",
  "alvr_server_io",
  "alvr_session",
