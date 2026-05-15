@@ -3,7 +3,7 @@ use jni::{
     Env, JavaVM,
     errors::Result as JniResult,
     jni_sig, jni_str,
-    objects::{JObject, JString},
+    objects::{JIntArray, JObject, JString},
     refs::Reference,
     strings::JNIStr,
     sys::jobject,
@@ -202,6 +202,152 @@ pub fn set_wifi_lock(enabled: bool) {
         JniResult::Ok(())
     })
     .unwrap();
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ControllerBatteryStatus {
+    pub is_left: bool,
+    pub gauge_value: f32,
+    pub is_plugged: bool,
+}
+
+// Reads battery from one Android InputDevice. Returns None when the device is not a controller,
+// has no battery state, or its hand cannot be inferred from the name.
+fn read_controller_battery<'a>(
+    env: &mut Env<'a>,
+    input_manager: &JObject,
+    id: i32,
+) -> JniResult<Option<ControllerBatteryStatus>> {
+    // Android InputDevice source bits (frameworks/base/core/java/android/view/InputDevice.java).
+    const SOURCE_JOYSTICK: i32 = 0x0100_0010;
+    const SOURCE_GAMEPAD: i32 = 0x0000_0401;
+    // BatteryManager.BATTERY_STATUS_CHARGING / _FULL.
+    const BATTERY_STATUS_CHARGING: i32 = 2;
+    const BATTERY_STATUS_FULL: i32 = 5;
+
+    let device = env
+        .call_method(
+            input_manager,
+            jni_str!("getInputDevice"),
+            jni_sig!("(I)Landroid/view/InputDevice;"),
+            &[id.into()],
+        )?
+        .l()?;
+    if device.is_null() {
+        return Ok(None);
+    }
+
+    let sources = env
+        .call_method(&device, jni_str!("getSources"), jni_sig!("()I"), &[])?
+        .i()?;
+    let is_controller = (sources & SOURCE_GAMEPAD) == SOURCE_GAMEPAD
+        || (sources & SOURCE_JOYSTICK) == SOURCE_JOYSTICK;
+    if !is_controller {
+        return Ok(None);
+    }
+
+    let battery_state = env
+        .call_method(
+            &device,
+            jni_str!("getBatteryState"),
+            jni_sig!("()Landroid/view/InputDevice$BatteryState;"),
+            &[],
+        )?
+        .l()?;
+    if battery_state.is_null() {
+        return Ok(None);
+    }
+
+    let is_present = env
+        .call_method(&battery_state, jni_str!("isPresent"), jni_sig!("()Z"), &[])?
+        .z()?;
+    if !is_present {
+        return Ok(None);
+    }
+
+    let capacity = env
+        .call_method(
+            &battery_state,
+            jni_str!("getCapacity"),
+            jni_sig!("()F"),
+            &[],
+        )?
+        .f()?;
+    if !capacity.is_finite() {
+        return Ok(None);
+    }
+
+    let status = env
+        .call_method(&battery_state, jni_str!("getStatus"), jni_sig!("()I"), &[])?
+        .i()?;
+    let is_plugged = status == BATTERY_STATUS_CHARGING || status == BATTERY_STATUS_FULL;
+
+    let name_obj = env
+        .call_method(
+            &device,
+            jni_str!("getName"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )?
+        .l()?;
+    if name_obj.is_null() {
+        return Ok(None);
+    }
+    let name = env.cast_local::<JString>(name_obj)?.to_string();
+    let lower = name.to_ascii_lowercase();
+
+    let is_left = lower.contains("left");
+    let is_right = lower.contains("right");
+    if is_left == is_right {
+        return Ok(None);
+    }
+
+    Ok(Some(ControllerBatteryStatus {
+        is_left,
+        gauge_value: capacity,
+        is_plugged,
+    }))
+}
+
+/// Enumerates Android InputDevices, finds VR controllers via `SOURCE_GAMEPAD`/`SOURCE_JOYSTICK`,
+/// and returns the battery capacity from `InputDevice.getBatteryState()` (API 29+).
+/// Returns an empty Vec on older devices or when no matching controllers are found.
+pub fn get_controller_battery_status() -> Vec<ControllerBatteryStatus> {
+    if get_api_level() < 29 {
+        return Vec::new();
+    }
+
+    vm().attach_current_thread(|env| -> JniResult<Vec<ControllerBatteryStatus>> {
+        let input_manager = get_system_service(env, "input")?;
+
+        let ids_obj = env
+            .call_method(
+                &input_manager,
+                jni_str!("getInputDeviceIds"),
+                jni_sig!("()[I"),
+                &[],
+            )?
+            .l()?;
+        if ids_obj.is_null() {
+            return Ok(Vec::new());
+        }
+        let ids_array = env.cast_local::<JIntArray>(ids_obj)?;
+        let len = ids_array.len(env)?;
+        let mut ids = vec![0i32; len];
+        ids_array.get_region(env, 0, &mut ids)?;
+
+        let mut out = Vec::new();
+        for id in ids {
+            if let Ok(Some(status)) = read_controller_battery(env, &input_manager, id) {
+                out.push(status);
+            }
+        }
+        Ok(out)
+    })
+    .unwrap_or_else(|e: jni::errors::Error| {
+        warn!("get_controller_battery_status failed: {e}");
+        Vec::new()
+    })
 }
 
 pub fn get_battery_status() -> (f32, bool) {

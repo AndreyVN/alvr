@@ -643,8 +643,16 @@ pub extern "C" fn set_device_openvr_props(instance_ptr: *mut c_void, device_id: 
                 0xFFFFFFFFFFFFFFFF_u64.to_string().as_str(),
             );
 
-            // OpenXR does not support controller battery
-            set_prop(DeviceProvidesBatteryStatusBool, "false");
+            // Controller battery is sourced from the client (Android InputDevice.getBatteryState
+            // on Quest, etc.) and pushed via SetBattery -> Prop_DeviceBatteryPercentage_Float.
+            // Trackers and hand-tracking "devices" don't have a meaningful gauge to report.
+            let provides_battery = config.report_battery
+                && !full_skeletal_hand
+                && !matches!(config.emulation_mode, ControllersEmulationMode::ViveTracker);
+            set_prop(
+                DeviceProvidesBatteryStatusBool,
+                if provides_battery { "true" } else { "false" },
+            );
 
             // k_eControllerAxis_Joystick = 2
             set_prop(Axis0TypeInt32, "2");

@@ -415,6 +415,12 @@ fn connection_pipeline(
 
     let (log_channel_sender, log_channel_receiver) = mpsc::channel();
 
+    #[cfg(target_os = "android")]
+    let report_controller_battery = matches!(
+        &settings.headset.controllers,
+        Switch::Enabled(c) if c.report_battery,
+    );
+
     let control_send_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
         let event_queue = Arc::clone(&event_queue);
@@ -447,6 +453,11 @@ fn connection_pipeline(
                 #[cfg(target_os = "android")]
                 if Instant::now() > battery_deadline {
                     let (gauge_value, is_plugged) = alvr_system_info::get_battery_status();
+                    let controllers = if report_controller_battery {
+                        alvr_system_info::get_controller_battery_status()
+                    } else {
+                        Vec::new()
+                    };
                     if let Some(sender) = &mut *ctx.control_sender.lock() {
                         sender
                             .send(&ClientControlPacket::Battery(crate::BatteryInfo {
@@ -455,6 +466,21 @@ fn connection_pipeline(
                                 is_plugged,
                             }))
                             .ok();
+
+                        for controller in controllers {
+                            let device_id = if controller.is_left {
+                                *alvr_common::HAND_LEFT_ID
+                            } else {
+                                *alvr_common::HAND_RIGHT_ID
+                            };
+                            sender
+                                .send(&ClientControlPacket::Battery(crate::BatteryInfo {
+                                    device_id,
+                                    gauge_value: controller.gauge_value,
+                                    is_plugged: controller.is_plugged,
+                                }))
+                                .ok();
+                        }
                     }
 
                     battery_deadline = Instant::now() + Duration::from_secs(5);

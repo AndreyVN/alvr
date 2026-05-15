@@ -1206,6 +1206,13 @@ Currently this cannot be reliably estimated automatically. The correct value sho
     pub haptics: Switch<HapticsConfig>,
 
     #[schema(flag = "steamvr-restart")]
+    #[schema(strings(
+        display_name = "Report controller battery",
+        help = "Reports controller battery percentage to SteamVR (read via Android InputDevice.getBatteryState on the client). Disable for compatibility with older client builds that don't send controller battery packets."
+    ))]
+    pub report_battery: bool,
+
+    #[schema(flag = "steamvr-restart")]
     pub emulation_mode: ControllersEmulationMode,
 
     #[schema(flag = "steamvr-restart")]
@@ -1671,7 +1678,6 @@ It does not update in real time.")
 
     pub open_setup_wizard: bool,
     pub new_version_popup: Switch<NewVersionPopupConfig>,
-
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2212,6 +2218,7 @@ pub fn session_settings_default() -> SettingsDefault {
                             min_duration_s: 0.01,
                         },
                     },
+                    report_battery: true,
                 },
             },
             recentering_mode: RecenteringModeDefault {
