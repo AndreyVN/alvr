@@ -1,0 +1,221 @@
+ALVR Streaming Metrics — Field Reference
+=========================================
+
+Each row in `alvr.streaming_metrics` represents one aggregated snapshot
+pushed by the streamer's metrics exporter thread. A snapshot covers a
+fixed time window (default 1 000 ms) and captures statistics about every
+frame delivered during that window.
+
+Source: alvr/server_core/src/metrics_exporter.rs  (Aggregator::flush)
+Ingest model: metrics/server/models.py             (Snapshot)
+ClickHouse table: alvr.streaming_metrics           (metrics/clickhouse_schema.sql)
+
+
+────────────────────────────────────────────────────────────────────────────────
+IDENTITY
+────────────────────────────────────────────────────────────────────────────────
+
+ts                  DateTime64(3, UTC)
+    UTC timestamp of the moment the snapshot was flushed (end of the window).
+    Millisecond precision. Used as the primary time axis in Grafana.
+
+device              LowCardinality(String)
+    Free-form label set in Settings → Metrics → Device. Identifies the
+    physical headset or player. Empty string if not configured.
+
+window_ms           UInt64   [milliseconds]
+    Actual length of the aggregation window. Nominally equals
+    metrics_export.interval_ms but may differ if the thread wakes late.
+
+frames              UInt32   [count]
+    Number of fully-decoded frames received by the client during the window.
+    Used as the denominator for any per-frame average.
+
+dropped_samples     UInt64   [count]
+    Number of Sample::Frame events dropped at the producer side because the
+    channel was full (capacity = 4096). Non-zero values indicate the streamer
+    is producing statistics faster than the exporter can consume them.
+
+
+────────────────────────────────────────────────────────────────────────────────
+LATENCY  (latency_ms.*)
+────────────────────────────────────────────────────────────────────────────────
+
+Each latency stage is represented by four columns:
+    <stage>_min_ms    Nullable(Float32)  — minimum across all frames in window
+    <stage>_max_ms    Nullable(Float32)  — maximum across all frames in window
+    <stage>_avg_ms    Nullable(Float32)  — mean across all frames in window
+    <stage>_n         UInt32             — number of frames contributing
+
+All values are in milliseconds. NULL means no frame sample arrived for
+that stage during the window (e.g. no client connected).
+
+Raw values from GraphStatistics are in seconds and are multiplied by 1000
+before storage.
+
+total_pipeline_*_ms
+    End-to-end motion-to-photon latency: time from when the server samples
+    head tracking to when the rendered frame is displayed on the headset.
+    This is the primary user-visible latency figure.
+
+game_time_*_ms
+    Time spent inside the SteamVR game compositor / application render loop
+    waiting for the GPU to produce the next frame. High values indicate the
+    PC GPU is the bottleneck.
+
+server_compositor_*_ms
+    Time the SteamVR compositor spends compositing the rendered frame before
+    handing it to the encoder. Includes any server-side reprojection work.
+
+encoder_*_ms
+    Time the video encoder (NVENC / AMF / VPL) takes to encode one frame.
+    Sustained high values may force bitrate reduction.
+
+network_*_ms
+    One-way network transit time from the streamer to the client, estimated
+    from round-trip timing of statistics packets. Dominated by Wi-Fi latency.
+
+decoder_*_ms
+    Time the Android MediaCodec hardware decoder takes to decode one frame
+    on the headset.
+
+decoder_queue_*_ms
+    Time a decoded frame waits in the decoder output queue before the client
+    compositor picks it up. Elevated values indicate the client compositor
+    is falling behind the decoder.
+
+client_compositor_*_ms
+    Time the client-side Vulkan compositor takes to render and submit the
+    final frame to the OpenXR swapchain.
+
+vsync_queue_*_ms
+    Time the composed frame waits for the next display vsync. Expected to be
+    roughly half the frame interval (≈ 6–7 ms at 72 Hz).
+
+
+────────────────────────────────────────────────────────────────────────────────
+FPS  (fps.*)
+────────────────────────────────────────────────────────────────────────────────
+
+client_fps_{min,max,avg,n}    Nullable(Float32)
+    Client-reported frames per second measured on the headset.
+    Reflects the actual display refresh rate achieved.
+
+server_fps_{min,max,avg,n}    Nullable(Float32)
+    Server-side frame production rate. Should match the target refresh rate
+    when the PC GPU is not saturated. Divergence from client_fps indicates
+    network drops or decoder stalls.
+
+
+────────────────────────────────────────────────────────────────────────────────
+THROUGHPUT  (throughput.*)
+────────────────────────────────────────────────────────────────────────────────
+
+throughput_bps_{min,max,avg,n}    Nullable(Float32)   [bits/second]
+    Empirical network throughput measured by the bitrate adaptation algorithm.
+    Represents actual sustained link capacity observed during the window.
+
+bitrate_bps_{min,max,avg,n}       Nullable(Float32)   [bits/second]
+    Encoder output bitrate requested by the bitrate controller. Should track
+    throughput_bps with some headroom margin.
+
+video_packets_per_sec             Float64             [packets/second]
+    Rate of video UDP packets sent during the window, derived from the
+    cumulative counters at window boundaries.
+
+video_mbits_per_sec               Float64             [Mbit/second]
+    Network bandwidth consumed by video data during the window (bytes × 8 /
+    1 000 000 / window_secs). Distinct from bitrate_bps: this is raw bytes
+    on the wire including packet framing.
+
+
+────────────────────────────────────────────────────────────────────────────────
+TOTALS  (totals.*)  — cumulative end-of-window values
+────────────────────────────────────────────────────────────────────────────────
+
+video_packets_total    UInt64   [count]
+    Running total of video packets sent since the streamer started.
+    Use the delta between consecutive rows for per-window packet count.
+
+video_mbytes_total     UInt64   [megabytes]
+    Running total of video bytes sent since the streamer started (÷ 1 000 000,
+    truncated to integer). Use the delta between rows for per-window volume.
+
+
+────────────────────────────────────────────────────────────────────────────────
+BATTERY  (battery.*)  — last value carried from most recent Battery sample
+────────────────────────────────────────────────────────────────────────────────
+
+battery_hmd_pct        Nullable(UInt8)   [0–100 %]
+    Headset battery level as a percentage. NULL until the first battery
+    report is received from the client.
+
+battery_hmd_plugged    Nullable(UInt8)   [0 or 1]
+    1 if the headset is charging, 0 if on battery.
+    Stored as UInt8 because ClickHouse Bool is an alias for UInt8.
+
+
+────────────────────────────────────────────────────────────────────────────────
+BITRATE DIRECTIVES  (bitrate_directives.*)
+────────────────────────────────────────────────────────────────────────────────
+
+These are the internal signals feeding the bitrate controller each frame.
+All values are in bits/second. They reflect the last BitrateDirectives
+sample received in the window (not an average).
+
+bd_scaled_calculated_throughput_bps    Nullable(Float32)
+    Measured network throughput scaled by the saturation_multiplier setting.
+    This is the primary input to the adaptive bitrate algorithm. NULL when
+    using constant-bitrate mode.
+
+bd_decoder_latency_limiter_bps         Nullable(Float32)
+    Bitrate ceiling imposed when decoder latency exceeds its threshold.
+    NULL when the decoder latency limiter is not active.
+
+bd_network_latency_limiter_bps         Nullable(Float32)
+    Bitrate ceiling imposed when network latency exceeds its threshold.
+    NULL when the network latency limiter is not active.
+
+bd_encoder_latency_limiter_bps         Nullable(Float32)
+    Bitrate ceiling imposed when encoder latency exceeds its threshold.
+    NULL when the encoder latency limiter is not active.
+
+bd_manual_max_throughput_bps           Nullable(Float32)
+    User-configured hard ceiling on throughput. NULL when not set.
+
+bd_manual_min_throughput_bps           Nullable(Float32)
+    User-configured hard floor on throughput. NULL when not set.
+
+bd_requested_bitrate_bps               Float32
+    Final bitrate value sent to the encoder after all limiters and floors
+    are applied. This is what the encoder actually targets. Always present.
+
+
+────────────────────────────────────────────────────────────────────────────────
+EXPORTER HEALTH
+────────────────────────────────────────────────────────────────────────────────
+
+failed_posts    UInt64   [count]
+    Number of HTTP POST attempts that failed during the current window
+    (connection errors, timeouts, non-2xx responses). Resets each window.
+    A sustained non-zero value means the exporter cannot reach the server.
+
+
+────────────────────────────────────────────────────────────────────────────────
+INGESTION BOOKKEEPING
+────────────────────────────────────────────────────────────────────────────────
+
+ingested_at    DateTime64(3, UTC)
+    Server-side timestamp of when the row was written to ClickHouse.
+    Useful for diagnosing ingestion lag (ingested_at − ts).
+
+
+────────────────────────────────────────────────────────────────────────────────
+TABLE ENGINE & RETENTION
+────────────────────────────────────────────────────────────────────────────────
+
+Engine:      MergeTree
+Partition:   by month (toYYYYMM(ts))
+Order key:   (device, ts)
+TTL:         90 days from ts — rows are automatically dropped after 3 months
+Granularity: 8192 rows per index block (ClickHouse default)
