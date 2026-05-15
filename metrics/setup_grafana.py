@@ -241,7 +241,9 @@ def build_dashboard(ds_uid: str) -> dict:
         row_panel("Battery", 103, 83),
 
         ts_panel("HMD Battery (%)",
-                 dev("battery_hmd_pct"), "percent", 19, 0, 84, 24, 8),
+                 dev("battery_hmd_pct"), "percent", 19, 0, 84, 12, 8),
+        ts_panel("HMD Charging (1 = charging)",
+                 dev("battery_hmd_plugged"), "short", 21, 12, 84, 12, 8),
 
         # ── Exporter Health ────────────────────────────────────────────────
         row_panel("Exporter Health", 104, 92),
