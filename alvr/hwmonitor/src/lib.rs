@@ -27,6 +27,7 @@ pub struct Snapshot {
     pub gpu: Option<GpuSample>,
     pub memory: Option<MemorySample>,
     pub network: Vec<NetSample>,
+    pub storage: Vec<StorageSample>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -89,6 +90,20 @@ pub struct MemorySample {
     pub swap_used_mb: u64,
     /// Working set of the streamer process in MB, when found.
     pub vrserver_working_set_mb: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StorageSample {
+    pub device: String,
+    /// Composite / hottest reported temperature in degrees Celsius.
+    pub temp_c: Option<f32>,
+    /// Used space, 0–100 (`Load` / `Used Space` on NVMe in LHM).
+    pub used_pct: Option<f32>,
+    /// Remaining SMART life, 0–100. For SSDs derived from `Level` /
+    /// `Life` or `100 - Percentage Used`. HDDs typically don't report this.
+    pub life_left_pct: Option<f32>,
+    pub total_gb: Option<f32>,
+    pub free_gb: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -4,7 +4,7 @@
 use crate::lhm::{LhmSource, DEFAULT_URL as LHM_DEFAULT_URL};
 use crate::nvidia_smi::NvidiaSmiSource;
 use crate::sysinfo_source::SysinfoSource;
-use crate::{NamedValue, Snapshot};
+use crate::{NamedValue, Snapshot, StorageSample};
 use alvr_common::{info, warn};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -143,12 +143,13 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
         let mut cpu = sysinfo.cpu();
         let mut gpu = nvidia.as_ref().and_then(|n| n.latest());
         let memory = Some(sysinfo.memory());
+        let mut storage = Vec::new();
         #[allow(unused_mut)]
         let mut network = Vec::new();
 
         if let Some(l) = lhm.as_ref() {
             match l.read() {
-                Ok((cpu_sensors, gpu_sensors)) => {
+                Ok((cpu_sensors, gpu_sensors, storage_sensors)) => {
                     cpu.package_temp_c = cpu_sensors.package_temp_c;
                     cpu.per_core_temp_c = cpu_sensors.per_core_temp_c;
                     cpu.package_power_w = cpu_sensors.package_power_w;
@@ -156,10 +157,32 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
                     cpu.per_core_power_w = cpu_sensors.per_core_power_w;
                     cpu.fans_rpm = named_values(cpu_sensors.fans_rpm);
                     let g = gpu.get_or_insert_with(Default::default);
+                    // Prefer nvidia-smi values where present (more accurate);
+                    // fall back to LHM (covers AMD / Intel / no-NVIDIA hosts).
+                    g.name = g.name.take().or(gpu_sensors.name);
                     g.temp_c = g.temp_c.or(gpu_sensors.temp_c);
                     g.power_w = g.power_w.or(gpu_sensors.power_w);
                     g.fan_pct = g.fan_pct.or(gpu_sensors.fan_pct);
+                    g.util_pct = g.util_pct.or(gpu_sensors.util_pct);
+                    g.encoder_util_pct = g.encoder_util_pct.or(gpu_sensors.encoder_util_pct);
+                    g.decoder_util_pct = g.decoder_util_pct.or(gpu_sensors.decoder_util_pct);
+                    g.mem_used_mb = g.mem_used_mb.or(gpu_sensors.mem_used_mb);
+                    g.mem_total_mb = g.mem_total_mb.or(gpu_sensors.mem_total_mb);
+                    g.clock_graphics_mhz = g.clock_graphics_mhz.or(gpu_sensors.clock_graphics_mhz);
+                    g.clock_memory_mhz = g.clock_memory_mhz.or(gpu_sensors.clock_memory_mhz);
+                    g.clock_video_mhz = g.clock_video_mhz.or(gpu_sensors.clock_video_mhz);
                     g.fans_rpm = named_values(gpu_sensors.fans_rpm);
+                    storage = storage_sensors
+                        .into_iter()
+                        .map(|s| StorageSample {
+                            device: s.device,
+                            temp_c: s.temp_c,
+                            used_pct: s.used_pct,
+                            life_left_pct: s.life_left_pct,
+                            total_gb: s.total_gb,
+                            free_gb: s.free_gb,
+                        })
+                        .collect();
                 }
                 Err(e) => {
                     if !warned_lhm {
@@ -188,6 +211,7 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
             gpu,
             memory,
             network,
+            storage,
         };
 
         if !wait_or_shutdown(&state, config.interval) {

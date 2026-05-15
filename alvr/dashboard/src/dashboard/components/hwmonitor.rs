@@ -1,6 +1,6 @@
 use alvr_hwmonitor::{
     CpuSample, GpuSample, Hwmonitor, HwmonitorConfig, MemorySample, NamedValue, NetSample,
-    Snapshot,
+    Snapshot, StorageSample,
 };
 use eframe::egui::{CollapsingHeader, Grid, RichText, ScrollArea, Ui};
 use std::time::Duration;
@@ -30,6 +30,7 @@ impl HwmonitorTab {
             self.draw_cpu(ui, snapshot.cpu.as_ref());
             self.draw_gpu(ui, snapshot.gpu.as_ref());
             self.draw_memory(ui, snapshot.memory.as_ref());
+            self.draw_storage(ui, &snapshot.storage);
             self.draw_network(ui, &snapshot.network);
         });
     }
@@ -205,6 +206,42 @@ impl HwmonitorTab {
                             .unwrap_or_else(|| "—".to_string()),
                     );
                 });
+            });
+    }
+
+    fn draw_storage(&self, ui: &mut Ui, drives: &[StorageSample]) {
+        CollapsingHeader::new(RichText::new("Storage").size(18.0).strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                if drives.is_empty() {
+                    ui.label("No drives reported by LHM");
+                    return;
+                }
+                for (i, d) in drives.iter().enumerate() {
+                    if i > 0 {
+                        ui.add_space(8.0);
+                    }
+                    ui.label(RichText::new(&d.device).strong());
+                    Grid::new(format!("hw_storage_{i}"))
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            row(ui, "Temperature", &opt_temp(d.temp_c));
+                            row(ui, "Used space", &opt_pct(d.used_pct));
+                            row(ui, "Life remaining", &opt_pct(d.life_left_pct));
+                            let total = d.total_gb.map(|g| format!("{g:.1} GB"));
+                            let free = d.free_gb.map(|g| format!("{g:.1} GB"));
+                            row(
+                                ui,
+                                "Capacity",
+                                &format!(
+                                    "{} free of {}",
+                                    free.unwrap_or_else(|| "—".to_string()),
+                                    total.unwrap_or_else(|| "—".to_string()),
+                                ),
+                            );
+                        });
+                }
             });
     }
 

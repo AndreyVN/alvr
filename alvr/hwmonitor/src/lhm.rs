@@ -45,11 +45,30 @@ pub struct CpuSensors {
 }
 
 #[derive(Default, Debug, Clone)]
+pub struct StorageSensors {
+    pub device: String,
+    pub temp_c: Option<f32>,
+    pub used_pct: Option<f32>,
+    pub life_left_pct: Option<f32>,
+    pub total_gb: Option<f32>,
+    pub free_gb: Option<f32>,
+}
+
+#[derive(Default, Debug, Clone)]
 pub struct GpuSensors {
+    pub name: Option<String>,
     pub temp_c: Option<f32>,
     pub power_w: Option<f32>,
     pub fan_pct: Option<f32>,
     pub fans_rpm: Vec<(String, u32)>,
+    pub util_pct: Option<f32>,
+    pub encoder_util_pct: Option<f32>,
+    pub decoder_util_pct: Option<f32>,
+    pub mem_used_mb: Option<u32>,
+    pub mem_total_mb: Option<u32>,
+    pub clock_graphics_mhz: Option<u32>,
+    pub clock_memory_mhz: Option<u32>,
+    pub clock_video_mhz: Option<u32>,
 }
 
 pub struct LhmSource {
@@ -72,21 +91,20 @@ impl LhmSource {
         })
     }
 
-    pub fn read(&self) -> anyhow::Result<(CpuSensors, GpuSensors)> {
+    pub fn read(&self) -> anyhow::Result<(CpuSensors, GpuSensors, Vec<StorageSensors>)> {
         let root: Node = self.agent.get(&self.url).call()?.body_mut().read_json()?;
-        let (cpu, gpu) = classify(&root);
+        let (cpu, gpu, storages) = classify(&root);
         debug!(
-            "hwmonitor: LHM pkg_temp={:?} pkg_pwr={:?} cores_pwr={:?} cpu_fans={} | gpu_temp={:?} gpu_pwr={:?} gpu_fan%={:?} gpu_fans={}",
+            "hwmonitor: LHM pkg_temp={:?} pkg_pwr={:?} cores_pwr={:?} cpu_fans={} | gpu_temp={:?} gpu_pwr={:?} | storages={}",
             cpu.package_temp_c,
             cpu.package_power_w,
             cpu.cores_power_w,
             cpu.fans_rpm.len(),
             gpu.temp_c,
             gpu.power_w,
-            gpu.fan_pct,
-            gpu.fans_rpm.len(),
+            storages.len(),
         );
-        Ok((cpu, gpu))
+        Ok((cpu, gpu, storages))
     }
 }
 
@@ -95,6 +113,7 @@ enum HardwareKind {
     Cpu,
     Gpu,
     Mainboard,
+    Storage,
     Unknown,
 }
 
@@ -107,29 +126,39 @@ impl HardwareKind {
             Self::Gpu
         } else if id == "/motherboard" || id.starts_with("/lpc/") {
             Self::Mainboard
+        } else if id.starts_with("/nvme/")
+            || id.starts_with("/hdd/")
+            || id.starts_with("/storage/")
+        {
+            Self::Storage
         } else {
             Self::Unknown
         }
     }
 }
 
+#[derive(Default)]
+struct Scratch {
+    /// Sum of GPU power sub-rails — fallback when no Package/Total/TBP sensor.
+    gpu_partial_power: f32,
+    gpu_partial_seen: bool,
+    /// LHM exposes GPU memory as Used + Free; we derive Total = Used + Free.
+    gpu_mem_used_mb: Option<u32>,
+    gpu_mem_free_mb: Option<u32>,
+    /// Storage entries accumulated in the order LHM emits them. The walker
+    /// pushes a new entry every time it enters a `/nvme/*` or `/hdd/*` node
+    /// and routes that subtree's leaves into the last entry.
+    storages: Vec<StorageSensors>,
+}
+
 /// Walks the LHM tree using `HardwareId` to track which hardware we're inside
 /// and `Type` to decide how to interpret each leaf.
-fn classify(root: &Node) -> (CpuSensors, GpuSensors) {
+fn classify(root: &Node) -> (CpuSensors, GpuSensors, Vec<StorageSensors>) {
     let mut cpu = CpuSensors::default();
     let mut gpu = GpuSensors::default();
-    // Sum GPU power sub-rails when no Package/Total/TBP sensor exists.
-    let mut gpu_partial_power = 0.0_f32;
-    let mut gpu_partial_seen = false;
+    let mut scratch = Scratch::default();
 
-    walk(
-        root,
-        &mut cpu,
-        &mut gpu,
-        &mut gpu_partial_power,
-        &mut gpu_partial_seen,
-        HardwareKind::Unknown,
-    );
+    walk(root, &mut cpu, &mut gpu, &mut scratch, HardwareKind::Unknown);
 
     // AMD Ryzen exposes per-core power but no aggregate "Cores" rail;
     // derive cores_power_w from the per-core readings so the dashboard
@@ -137,32 +166,58 @@ fn classify(root: &Node) -> (CpuSensors, GpuSensors) {
     if cpu.cores_power_w.is_none() && !cpu.per_core_power_w.is_empty() {
         cpu.cores_power_w = Some(cpu.per_core_power_w.iter().sum());
     }
-    if gpu.power_w.is_none() && gpu_partial_seen {
-        gpu.power_w = Some(gpu_partial_power);
+    if gpu.power_w.is_none() && scratch.gpu_partial_seen {
+        gpu.power_w = Some(scratch.gpu_partial_power);
+    }
+    if gpu.mem_used_mb.is_none() {
+        gpu.mem_used_mb = scratch.gpu_mem_used_mb;
+    }
+    if gpu.mem_total_mb.is_none() {
+        gpu.mem_total_mb = match (scratch.gpu_mem_used_mb, scratch.gpu_mem_free_mb) {
+            (Some(u), Some(f)) => Some(u + f),
+            _ => None,
+        };
     }
 
-    (cpu, gpu)
+    (cpu, gpu, scratch.storages)
 }
 
 fn walk(
     node: &Node,
     cpu: &mut CpuSensors,
     gpu: &mut GpuSensors,
-    gpu_partial_power: &mut f32,
-    gpu_partial_seen: &mut bool,
+    scratch: &mut Scratch,
     kind: HardwareKind,
 ) {
     // Only override the inherited kind when this node is a recognised
     // hardware root (carries a HardwareId we know).
     let kind = match HardwareKind::of_id(&node.hardware_id) {
         HardwareKind::Unknown => kind,
-        other => other,
+        other => {
+            match other {
+                HardwareKind::Gpu => {
+                    if gpu.name.is_none() && !node.text.is_empty() {
+                        gpu.name = Some(node.text.clone());
+                    }
+                }
+                HardwareKind::Storage => {
+                    // Open a new bucket for this device; leaves inside this
+                    // subtree route to the last (just-pushed) entry.
+                    scratch.storages.push(StorageSensors {
+                        device: node.text.clone(),
+                        ..Default::default()
+                    });
+                }
+                _ => {}
+            }
+            other
+        }
     };
     for child in &node.children {
-        walk(child, cpu, gpu, gpu_partial_power, gpu_partial_seen, kind);
+        walk(child, cpu, gpu, scratch, kind);
     }
     if !node.sensor_type.is_empty() && !node.value.is_empty() {
-        apply_leaf(node, kind, cpu, gpu, gpu_partial_power, gpu_partial_seen);
+        apply_leaf(node, kind, cpu, gpu, scratch);
     }
 }
 
@@ -171,8 +226,7 @@ fn apply_leaf(
     kind: HardwareKind,
     cpu: &mut CpuSensors,
     gpu: &mut GpuSensors,
-    gpu_partial_power: &mut f32,
-    gpu_partial_seen: &mut bool,
+    scratch: &mut Scratch,
 ) {
     let Some(value) = parse_value(&node.value) else {
         return;
@@ -190,6 +244,19 @@ fn apply_leaf(
                     gpu.temp_c = Some(value);
                 }
             }
+            HardwareKind::Storage => {
+                // Skip threshold sensors ("Warning Temperature",
+                // "Critical Temperature"). Prefer "Composite" when present.
+                if name_l.contains("warning") || name_l.contains("critical") {
+                    return;
+                }
+                if let Some(s) = scratch.storages.last_mut() {
+                    let prefer_composite = name_l.contains("composite");
+                    if s.temp_c.is_none() || prefer_composite {
+                        s.temp_c = Some(value);
+                    }
+                }
+            }
             HardwareKind::Unknown => {}
         },
         "Fan" => match kind {
@@ -201,7 +268,7 @@ fn apply_leaf(
                     cpu.fans_rpm.push((node.text.clone(), value as u32));
                 }
             }
-            HardwareKind::Unknown => {}
+            HardwareKind::Storage | HardwareKind::Unknown => {}
         },
         "Power" => match kind {
             HardwareKind::Cpu => {
@@ -228,8 +295,8 @@ fn apply_leaf(
                 } else if gpu.power_w.is_none() {
                     // No board-total sensor on this GPU (typical for iGPUs):
                     // accumulate sub-rail powers as a fallback.
-                    *gpu_partial_power += value;
-                    *gpu_partial_seen = true;
+                    scratch.gpu_partial_power += value;
+                    scratch.gpu_partial_seen = true;
                 }
             }
             _ => {}
@@ -240,8 +307,112 @@ fn apply_leaf(
                 gpu.fan_pct = Some(value);
             }
         }
+        "Load" if matches!(kind, HardwareKind::Gpu) => {
+            // Primary GPU activity. LHM exposes one "GPU Core" Load sensor
+            // per GPU, plus per-engine D3D nodes (D3D 3D, D3D Video Codec,
+            // D3D Video Decode, D3D Compute, ...).
+            if name_l == "gpu core" || name_l == "core" || name_l == "gpu" {
+                gpu.util_pct = Some(value);
+            } else if name_l.contains("video codec")
+                || name_l.contains("video encode")
+                || name_l.contains("encoder")
+            {
+                let v = gpu.encoder_util_pct.unwrap_or(0.0).max(value);
+                gpu.encoder_util_pct = Some(v);
+            } else if name_l.contains("video decode") || name_l.contains("decoder") {
+                let v = gpu.decoder_util_pct.unwrap_or(0.0).max(value);
+                gpu.decoder_util_pct = Some(v);
+            }
+        }
+        "Clock" if matches!(kind, HardwareKind::Gpu) => {
+            // Pick the headline rails. Skip "(Effective)" variants since
+            // they are smoothed versions of the same domain.
+            if name_l.contains("effective") {
+                return;
+            }
+            if name_l == "gpu core" || name_l == "core" || name_l.contains("graphics") {
+                gpu.clock_graphics_mhz = Some(value as u32);
+            } else if name_l.contains("memory") {
+                gpu.clock_memory_mhz = Some(value as u32);
+            } else if name_l.contains("video") || name_l.contains("encoder") {
+                gpu.clock_video_mhz = Some(value as u32);
+            }
+        }
+        "Data" | "SmallData" if matches!(kind, HardwareKind::Gpu) => {
+            // LHM publishes VRAM as separate Used / Free sensors.
+            if let Some(mb) = parse_data_mb(&node.value) {
+                if name_l.contains("used") {
+                    scratch.gpu_mem_used_mb = Some(mb);
+                } else if name_l.contains("free") {
+                    scratch.gpu_mem_free_mb = Some(mb);
+                } else if name_l.contains("total") {
+                    gpu.mem_total_mb = Some(mb);
+                }
+            }
+        }
+        "Load" if matches!(kind, HardwareKind::Storage) => {
+            // Skip "Read Activity"/"Write Activity"/"Total Activity" — they
+            // are noisy and not useful in a once-per-second dashboard.
+            if name_l == "used space"
+                && let Some(s) = scratch.storages.last_mut()
+            {
+                s.used_pct = Some(value);
+            }
+        }
+        "Level" if matches!(kind, HardwareKind::Storage) => {
+            if let Some(s) = scratch.storages.last_mut() {
+                if name_l == "life" {
+                    s.life_left_pct = Some(value);
+                } else if name_l == "percentage used" && s.life_left_pct.is_none() {
+                    // SMART exposes Percentage Used; derive remaining life.
+                    s.life_left_pct = Some((100.0 - value).clamp(0.0, 100.0));
+                }
+            }
+        }
+        "Data" | "SmallData" if matches!(kind, HardwareKind::Storage) => {
+            if let Some(gb) = parse_data_gb(&node.value)
+                && let Some(s) = scratch.storages.last_mut()
+            {
+                if name_l == "total space" {
+                    s.total_gb = Some(gb);
+                } else if name_l == "free space" {
+                    s.free_gb = Some(gb);
+                }
+            }
+        }
         _ => {}
     }
+}
+
+/// LHM Data values are formatted like `"1907,0 MB"`, `"2,0 GB"`, etc.
+fn parse_data_mb(s: &str) -> Option<u32> {
+    let mut tokens = s.split_whitespace();
+    let num: f64 = tokens.next()?.replace(',', ".").parse().ok()?;
+    let unit = tokens.next().unwrap_or("MB").to_uppercase();
+    let mb = match unit.as_str() {
+        "B" => num / (1024.0 * 1024.0),
+        "KB" => num / 1024.0,
+        "MB" => num,
+        "GB" => num * 1024.0,
+        "TB" => num * 1024.0 * 1024.0,
+        _ => num,
+    };
+    Some(mb.round().max(0.0) as u32)
+}
+
+fn parse_data_gb(s: &str) -> Option<f32> {
+    let mut tokens = s.split_whitespace();
+    let num: f64 = tokens.next()?.replace(',', ".").parse().ok()?;
+    let unit = tokens.next().unwrap_or("GB").to_uppercase();
+    let gb = match unit.as_str() {
+        "B" => num / (1024.0 * 1024.0 * 1024.0),
+        "KB" => num / (1024.0 * 1024.0),
+        "MB" => num / 1024.0,
+        "GB" => num,
+        "TB" => num * 1024.0,
+        _ => num,
+    };
+    Some((gb.max(0.0)) as f32)
 }
 
 fn apply_cpu_temperature(name_l: &str, value: f32, cpu: &mut CpuSensors) {
