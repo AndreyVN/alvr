@@ -278,8 +278,14 @@ impl StatisticsManager {
             }
 
             let packet_bits = frame.video_packet_bytes as f32 * 8.0;
-            let throughput_bps =
-                packet_bits / Duration::max(network_latency, EPS_INTERVAL).as_secs_f32();
+            // network_latency is a residual (total minus all other stages); saturating_sub can
+            // return zero when measurement jitter causes underflow. Skip throughput when that
+            // happens to avoid a division by near-zero producing gigabit-scale noise.
+            let throughput_bps = if network_latency.is_zero() {
+                0.0
+            } else {
+                packet_bits / network_latency.as_secs_f32()
+            };
             let bitrate_bps = packet_bits
                 / Duration::max(self.last_frame_present_interval, EPS_INTERVAL).as_secs_f32();
 
