@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
     -- ───── identity ─────
     ts                                      DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
     device                                  LowCardinality(String),
-    session                                 LowCardinality(String),
     window_ms                               UInt64,
     frames                                  UInt32,
     dropped_samples                         UInt64,

@@ -201,12 +201,10 @@ impl Aggregator {
         });
 
         let device = tags.get("device").map(String::as_str).unwrap_or("");
-        let session = tags.get("session").map(String::as_str).unwrap_or("");
 
         let snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "device": device,
-            "session": session,
             "window_ms": window.as_millis() as u64,
             "frames": self.frames,
             "dropped_samples": self.dropped_samples,

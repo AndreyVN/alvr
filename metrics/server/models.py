@@ -77,7 +77,6 @@ class Snapshot(BaseModel):
 
     ts: datetime
     device: str = ""
-    session: str = ""
     window_ms: int
     frames: int
     dropped_samples: int
