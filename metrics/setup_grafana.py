@@ -116,83 +116,138 @@ def build_dashboard(ds_uid: str) -> dict:
         "hide": 0,
     }
 
-    def panel(title: str, sql: str, unit: str, pid: int, y: int) -> dict:
+    DF = "device IN ($device)"   # device filter
+    TF = "$__timeFilter(ts)"     # time filter
+    T  = "toStartOfMinute(ts) AS time"
+
+    def ts_panel(title: str, sql: str, unit: str, pid: int,
+                 x: int = 0, y: int = 0, w: int = 24, h: int = 8) -> dict:
         return {
             "id": pid,
             "type": "timeseries",
             "title": title,
-            "gridPos": {"x": 0, "y": y, "w": 24, "h": 9},
+            "gridPos": {"x": x, "y": y, "w": w, "h": h},
             "datasource": ds_ref,
             "fieldConfig": {
                 "defaults": {
                     "unit": unit,
-                    "custom": {"lineWidth": 2, "fillOpacity": 10},
+                    "custom": {"lineWidth": 2, "fillOpacity": 8},
                 },
                 "overrides": [],
             },
             "options": {
-                "tooltip": {"mode": "multi", "sort": "none"},
+                "tooltip": {"mode": "multi", "sort": "desc"},
                 "legend": {"displayMode": "table", "placement": "bottom",
                            "calcs": ["mean", "min", "max", "last"]},
             },
             "targets": [{
                 "datasource": ds_ref,
                 "rawSql": sql,
-                "format": 0,  # TIME_SERIES
+                "format": 0,
             }],
         }
 
-    device_filter = "device IN ($device)"
+    def row_panel(title: str, pid: int, y: int) -> dict:
+        return {
+            "id": pid,
+            "type": "row",
+            "title": title,
+            "collapsed": False,
+            "gridPos": {"x": 0, "y": y, "w": 24, "h": 1},
+            "panels": [],
+        }
+
+    # per-device time series (one series per device)
+    def dev(col: str, agg: str = "avg") -> str:
+        return (f"SELECT {T}, device, {agg}({col}) AS value\n"
+                f"FROM alvr.streaming_metrics\n"
+                f"WHERE {TF} AND {DF}\n"
+                f"GROUP BY time, device\nORDER BY time")
+
+    # multi-column breakdown (one series per metric column, averaged across devices)
+    def breakdown(cols: dict[str, str]) -> str:
+        selects = ",\n    ".join(f"avg({col}) AS \"{label}\"" for col, label in cols.items())
+        return (f"SELECT {T},\n    {selects}\n"
+                f"FROM alvr.streaming_metrics\n"
+                f"WHERE {TF} AND {DF}\n"
+                f"GROUP BY time\nORDER BY time")
 
     panels = [
-        panel(
-            "Total Pipeline Latency (avg ms)",
-            f"""SELECT
-    toStartOfMinute(ts) AS time,
-    device,
-    avg(total_pipeline_avg_ms) AS value
-FROM alvr.streaming_metrics
-WHERE $__timeFilter(ts) AND {device_filter}
-GROUP BY time, device
-ORDER BY time""",
-            "ms", 1, 0,
-        ),
-        panel(
-            "Bitrate (Mbps)",
-            f"""SELECT
-    toStartOfMinute(ts) AS time,
-    device,
-    avg(video_mbits_per_sec) AS value
-FROM alvr.streaming_metrics
-WHERE $__timeFilter(ts) AND {device_filter}
-GROUP BY time, device
-ORDER BY time""",
-            "mbits", 2, 9,
-        ),
-        panel(
-            "Client FPS (avg)",
-            f"""SELECT
-    toStartOfMinute(ts) AS time,
-    device,
-    avg(client_fps_avg) AS value
-FROM alvr.streaming_metrics
-WHERE $__timeFilter(ts) AND {device_filter}
-GROUP BY time, device
-ORDER BY time""",
-            "short", 3, 18,
-        ),
-        panel(
-            "Battery (%)",
-            f"""SELECT
-    toStartOfMinute(ts) AS time,
-    device,
-    avg(battery_hmd_pct) AS value
-FROM alvr.streaming_metrics
-WHERE $__timeFilter(ts) AND {device_filter}
-GROUP BY time, device
-ORDER BY time""",
-            "percent", 4, 27,
-        ),
+        # ── Latency ────────────────────────────────────────────────────────
+        row_panel("Latency", 100, 0),
+
+        ts_panel("Total Pipeline Latency (avg ms)",
+                 dev("total_pipeline_avg_ms"), "ms", 1, 0, 1, 24, 8),
+
+        ts_panel("Latency Stage Breakdown (avg ms)",
+                 breakdown({
+                     "game_time_avg_ms":         "Game Time",
+                     "server_compositor_avg_ms":  "Server Compositor",
+                     "encoder_avg_ms":            "Encoder",
+                     "network_avg_ms":            "Network",
+                     "decoder_avg_ms":            "Decoder",
+                     "decoder_queue_avg_ms":      "Decoder Queue",
+                     "client_compositor_avg_ms":  "Client Compositor",
+                     "vsync_queue_avg_ms":        "VSync Queue",
+                 }), "ms", 2, 0, 9, 24, 8),
+
+        ts_panel("Network Latency (avg ms)",
+                 dev("network_avg_ms"), "ms", 3, 0, 17, 12, 8),
+        ts_panel("Encoder Latency (avg ms)",
+                 dev("encoder_avg_ms"), "ms", 4, 12, 17, 12, 8),
+
+        ts_panel("Decoder Latency (avg ms)",
+                 dev("decoder_avg_ms"), "ms", 5, 0, 25, 12, 8),
+        ts_panel("Decoder Queue Latency (avg ms)",
+                 dev("decoder_queue_avg_ms"), "ms", 6, 12, 25, 12, 8),
+
+        ts_panel("Client Compositor Latency (avg ms)",
+                 dev("client_compositor_avg_ms"), "ms", 7, 0, 33, 12, 8),
+        ts_panel("VSync Queue Latency (avg ms)",
+                 dev("vsync_queue_avg_ms"), "ms", 8, 12, 33, 12, 8),
+
+        # ── FPS & Frames ───────────────────────────────────────────────────
+        row_panel("FPS & Frames", 101, 41),
+
+        ts_panel("Client FPS (avg)",
+                 dev("client_fps_avg"), "short", 9, 0, 42, 12, 8),
+        ts_panel("Server FPS (avg)",
+                 dev("server_fps_avg"), "short", 10, 12, 42, 12, 8),
+
+        ts_panel("Frames per Window",
+                 dev("frames"), "short", 11, 0, 50, 12, 8),
+        ts_panel("Dropped Samples",
+                 dev("dropped_samples", "sum"), "short", 12, 12, 50, 12, 8),
+
+        # ── Bitrate & Throughput ───────────────────────────────────────────
+        row_panel("Bitrate & Throughput", 102, 58),
+
+        ts_panel("Requested Bitrate (bps)",
+                 dev("bd_requested_bitrate_bps"), "bps", 13, 0, 59, 12, 8),
+        ts_panel("Measured Throughput (bps)",
+                 dev("throughput_bps_avg"), "bps", 14, 12, 59, 12, 8),
+
+        ts_panel("Video Throughput (Mbits/s)",
+                 dev("video_mbits_per_sec"), "Mbits", 15, 0, 67, 12, 8),
+        ts_panel("Video Packets/sec",
+                 dev("video_packets_per_sec"), "pps", 16, 12, 67, 12, 8),
+
+        ts_panel("Video Packets Total (cumulative)",
+                 dev("video_packets_total", "max"), "short", 17, 0, 75, 12, 8),
+        ts_panel("Video Data Total — MB (cumulative)",
+                 dev("video_mbytes_total", "max"), "decmbytes", 18, 12, 75, 12, 8),
+
+        # ── Battery ────────────────────────────────────────────────────────
+        row_panel("Battery", 103, 83),
+
+        ts_panel("HMD Battery (%)",
+                 dev("battery_hmd_pct"), "percent", 19, 0, 84, 24, 8),
+
+        # ── Exporter Health ────────────────────────────────────────────────
+        row_panel("Exporter Health", 104, 92),
+
+        ts_panel("Failed POST Attempts",
+                 dev("failed_posts", "sum"), "short", 20, 0, 93, 24, 8),
     ]
 
     return {
