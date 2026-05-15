@@ -1663,13 +1663,6 @@ It does not update in real time.")
     pub new_version_popup: Switch<NewVersionPopupConfig>,
 
     #[schema(strings(
-        display_name = "Metrics server address",
-        help = "Address of the external metrics server (host[:port] or full URL). \
-                Stored with the rest of the settings; consumed by the metrics exporter."
-    ))]
-    pub metrics_server_address: String,
-
-    #[schema(strings(
         display_name = "Metrics export",
         help = "Push aggregated streaming statistics to an external HTTP endpoint (e.g. for \
                 Grafana). Settings are read on client reconnect."
@@ -2340,7 +2333,6 @@ pub fn session_settings_default() -> SettingsDefault {
                     hide_while_version: ALVR_VERSION.to_string(),
                 },
             },
-            metrics_server_address: "http://127.0.0.1:8086/api/metrics".into(),
             metrics_export: SwitchDefault {
                 enabled: false,
                 content: MetricsExportConfigDefault {
