@@ -1,0 +1,18 @@
+[package]
+name = "alvr_hwmonitor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+alvr_common.workspace = true
+
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.38"
+
+[target.'cfg(windows)'.dependencies]
+wmi = "0.17"
