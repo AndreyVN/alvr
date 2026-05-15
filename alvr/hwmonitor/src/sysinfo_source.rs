@@ -45,6 +45,7 @@ impl SysinfoSource {
             per_core_temp_c: Vec::new(),
             package_power_w: None,
             cores_power_w: None,
+            per_core_power_w: Vec::new(),
             fans_rpm: Vec::new(),
         }
     }

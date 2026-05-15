@@ -153,6 +153,7 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
                     cpu.per_core_temp_c = cpu_sensors.per_core_temp_c;
                     cpu.package_power_w = cpu_sensors.package_power_w;
                     cpu.cores_power_w = cpu_sensors.cores_power_w;
+                    cpu.per_core_power_w = cpu_sensors.per_core_power_w;
                     cpu.fans_rpm = named_values(cpu_sensors.fans_rpm);
                     let g = gpu.get_or_insert_with(Default::default);
                     g.temp_c = g.temp_c.or(gpu_sensors.temp_c);

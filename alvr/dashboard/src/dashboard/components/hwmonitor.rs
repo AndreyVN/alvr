@@ -94,6 +94,22 @@ impl HwmonitorTab {
                     });
                 }
 
+                if !cpu.per_core_power_w.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Per-core power").strong());
+                    Grid::new("hw_cpu_core_power")
+                        .num_columns(4)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (idx, watts) in cpu.per_core_power_w.iter().enumerate() {
+                                ui.label(format!("Core {idx}: {watts:.2} W"));
+                                if idx % 4 == 3 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                }
+
                 if !cpu.fans_rpm.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new("Fans").strong());

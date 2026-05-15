@@ -43,7 +43,11 @@ pub struct CpuSample {
     /// Whole-socket power draw in watts (Intel RAPL `CPU Package` / AMD `Package`).
     pub package_power_w: Option<f32>,
     /// Cores-only power draw in watts (`CPU Cores` / `IA Cores`).
+    /// On AMD Ryzen this is the sum of `per_core_power_w` because LHM does
+    /// not expose an aggregate cores rail.
     pub cores_power_w: Option<f32>,
+    /// Per-physical-core power draw in watts (Ryzen `Core #N (SMU)`).
+    pub per_core_power_w: Vec<f32>,
     /// Named fan readings in RPM (e.g. `CPU Fan`, `Pump Fan`).
     pub fans_rpm: Vec<NamedValue<u32>>,
 }
