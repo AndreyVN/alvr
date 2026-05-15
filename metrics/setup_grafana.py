@@ -172,84 +172,83 @@ def build_dashboard(ds_uid: str) -> dict:
                 f"WHERE {TF} AND {DF}\n"
                 f"GROUP BY time\nORDER BY time")
 
+    STAGES = {
+        "game_time":        "Game Time",
+        "server_compositor": "Server Compositor",
+        "encoder":          "Encoder",
+        "network":          "Network",
+        "decoder":          "Decoder",
+        "decoder_queue":    "Decoder Queue",
+        "client_compositor": "Client Compositor",
+        "vsync_queue":      "VSync Queue",
+    }
+
+    def stage_breakdown(stat: str) -> str:
+        return breakdown({f"{s}_{stat}_ms": label for s, label in STAGES.items()})
+
     panels = [
         # ── Latency ────────────────────────────────────────────────────────
         row_panel("Latency", 100, 0),
 
-        ts_panel("Total Pipeline Latency (avg ms)",
+        ts_panel("Total Pipeline Latency — per device (avg ms)",
                  dev("total_pipeline_avg_ms"), "ms", 1, 0, 1, 24, 8),
 
-        ts_panel("Latency Stage Breakdown (avg ms)",
-                 breakdown({
-                     "game_time_avg_ms":         "Game Time",
-                     "server_compositor_avg_ms":  "Server Compositor",
-                     "encoder_avg_ms":            "Encoder",
-                     "network_avg_ms":            "Network",
-                     "decoder_avg_ms":            "Decoder",
-                     "decoder_queue_avg_ms":      "Decoder Queue",
-                     "client_compositor_avg_ms":  "Client Compositor",
-                     "vsync_queue_avg_ms":        "VSync Queue",
-                 }), "ms", 2, 0, 9, 24, 8),
+        row_panel("Latency — Average", 110, 9),
+        ts_panel("All Stages — Average (ms)",
+                 stage_breakdown("avg"), "ms", 2, 0, 10, 24, 8),
 
-        ts_panel("Network Latency (avg ms)",
-                 dev("network_avg_ms"), "ms", 3, 0, 17, 12, 8),
-        ts_panel("Encoder Latency (avg ms)",
-                 dev("encoder_avg_ms"), "ms", 4, 12, 17, 12, 8),
+        row_panel("Latency — Min", 111, 18),
+        ts_panel("All Stages — Min (ms)",
+                 stage_breakdown("min"), "ms", 3, 0, 19, 24, 8),
 
-        ts_panel("Decoder Latency (avg ms)",
-                 dev("decoder_avg_ms"), "ms", 5, 0, 25, 12, 8),
-        ts_panel("Decoder Queue Latency (avg ms)",
-                 dev("decoder_queue_avg_ms"), "ms", 6, 12, 25, 12, 8),
-
-        ts_panel("Client Compositor Latency (avg ms)",
-                 dev("client_compositor_avg_ms"), "ms", 7, 0, 33, 12, 8),
-        ts_panel("VSync Queue Latency (avg ms)",
-                 dev("vsync_queue_avg_ms"), "ms", 8, 12, 33, 12, 8),
+        row_panel("Latency — Max", 112, 27),
+        ts_panel("All Stages — Max (ms)",
+                 stage_breakdown("max"), "ms", 4, 0, 28, 24, 8),
 
         # ── FPS & Frames ───────────────────────────────────────────────────
-        row_panel("FPS & Frames", 101, 41),
+        row_panel("FPS & Frames", 101, 36),
 
         ts_panel("Client FPS (avg)",
-                 dev("client_fps_avg"), "short", 9, 0, 42, 12, 8),
+                 dev("client_fps_avg"), "short", 9, 0, 37, 12, 8),
         ts_panel("Server FPS (avg)",
-                 dev("server_fps_avg"), "short", 10, 12, 42, 12, 8),
+                 dev("server_fps_avg"), "short", 10, 12, 37, 12, 8),
 
         ts_panel("Frames per Window",
-                 dev("frames"), "short", 11, 0, 50, 12, 8),
+                 dev("frames"), "short", 11, 0, 45, 12, 8),
         ts_panel("Dropped Samples",
-                 dev("dropped_samples", "sum"), "short", 12, 12, 50, 12, 8),
+                 dev("dropped_samples", "sum"), "short", 12, 12, 45, 12, 8),
 
         # ── Bitrate & Throughput ───────────────────────────────────────────
-        row_panel("Bitrate & Throughput", 102, 58),
+        row_panel("Bitrate & Throughput", 102, 53),
 
         ts_panel("Requested Bitrate (bps)",
-                 dev("bd_requested_bitrate_bps"), "bps", 13, 0, 59, 12, 8),
+                 dev("bd_requested_bitrate_bps"), "bps", 13, 0, 54, 12, 8),
         ts_panel("Measured Throughput (bps)",
-                 dev("throughput_bps_avg"), "bps", 14, 12, 59, 12, 8),
+                 dev("throughput_bps_avg"), "bps", 14, 12, 54, 12, 8),
 
         ts_panel("Video Throughput (Mbits/s)",
-                 dev("video_mbits_per_sec"), "Mbits", 15, 0, 67, 12, 8),
+                 dev("video_mbits_per_sec"), "Mbits", 15, 0, 62, 12, 8),
         ts_panel("Video Packets/sec",
-                 dev("video_packets_per_sec"), "pps", 16, 12, 67, 12, 8),
+                 dev("video_packets_per_sec"), "pps", 16, 12, 62, 12, 8),
 
         ts_panel("Video Packets Total (cumulative)",
-                 dev("video_packets_total", "max"), "short", 17, 0, 75, 12, 8),
+                 dev("video_packets_total", "max"), "short", 17, 0, 70, 12, 8),
         ts_panel("Video Data Total — MB (cumulative)",
-                 dev("video_mbytes_total", "max"), "decmbytes", 18, 12, 75, 12, 8),
+                 dev("video_mbytes_total", "max"), "decmbytes", 18, 12, 70, 12, 8),
 
         # ── Battery ────────────────────────────────────────────────────────
-        row_panel("Battery", 103, 83),
+        row_panel("Battery", 103, 78),
 
         ts_panel("HMD Battery (%)",
-                 dev("battery_hmd_pct"), "percent", 19, 0, 84, 12, 8),
+                 dev("battery_hmd_pct"), "percent", 19, 0, 79, 12, 8),
         ts_panel("HMD Charging (1 = charging)",
-                 dev("battery_hmd_plugged"), "short", 21, 12, 84, 12, 8),
+                 dev("battery_hmd_plugged"), "short", 21, 12, 79, 12, 8),
 
         # ── Exporter Health ────────────────────────────────────────────────
-        row_panel("Exporter Health", 104, 92),
+        row_panel("Exporter Health", 104, 87),
 
         ts_panel("Failed POST Attempts",
-                 dev("failed_posts", "sum"), "short", 20, 0, 93, 24, 8),
+                 dev("failed_posts", "sum"), "short", 20, 0, 88, 24, 8),
     ]
 
     return {
