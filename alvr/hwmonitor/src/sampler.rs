@@ -1,27 +1,28 @@
 //! Top-level sampler: owns one background thread that polls every source on a
 //! fixed cadence and caches the latest `Snapshot` for cheap reads.
 
+use crate::lhm::{LhmSource, DEFAULT_URL as LHM_DEFAULT_URL};
 use crate::nvidia_smi::NvidiaSmiSource;
 use crate::sysinfo_source::SysinfoSource;
 use crate::{NamedValue, Snapshot};
-use alvr_common::info;
+use alvr_common::{info, warn};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 #[cfg(windows)]
-use alvr_common::warn;
-#[cfg(windows)]
-use crate::{lhm::LhmSource, network::NetSource};
+use crate::network::NetSource;
 
 #[derive(Clone, Debug)]
 pub struct HwmonitorConfig {
     pub interval: Duration,
     /// When false, never spawn nvidia-smi even if the binary is present.
     pub enable_nvidia_smi: bool,
-    /// When false, never attempt to connect to the LHM WMI namespace.
+    /// When false, never attempt to contact LibreHardwareMonitor.
     pub enable_lhm: bool,
+    /// URL of the LHM web server (`Options → Run web server` inside LHM).
+    pub lhm_url: String,
     /// When false, network adapter counters are not collected.
     pub enable_network: bool,
 }
@@ -32,6 +33,7 @@ impl Default for HwmonitorConfig {
             interval: Duration::from_secs(1),
             enable_nvidia_smi: true,
             enable_lhm: true,
+            lhm_url: LHM_DEFAULT_URL.to_string(),
             enable_network: true,
         }
     }
@@ -110,9 +112,27 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
         None
     };
 
+    let lhm = if config.enable_lhm {
+        match LhmSource::connect(&config.lhm_url) {
+            Ok(s) => {
+                info!("hwmonitor: LHM web server connected at {}", config.lhm_url);
+                Some(s)
+            }
+            Err(e) => {
+                info!(
+                    "hwmonitor: LHM unreachable at {} ({e}); start LibreHardwareMonitor as Administrator and enable Options → Run web server",
+                    config.lhm_url
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     #[cfg(windows)]
-    let mut wmi = WindowsWmi::init(&config);
-    #[cfg(windows)]
+    let net = init_net_source(&config);
+
     let mut warned_lhm = false;
     #[cfg(windows)]
     let mut warned_net = false;
@@ -126,39 +146,37 @@ fn run(state: Arc<State>, config: HwmonitorConfig) {
         #[allow(unused_mut)]
         let mut network = Vec::new();
 
-        #[cfg(windows)]
-        if let Some(w) = wmi.as_mut() {
-            if let Some(lhm) = w.lhm.as_ref() {
-                match lhm.read() {
-                    Ok((cpu_sensors, gpu_sensors)) => {
-                        cpu.package_temp_c = cpu_sensors.package_temp_c;
-                        cpu.per_core_temp_c = cpu_sensors.per_core_temp_c;
-                        cpu.package_power_w = cpu_sensors.package_power_w;
-                        cpu.cores_power_w = cpu_sensors.cores_power_w;
-                        cpu.fans_rpm = named_values(cpu_sensors.fans_rpm);
-                        let g = gpu.get_or_insert_with(Default::default);
-                        g.temp_c = g.temp_c.or(gpu_sensors.temp_c);
-                        // Prefer nvidia-smi power; fall back to LHM (e.g. AMD/Intel).
-                        g.power_w = g.power_w.or(gpu_sensors.power_w);
-                        g.fan_pct = g.fan_pct.or(gpu_sensors.fan_pct);
-                        g.fans_rpm = named_values(gpu_sensors.fans_rpm);
-                    }
-                    Err(e) => {
-                        if !warned_lhm {
-                            warn!("hwmonitor: LHM read failed ({e})");
-                            warned_lhm = true;
-                        }
+        if let Some(l) = lhm.as_ref() {
+            match l.read() {
+                Ok((cpu_sensors, gpu_sensors)) => {
+                    cpu.package_temp_c = cpu_sensors.package_temp_c;
+                    cpu.per_core_temp_c = cpu_sensors.per_core_temp_c;
+                    cpu.package_power_w = cpu_sensors.package_power_w;
+                    cpu.cores_power_w = cpu_sensors.cores_power_w;
+                    cpu.fans_rpm = named_values(cpu_sensors.fans_rpm);
+                    let g = gpu.get_or_insert_with(Default::default);
+                    g.temp_c = g.temp_c.or(gpu_sensors.temp_c);
+                    g.power_w = g.power_w.or(gpu_sensors.power_w);
+                    g.fan_pct = g.fan_pct.or(gpu_sensors.fan_pct);
+                    g.fans_rpm = named_values(gpu_sensors.fans_rpm);
+                }
+                Err(e) => {
+                    if !warned_lhm {
+                        warn!("hwmonitor: LHM read failed ({e})");
+                        warned_lhm = true;
                     }
                 }
             }
-            if let Some(net) = w.net.as_ref() {
-                match net.read() {
-                    Ok(v) => network = v,
-                    Err(e) => {
-                        if !warned_net {
-                            warn!("hwmonitor: network counter read failed: {e}");
-                            warned_net = true;
-                        }
+        }
+
+        #[cfg(windows)]
+        if let Some(n) = net.as_ref() {
+            match n.read() {
+                Ok(v) => network = v,
+                Err(e) => {
+                    if !warned_net {
+                        warn!("hwmonitor: network counter read failed: {e}");
+                        warned_net = true;
                     }
                 }
             }
@@ -196,50 +214,23 @@ fn named_values(items: Vec<(String, u32)>) -> Vec<NamedValue<u32>> {
 }
 
 #[cfg(windows)]
-struct WindowsWmi {
-    lhm: Option<LhmSource>,
-    net: Option<NetSource>,
-}
-
-#[cfg(windows)]
-impl WindowsWmi {
-    fn init(config: &HwmonitorConfig) -> Option<Self> {
-        use wmi::COMLibrary;
-        let com = match COMLibrary::new() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("hwmonitor: COM init failed ({e}); WMI sources disabled");
-                return None;
-            }
-        };
-
-        let lhm = if config.enable_lhm {
-            match LhmSource::connect(com) {
-                Ok(s) => {
-                    info!("hwmonitor: LibreHardwareMonitor connected");
-                    Some(s)
-                }
-                Err(e) => {
-                    info!("hwmonitor: LHM unavailable ({e}); fans/temps will be omitted");
-                    None
-                }
-            }
-        } else {
+fn init_net_source(config: &HwmonitorConfig) -> Option<NetSource> {
+    if !config.enable_network {
+        return None;
+    }
+    use wmi::COMLibrary;
+    let com = match COMLibrary::new() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("hwmonitor: COM init failed ({e}); network counters disabled");
+            return None;
+        }
+    };
+    match NetSource::connect(com) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!("hwmonitor: network WMI connect failed: {e}");
             None
-        };
-
-        let net = if config.enable_network {
-            match NetSource::connect(com) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    warn!("hwmonitor: network WMI connect failed: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        Some(Self { lhm, net })
+        }
     }
 }

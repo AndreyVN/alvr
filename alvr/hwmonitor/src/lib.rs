@@ -9,13 +9,11 @@
 //! Each source degrades gracefully when its backend is missing; callers always
 //! get a `Snapshot` with `None` filled in for unavailable sources.
 
+mod lhm;
 mod network;
 mod nvidia_smi;
 mod sampler;
 mod sysinfo_source;
-
-#[cfg(windows)]
-mod lhm;
 
 pub use sampler::{Hwmonitor, HwmonitorConfig};
 
