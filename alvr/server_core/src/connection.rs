@@ -815,7 +815,7 @@ fn connection_pipeline(
     dbg_connection!("connection_pipeline: Got StreamReady packet");
 
     let (metrics_sender, metrics_exporter_thread) =
-        if let Switch::Enabled(config) = &initial_settings.extra.metrics_export {
+        if let Switch::Enabled(config) = &initial_settings.metrics.metrics_export {
             let (tx, rx) = crate::metrics_exporter::channel();
             let exporter_config = crate::metrics_exporter::ExporterConfig {
                 url: config.url.clone(),

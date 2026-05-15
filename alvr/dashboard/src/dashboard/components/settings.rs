@@ -239,7 +239,7 @@ impl SettingsTab {
 
                     // "Test metrics connection" button at the bottom of the Extra tab.
                     #[cfg(not(target_arch = "wasm32"))]
-                    if self.selected_top_tab_id == "extra" {
+                    if self.selected_top_tab_id == "metrics" {
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(4.0);
@@ -247,7 +247,7 @@ impl SettingsTab {
                         let url_opt = self
                             .session_settings_json
                             .as_ref()
-                            .and_then(|j| j.pointer("/extra/metrics_export/content/url"))
+                            .and_then(|j| j.pointer("/metrics/metrics_export/content/url"))
                             .and_then(|v| v.as_str())
                             .map(str::to_owned);
 

@@ -1663,6 +1663,10 @@ It does not update in real time.")
     pub open_setup_wizard: bool,
     pub new_version_popup: Switch<NewVersionPopupConfig>,
 
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct MetricsConfig {
     #[schema(strings(
         display_name = "Metrics export",
         help = "Push aggregated streaming statistics to an external HTTP endpoint (e.g. for \
@@ -1677,6 +1681,7 @@ pub struct Settings {
     pub audio: AudioConfig,
     pub headset: HeadsetConfig,
     pub connection: ConnectionConfig,
+    pub metrics: MetricsConfig,
     pub extra: ExtraConfig,
 }
 
@@ -2334,6 +2339,8 @@ pub fn session_settings_default() -> SettingsDefault {
                     hide_while_version: ALVR_VERSION.to_string(),
                 },
             },
+        },
+        metrics: MetricsConfigDefault {
             metrics_export: SwitchDefault {
                 enabled: false,
                 content: MetricsExportConfigDefault {
