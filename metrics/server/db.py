@@ -41,8 +41,6 @@ COLUMNS: Tuple[str, ...] = (
     "video_mbits_per_sec",
     "video_packets_total",
     "video_mbytes_total",
-    "battery_hmd_pct",
-    "battery_hmd_plugged",
     "bd_scaled_calculated_throughput_bps",
     "bd_decoder_latency_limiter_bps",
     "bd_network_latency_limiter_bps",
@@ -51,6 +49,19 @@ COLUMNS: Tuple[str, ...] = (
     "bd_manual_min_throughput_bps",
     "bd_requested_bitrate_bps",
     "failed_posts",
+)
+
+
+# ────────────────────────────── headset table ──────────────────────────────
+
+HEADSET_TABLE = "alvr.headset"
+HEADSET_COLS: Tuple[str, ...] = (
+    "ts", "host",
+    "battery_hmd_pct", "battery_hmd_plugged",
+    "hmd_battery_temp_c", "hmd_thermal_status", "hmd_thermal_headroom",
+    "hmd_mem_total_kib", "hmd_mem_available_kib", "hmd_process_rss_kib",
+    "hmd_cpu_total_pct", "hmd_cpu_process_pct",
+    "hmd_gpu_busy_pct", "hmd_gpu_freq_hz",
 )
 
 
@@ -121,7 +132,6 @@ def snapshot_to_row(s: Snapshot) -> List[Any]:
     lat = s.latency_ms
     fps = s.fps
     thr = s.throughput
-    bat = s.battery
     bd = s.bitrate_directives
 
     row: List[Any] = [
@@ -147,8 +157,6 @@ def snapshot_to_row(s: Snapshot) -> List[Any]:
         thr.video_mbits_per_sec,
         s.totals.video_packets,
         s.totals.video_mbytes,
-        bat.hmd_pct if bat else None,
-        (1 if bat.hmd_plugged else 0) if bat else None,
         bd.scaled_calculated_throughput_bps,
         bd.decoder_latency_limiter_bps,
         bd.network_latency_limiter_bps,
@@ -161,9 +169,37 @@ def snapshot_to_row(s: Snapshot) -> List[Any]:
     return row
 
 
+def headset_row(s: Snapshot) -> Optional[List[Any]]:
+    """Build a row for `alvr.headset`, or None if neither source has emitted
+    a sample yet (avoids writing rows with all-NULL payload columns)."""
+    bat = s.battery
+    tel = s.client_telemetry
+    if bat is None and tel is None:
+        return None
+    return [
+        s.ts,
+        s.host,
+        bat.hmd_pct if bat else None,
+        (1 if bat.hmd_plugged else 0) if bat else None,
+        tel.battery_temperature_c if tel else None,
+        tel.thermal_status if tel else None,
+        tel.thermal_headroom if tel else None,
+        tel.mem_total_kib if tel else None,
+        tel.mem_available_kib if tel else None,
+        tel.process_rss_kib if tel else None,
+        tel.cpu_total_pct if tel else None,
+        tel.cpu_process_pct if tel else None,
+        tel.gpu_busy_pct if tel else None,
+        tel.gpu_freq_hz if tel else None,
+    ]
+
+
 def insert(snapshot: Snapshot) -> None:
     client = get_client()
     client.insert(TABLE, [snapshot_to_row(snapshot)], column_names=list(COLUMNS))
+    hs_row = headset_row(snapshot)
+    if hs_row is not None:
+        client.insert(HEADSET_TABLE, [hs_row], column_names=list(HEADSET_COLS))
 
 
 def insert_hw(snap: HwSnapshot) -> None:

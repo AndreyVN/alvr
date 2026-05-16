@@ -164,11 +164,25 @@ def build_dashboard(ds_uid: str) -> dict:
                 f"WHERE {TF} AND {HF}\n"
                 f"GROUP BY time, host\nORDER BY time")
 
+    # per-host time series against the headset table (battery + extended telemetry)
+    def hs(col: str, agg: str = "avg") -> str:
+        return (f"SELECT {T}, host, {agg}({col}) AS value\n"
+                f"FROM alvr.headset\n"
+                f"WHERE {TF} AND {HF}\n"
+                f"GROUP BY time, host\nORDER BY time")
+
     # multi-column breakdown (one series per metric column, averaged across hosts)
     def breakdown(cols: dict[str, str]) -> str:
         selects = ",\n    ".join(f"avg({col}) AS \"{label}\"" for col, label in cols.items())
         return (f"SELECT {T},\n    {selects}\n"
                 f"FROM alvr.streaming_metrics\n"
+                f"WHERE {TF} AND {HF}\n"
+                f"GROUP BY time\nORDER BY time")
+
+    def hs_breakdown(cols: dict[str, str]) -> str:
+        selects = ",\n    ".join(f"avg({col}) AS \"{label}\"" for col, label in cols.items())
+        return (f"SELECT {T},\n    {selects}\n"
+                f"FROM alvr.headset\n"
                 f"WHERE {TF} AND {HF}\n"
                 f"GROUP BY time\nORDER BY time")
 
@@ -236,19 +250,42 @@ def build_dashboard(ds_uid: str) -> dict:
         ts_panel("Video Data Total — MB (cumulative)",
                  dev("video_mbytes_total", "max"), "decmbytes", 18, 12, 70, 12, 8),
 
-        # ── Battery ────────────────────────────────────────────────────────
-        row_panel("Battery", 103, 78),
+        # ── Headset (battery + extended telemetry) ────────────────────────
+        row_panel("Headset", 103, 78),
 
         ts_panel("HMD Battery (%)",
-                 dev("battery_hmd_pct"), "percent", 19, 0, 79, 12, 8),
+                 hs("battery_hmd_pct"), "percent", 19, 0, 79, 12, 8),
         ts_panel("HMD Charging (1 = charging)",
-                 dev("battery_hmd_plugged"), "short", 21, 12, 79, 12, 8),
+                 hs("battery_hmd_plugged"), "short", 21, 12, 79, 12, 8),
+
+        ts_panel("HMD Battery Temperature (°C)",
+                 hs("hmd_battery_temp_c"), "celsius", 30, 0, 87, 12, 8),
+        ts_panel("HMD Thermal Status (0=NONE … 6=SHUTDOWN)",
+                 hs("hmd_thermal_status", "max"), "short", 31, 12, 87, 12, 8),
+
+        ts_panel("HMD Thermal Headroom (1.0 ≈ throttling)",
+                 hs("hmd_thermal_headroom"), "short", 32, 0, 95, 24, 8),
+
+        ts_panel("HMD Memory Available (KiB)",
+                 hs("hmd_mem_available_kib"), "kbytes", 33, 0, 103, 12, 8),
+        ts_panel("HMD Process RSS (KiB)",
+                 hs("hmd_process_rss_kib"), "kbytes", 34, 12, 103, 12, 8),
+
+        ts_panel("HMD CPU — system (0..1)",
+                 hs("hmd_cpu_total_pct"), "percentunit", 35, 0, 111, 12, 8),
+        ts_panel("HMD CPU — alvr.client process (0..1)",
+                 hs("hmd_cpu_process_pct"), "percentunit", 36, 12, 111, 12, 8),
+
+        ts_panel("HMD GPU Busy (0..1)",
+                 hs("hmd_gpu_busy_pct"), "percentunit", 37, 0, 119, 12, 8),
+        ts_panel("HMD GPU Frequency (Hz)",
+                 hs("hmd_gpu_freq_hz"), "hertz", 38, 12, 119, 12, 8),
 
         # ── Exporter Health ────────────────────────────────────────────────
-        row_panel("Exporter Health", 104, 87),
+        row_panel("Exporter Health", 104, 127),
 
         ts_panel("Failed POST Attempts",
-                 dev("failed_posts", "sum"), "short", 20, 0, 88, 24, 8),
+                 dev("failed_posts", "sum"), "short", 20, 0, 128, 24, 8),
     ]
 
     return {

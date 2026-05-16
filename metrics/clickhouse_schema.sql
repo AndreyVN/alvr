@@ -100,10 +100,6 @@ CREATE TABLE IF NOT EXISTS alvr.streaming_metrics
     video_packets_total                     UInt64,
     video_mbytes_total                      UInt64,
 
-    -- ───── battery (last value, NULL until first Battery sample) ─────
-    battery_hmd_pct                         Nullable(UInt8),
-    battery_hmd_plugged                     Nullable(UInt8),
-
     -- ───── bitrate_directives (last value) ─────
     bd_scaled_calculated_throughput_bps     Nullable(Float32),
     bd_decoder_latency_limiter_bps          Nullable(Float32),
@@ -127,6 +123,58 @@ SETTINGS index_granularity = 8192;
 
 -- Rename `device` to `host` on existing deployments (no-op once renamed).
 ALTER TABLE alvr.streaming_metrics RENAME COLUMN IF EXISTS device TO host;
+
+-- Battery moved out of streaming_metrics into alvr.headset (no-op once dropped).
+ALTER TABLE alvr.streaming_metrics DROP COLUMN IF EXISTS battery_hmd_pct;
+ALTER TABLE alvr.streaming_metrics DROP COLUMN IF EXISTS battery_hmd_plugged;
+
+
+-- ─────────────────────────────────────────────────────────────────────
+--                          HEADSET METRICS
+-- One row per snapshot per host. Last-value semantics: each row carries
+-- the most recent battery + extended-telemetry sample seen by the
+-- aggregator during the snapshot window (the client reports every ~5 s).
+-- Rows are written only when at least one source has produced a sample
+-- since connection. Source:
+--   alvr/server_core/src/metrics_exporter.rs  (`battery` + `client_telemetry`)
+-- Wire types:
+--   alvr_packets::BatteryInfo, alvr_packets::ClientTelemetry
+-- ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS alvr.headset
+(
+    ts                       DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
+    host                     LowCardinality(String),
+
+    -- ───── battery (Android BATTERY_CHANGED intent) ─────
+    battery_hmd_pct          Nullable(UInt8),
+    battery_hmd_plugged      Nullable(UInt8),
+
+    -- ───── temperatures & thermal throttling state ─────
+    hmd_battery_temp_c       Nullable(Float32),
+    hmd_thermal_status       Nullable(Int8),
+    hmd_thermal_headroom     Nullable(Float32),
+
+    -- ───── memory (procfs) ─────
+    hmd_mem_total_kib        Nullable(UInt64),
+    hmd_mem_available_kib    Nullable(UInt64),
+    hmd_process_rss_kib      Nullable(UInt64),
+
+    -- ───── CPU (procfs delta) ─────
+    hmd_cpu_total_pct        Nullable(Float32),
+    hmd_cpu_process_pct      Nullable(Float32),
+
+    -- ───── GPU (KGSL sysfs, Adreno) ─────
+    hmd_gpu_busy_pct         Nullable(Float32),
+    hmd_gpu_freq_hz          Nullable(UInt64),
+
+    ingested_at              DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (host, ts)
+TTL toDateTime(ts) + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
 
 
 -- ─────────────────────────────────────────────────────────────────────

@@ -68,6 +68,25 @@ class Battery(BaseModel):
     hmd_plugged: bool
 
 
+class ClientTelemetry(BaseModel):
+    """Optional headset resource/thermal sample. Wire shape mirrors
+    `alvr_packets::ClientTelemetry`; any field can be omitted when the
+    sensor is unavailable on the client device."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    battery_temperature_c: Optional[float] = None
+    thermal_status: Optional[int] = None
+    thermal_headroom: Optional[float] = None
+    mem_total_kib: Optional[int] = None
+    mem_available_kib: Optional[int] = None
+    process_rss_kib: Optional[int] = None
+    cpu_total_pct: Optional[float] = None
+    cpu_process_pct: Optional[float] = None
+    gpu_busy_pct: Optional[float] = None
+    gpu_freq_hz: Optional[int] = None
+
+
 class BitrateDirectives(BaseModel):
     scaled_calculated_throughput_bps: Optional[float] = None
     decoder_latency_limiter_bps: Optional[float] = None
@@ -95,6 +114,7 @@ class Snapshot(BaseModel):
     throughput: Throughput
     totals: Totals
     battery: Optional[Battery] = None
+    client_telemetry: Optional[ClientTelemetry] = None
     bitrate_directives: BitrateDirectives
     exporter: ExporterHealth
 

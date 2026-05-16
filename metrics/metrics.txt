@@ -145,19 +145,6 @@ video_mbytes_total     UInt64   [megabytes]
 
 
 ────────────────────────────────────────────────────────────────────────────────
-BATTERY  (battery.*)  — last value carried from most recent Battery sample
-────────────────────────────────────────────────────────────────────────────────
-
-battery_hmd_pct        Nullable(UInt8)   [0–100 %]
-    Headset battery level as a percentage. NULL until the first battery
-    report is received from the client.
-
-battery_hmd_plugged    Nullable(UInt8)   [0 or 1]
-    1 if the headset is charging, 0 if on battery.
-    Stored as UInt8 because ClickHouse Bool is an alias for UInt8.
-
-
-────────────────────────────────────────────────────────────────────────────────
 BITRATE DIRECTIVES  (bitrate_directives.*)
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -221,6 +208,160 @@ Partition:   by month (toYYYYMM(ts))
 Order key:   (host, ts)
 TTL:         90 days from ts — rows are automatically dropped after 3 months
 Granularity: 8192 rows per index block (ClickHouse default)
+
+
+================================================================================
+HEADSET METRICS  (alvr.headset table)
+================================================================================
+
+Source: alvr/server_core/src/metrics_exporter.rs
+    Aggregator carries the most recent Battery and ClientTelemetry samples
+    across windows; both are emitted as nested objects in the same JSON
+    snapshot the streaming exporter POSTs every interval.
+Ingest:  metrics/server/models.py        (Snapshot.battery + .client_telemetry)
+         metrics/server/db.py            (insert → headset_row)
+Endpoint: POST /metrics
+    Shared with `streaming_metrics`. The ingest service inserts a streaming
+    row every snapshot and *additionally* inserts a headset row when at
+    least one source (battery, telemetry) has produced a sample.
+
+The client reports both blocks on a ~5 s cadence over the control socket.
+The streaming exporter aggregates per-frame stats every interval_ms
+(default 1 000 ms) and re-emits the latest headset values with each
+snapshot — so the table has one row per active snapshot window, and
+consecutive rows repeat the same battery / telemetry values until the
+next 5 s client report lands.
+
+Master toggle: Settings → Metrics → Extended headset telemetry. When OFF,
+the client only sends the HMD battery, and the `hmd_*` columns below stay
+NULL. When ON, the client also samples thermals, memory, CPU, and GPU.
+
+Every payload column is Nullable: the client emits None when a sensor
+isn't available on the device (older Android API level, non-Adreno GPU,
+restricted sysfs, missing platform method).
+
+Source on the client: alvr/system_info/src/android.rs
+Wire types: alvr_packets::BatteryInfo, alvr_packets::ClientTelemetry
+
+
+────────────────────────────────────────────────────────────────────────────────
+IDENTITY
+────────────────────────────────────────────────────────────────────────────────
+
+ts                  DateTime64(3, UTC)
+    Snapshot timestamp (end of the aggregation window). Join to
+    `streaming_metrics` and the `hw_*` tables on (host, ts).
+
+host                LowCardinality(String)
+    Same `host` label as the rest of the metrics — set in Settings →
+    Metrics → Host.
+
+
+────────────────────────────────────────────────────────────────────────────────
+BATTERY  (Android BATTERY_CHANGED intent)
+────────────────────────────────────────────────────────────────────────────────
+
+battery_hmd_pct          Nullable(UInt8)     [0–100 %]
+    Headset battery level as a percentage. NULL until the first battery
+    report is received from the client.
+
+battery_hmd_plugged      Nullable(UInt8)     [0 or 1]
+    1 if the headset is charging, 0 if on battery.
+    Stored as UInt8 because ClickHouse Bool is an alias for UInt8.
+
+
+────────────────────────────────────────────────────────────────────────────────
+TEMPERATURES & THERMAL THROTTLING
+────────────────────────────────────────────────────────────────────────────────
+
+hmd_battery_temp_c       Nullable(Float32)   [°C]
+    Battery sensor temperature in degrees Celsius, read from
+    BatteryManager.EXTRA_TEMPERATURE on the same sticky BATTERY_CHANGED
+    intent that feeds battery_hmd_pct. On Quest the battery sits near the
+    SoC and display drivers, so this is a reasonable proxy for overall
+    HMD warming.
+
+hmd_thermal_status       Nullable(Int8)      [0–6]
+    Android PowerManager.getCurrentThermalStatus() (API 29+). Discrete
+    bucket: 0=NONE, 1=LIGHT, 2=MODERATE, 3=SEVERE, 4=CRITICAL,
+    5=EMERGENCY, 6=SHUTDOWN. Levels ≥ 2 usually correspond to the
+    runtime starting to throttle frame rate or resolution.
+
+hmd_thermal_headroom     Nullable(Float32)   [unitless, 0.0–1.0+]
+    Android PowerManager.getThermalHeadroom(0) forecast (API 30+).
+    Values approach 1.0 as throttling becomes imminent; can exceed 1.0
+    during active throttling. NULL on API 29 even when hmd_thermal_status
+    is populated.
+
+
+────────────────────────────────────────────────────────────────────────────────
+MEMORY  (procfs)
+────────────────────────────────────────────────────────────────────────────────
+
+hmd_mem_total_kib        Nullable(UInt64)    [kibibytes]
+    MemTotal from /proc/meminfo. System RAM visible to userspace.
+    Effectively constant per device.
+
+hmd_mem_available_kib    Nullable(UInt64)    [kibibytes]
+    MemAvailable from /proc/meminfo. Memory the kernel estimates is
+    available for new allocations without swapping. Tracks free RAM
+    minus kernel reservations.
+
+hmd_process_rss_kib      Nullable(UInt64)    [kibibytes]
+    VmRSS from /proc/self/status. Resident set size of the client
+    process (alvr.client) — the actual physical RAM the headset app is
+    using.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CPU  (procfs delta)
+────────────────────────────────────────────────────────────────────────────────
+
+hmd_cpu_total_pct        Nullable(Float32)   [fraction 0.0–1.0]
+    System-wide CPU busy fraction since the previous sample, derived
+    from /proc/stat (busy_jiffies / total_jiffies delta). Multiply by
+    100 in Grafana for a percentage display. NULL on the first sample
+    after connection because the sampler needs two ticks for a delta.
+
+hmd_cpu_process_pct      Nullable(Float32)   [fraction 0.0–1.0, may be > 1.0]
+    Per-process CPU fraction for alvr.client since the previous sample,
+    derived from utime+stime in /proc/self/stat divided by the same
+    total_jiffies delta. May exceed 1.0 on multi-core SoCs because both
+    utime and stime aggregate across threads.
+
+
+────────────────────────────────────────────────────────────────────────────────
+GPU  (KGSL sysfs, Adreno)
+────────────────────────────────────────────────────────────────────────────────
+
+hmd_gpu_busy_pct         Nullable(Float32)   [fraction 0.0–1.0]
+    GPU busy fraction since the previous sample, read from KGSL
+    `/sys/class/kgsl/kgsl-3d0/gpubusy` (busy_ticks / total_ticks delta).
+    Adreno-only (Quest, Pico) — NULL on other GPUs or when newer
+    firmware restricts sysfs. First sample is NULL (sampler primes).
+
+hmd_gpu_freq_hz          Nullable(UInt64)    [hertz]
+    Current GPU clock from KGSL devfreq (`devfreq/cur_freq`, falling
+    back to legacy `gpuclk`). Reported as a snapshot, not a delta, so
+    it is valid even on the very first sample after connection.
+
+
+────────────────────────────────────────────────────────────────────────────────
+INGESTION BOOKKEEPING
+────────────────────────────────────────────────────────────────────────────────
+
+ingested_at    DateTime64(3, UTC)
+    Server-side timestamp of when the row was written to ClickHouse.
+
+
+────────────────────────────────────────────────────────────────────────────────
+TABLE ENGINE & RETENTION
+────────────────────────────────────────────────────────────────────────────────
+
+Engine:      MergeTree
+Partition:   by month (toYYYYMM(ts))
+Order key:   (host, ts)
+TTL:         90 days from ts
 
 
 ================================================================================
