@@ -417,11 +417,11 @@ fn connection_pipeline(
 
     let (log_channel_sender, log_channel_receiver) = mpsc::channel();
 
+    // Master toggle for everything beyond the HMD battery: controller batteries plus
+    // memory/CPU/GPU/thermal samples. When off, the client falls back to the legacy behavior of
+    // only reporting the headset's own battery level and charging state.
     #[cfg(target_os = "android")]
-    let report_controller_battery = matches!(
-        &settings.headset.controllers,
-        Switch::Enabled(c) if c.report_battery,
-    );
+    let extended_headset_telemetry = settings.metrics.extended_headset_telemetry;
 
     let control_send_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
@@ -459,30 +459,32 @@ fn connection_pipeline(
                 #[cfg(target_os = "android")]
                 if Instant::now() > battery_deadline {
                     let (gauge_value, is_plugged) = alvr_system_info::get_battery_status();
-                    let controllers = if report_controller_battery {
-                        alvr_system_info::get_controller_battery_status()
-                    } else {
-                        Vec::new()
-                    };
 
-                    let (thermal_status, thermal_headroom) =
-                        alvr_system_info::get_thermal_state();
-                    let battery_temperature_c = alvr_system_info::get_battery_temperature_c();
-                    let mem = alvr_system_info::get_meminfo();
-                    let (cpu_total_pct, cpu_process_pct) = cpu_sampler.sample();
-                    let (gpu_busy_pct, gpu_freq_hz) = gpu_sampler.sample();
-                    let telemetry = ClientTelemetry {
-                        battery_temperature_c,
-                        thermal_headroom,
-                        thermal_status,
-                        mem_total_kib: mem.total_kib,
-                        mem_available_kib: mem.available_kib,
-                        process_rss_kib: mem.process_rss_kib,
-                        cpu_total_pct,
-                        cpu_process_pct,
-                        gpu_busy_pct,
-                        gpu_freq_hz,
-                    };
+                    // Extended payload: controller batteries + ClientTelemetry. Skipped wholesale
+                    // when the toggle is off, leaving only the HMD battery on the wire.
+                    let extended = extended_headset_telemetry.then(|| {
+                        let (thermal_status, thermal_headroom) =
+                            alvr_system_info::get_thermal_state();
+                        let mem = alvr_system_info::get_meminfo();
+                        let (cpu_total_pct, cpu_process_pct) = cpu_sampler.sample();
+                        let (gpu_busy_pct, gpu_freq_hz) = gpu_sampler.sample();
+                        let telemetry = ClientTelemetry {
+                            battery_temperature_c: alvr_system_info::get_battery_temperature_c(),
+                            thermal_headroom,
+                            thermal_status,
+                            mem_total_kib: mem.total_kib,
+                            mem_available_kib: mem.available_kib,
+                            process_rss_kib: mem.process_rss_kib,
+                            cpu_total_pct,
+                            cpu_process_pct,
+                            gpu_busy_pct,
+                            gpu_freq_hz,
+                        };
+                        (
+                            alvr_system_info::get_controller_battery_status(),
+                            telemetry,
+                        )
+                    });
 
                     if let Some(sender) = &mut *ctx.control_sender.lock() {
                         sender
@@ -493,24 +495,26 @@ fn connection_pipeline(
                             }))
                             .ok();
 
-                        for controller in controllers {
-                            let device_id = if controller.is_left {
-                                *alvr_common::HAND_LEFT_ID
-                            } else {
-                                *alvr_common::HAND_RIGHT_ID
-                            };
+                        if let Some((controllers, telemetry)) = extended {
+                            for controller in controllers {
+                                let device_id = if controller.is_left {
+                                    *alvr_common::HAND_LEFT_ID
+                                } else {
+                                    *alvr_common::HAND_RIGHT_ID
+                                };
+                                sender
+                                    .send(&ClientControlPacket::Battery(crate::BatteryInfo {
+                                        device_id,
+                                        gauge_value: controller.gauge_value,
+                                        is_plugged: controller.is_plugged,
+                                    }))
+                                    .ok();
+                            }
+
                             sender
-                                .send(&ClientControlPacket::Battery(crate::BatteryInfo {
-                                    device_id,
-                                    gauge_value: controller.gauge_value,
-                                    is_plugged: controller.is_plugged,
-                                }))
+                                .send(&ClientControlPacket::Telemetry(telemetry))
                                 .ok();
                         }
-
-                        sender
-                            .send(&ClientControlPacket::Telemetry(telemetry))
-                            .ok();
                     }
 
                     battery_deadline = Instant::now() + Duration::from_secs(5);

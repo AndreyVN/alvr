@@ -645,8 +645,10 @@ pub extern "C" fn set_device_openvr_props(instance_ptr: *mut c_void, device_id: 
 
             // Controller battery is sourced from the client (Android InputDevice.getBatteryState
             // on Quest, etc.) and pushed via SetBattery -> Prop_DeviceBatteryPercentage_Float.
-            // Trackers and hand-tracking "devices" don't have a meaningful gauge to report.
-            let provides_battery = config.report_battery
+            // Trackers and hand-tracking "devices" don't have a meaningful gauge to report. The
+            // master gate lives under Metrics -> "Extended headset telemetry": with it off, the
+            // client only sends the HMD battery, so SteamVR shouldn't expect a controller gauge.
+            let provides_battery = settings.metrics.extended_headset_telemetry
                 && !full_skeletal_hand
                 && !matches!(config.emulation_mode, ControllersEmulationMode::ViveTracker);
             set_prop(

@@ -1206,13 +1206,6 @@ Currently this cannot be reliably estimated automatically. The correct value sho
     pub haptics: Switch<HapticsConfig>,
 
     #[schema(flag = "steamvr-restart")]
-    #[schema(strings(
-        display_name = "Report controller battery",
-        help = "Reports controller battery percentage to SteamVR (read via Android InputDevice.getBatteryState on the client). Disable for compatibility with older client builds that don't send controller battery packets."
-    ))]
-    pub report_battery: bool,
-
-    #[schema(flag = "steamvr-restart")]
     pub emulation_mode: ControllersEmulationMode,
 
     #[schema(flag = "steamvr-restart")]
@@ -1688,6 +1681,16 @@ pub struct MetricsConfig {
                 Grafana). Settings are read on client reconnect."
     ))]
     pub metrics_export: Switch<MetricsExportConfig>,
+
+    #[schema(flag = "steamvr-restart")]
+    #[schema(strings(
+        display_name = "Extended headset telemetry",
+        help = "When enabled, the client reports controller battery (via Android \
+                InputDevice.getBatteryState) and HMD memory/CPU/GPU/thermal samples. \
+                When disabled, only the HMD battery level and charging state are sent — \
+                matching the behavior of older client builds."
+    ))]
+    pub extended_headset_telemetry: bool,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2218,7 +2221,6 @@ pub fn session_settings_default() -> SettingsDefault {
                             min_duration_s: 0.01,
                         },
                     },
-                    report_battery: true,
                 },
             },
             recentering_mode: RecenteringModeDefault {
@@ -2373,6 +2375,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     hw_url: "http://127.0.0.1:8086/api/hw_metrics".into(),
                 },
             },
+            extended_headset_telemetry: true,
         },
     }
 }
