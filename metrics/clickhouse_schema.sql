@@ -121,10 +121,14 @@ ORDER BY (host, ts)
 TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
 
--- Rename `device` to `host` on existing deployments (no-op once renamed).
-ALTER TABLE alvr.streaming_metrics RENAME COLUMN IF EXISTS device TO host;
-
--- Battery moved out of streaming_metrics into alvr.headset (no-op once dropped).
+-- Legacy migration: pre-May-2026 deployments had a `device` column in the
+-- ORDER BY key. ClickHouse can't rename a key column in place, so historic
+-- deployments need a one-time `DROP TABLE alvr.streaming_metrics` before the
+-- CREATE above can take effect. Run by hand if the previous deploy stuck.
+--
+-- Battery moved out of streaming_metrics into alvr.headset; the ALTERs below
+-- are safe no-ops on a fresh table and clean up older deployments that still
+-- carry the columns.
 ALTER TABLE alvr.streaming_metrics DROP COLUMN IF EXISTS battery_hmd_pct;
 ALTER TABLE alvr.streaming_metrics DROP COLUMN IF EXISTS battery_hmd_plugged;
 
