@@ -1336,6 +1336,11 @@ fn connection_pipeline(
                             .send(ServerCoreEvent::ProximityState(headset_is_worn))
                             .ok();
                     }
+                    ClientControlPacket::Telemetry(telemetry) => {
+                        if let Some(stats) = &mut *ctx.statistics_manager.write() {
+                            stats.report_client_telemetry(telemetry);
+                        }
+                    }
                     ClientControlPacket::Reserved(_) | ClientControlPacket::ReservedBuffer(_) => (),
                 }
 

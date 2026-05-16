@@ -168,6 +168,36 @@ pub struct BatteryInfo {
     pub is_plugged: bool,
 }
 
+/// Client-side resource utilization, sampled on the same cadence as `BatteryInfo`. Every field is
+/// `Option` so a platform that can't read a given sensor simply omits it instead of lying with a
+/// sentinel.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ClientTelemetry {
+    /// Battery sensor temperature in degrees Celsius (Android `BatteryManager.EXTRA_TEMPERATURE`).
+    /// On Quest the battery sits near the SoC/display drivers, so this tracks overall HMD warming.
+    pub battery_temperature_c: Option<f32>,
+    /// `PowerManager.getThermalHeadroom(0)`: 0.0..1.0+, 1.0 means imminent throttling.
+    pub thermal_headroom: Option<f32>,
+    /// `PowerManager.getCurrentThermalStatus()`: 0=NONE..6=SHUTDOWN.
+    pub thermal_status: Option<i32>,
+    /// Total RAM in kibibytes (`MemTotal` from /proc/meminfo).
+    pub mem_total_kib: Option<u64>,
+    /// Available RAM in kibibytes (`MemAvailable` from /proc/meminfo).
+    pub mem_available_kib: Option<u64>,
+    /// Client process resident set size in kibibytes (`VmRSS` from /proc/self/status).
+    pub process_rss_kib: Option<u64>,
+    /// System-wide CPU busy fraction in [0, 1] over the last sampling interval.
+    pub cpu_total_pct: Option<f32>,
+    /// Client-process CPU busy fraction in [0, 1] over the last sampling interval. Can exceed 1.0
+    /// on multi-core devices because `utime+stime` aggregates all threads.
+    pub cpu_process_pct: Option<f32>,
+    /// GPU busy fraction in [0, 1] over the last sampling interval, read from KGSL `gpubusy`.
+    /// Adreno only; `None` on other GPUs or when sysfs is restricted.
+    pub gpu_busy_pct: Option<f32>,
+    /// GPU current frequency in Hz from KGSL devfreq.
+    pub gpu_freq_hz: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum ButtonValue {
     Binary(bool),
@@ -199,6 +229,7 @@ pub enum ClientControlPacket {
         message: String,
     },
     ProximityState(bool),
+    Telemetry(ClientTelemetry),
     Reserved(String),
     ReservedBuffer(Vec<u8>),
 }

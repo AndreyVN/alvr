@@ -1,5 +1,6 @@
 use alvr_common::{info, warn};
 use alvr_events::{BitrateDirectives, GraphStatistics};
+use alvr_packets::ClientTelemetry;
 use flume::{Receiver, RecvTimeoutError, Sender};
 use serde_json::{Map, Value, json};
 use std::thread::{self, JoinHandle};
@@ -20,6 +21,7 @@ pub enum Sample {
         hmd_plugged: bool,
     },
     Bitrate(BitrateDirectives),
+    ClientTelemetry(ClientTelemetry),
 }
 
 pub struct ExporterConfig {
@@ -96,6 +98,7 @@ struct Aggregator {
     last_battery_hmd_pct: Option<u32>,
     last_battery_hmd_plugged: bool,
     last_bitrate_directives: BitrateDirectives,
+    last_client_telemetry: Option<ClientTelemetry>,
 
     // Cumulative counters: end-of-window values from latest Frame sample.
     video_packets_total: u64,
@@ -140,6 +143,9 @@ impl Aggregator {
             }
             Sample::Bitrate(directives) => {
                 self.last_bitrate_directives = directives;
+            }
+            Sample::ClientTelemetry(telemetry) => {
+                self.last_client_telemetry = Some(telemetry);
             }
         }
     }
@@ -197,6 +203,21 @@ impl Aggregator {
             })
         });
 
+        let client_telemetry = self.last_client_telemetry.as_ref().map(|t| {
+            json!({
+                "battery_temperature_c": t.battery_temperature_c,
+                "thermal_status": t.thermal_status,
+                "thermal_headroom": t.thermal_headroom,
+                "mem_total_kib": t.mem_total_kib,
+                "mem_available_kib": t.mem_available_kib,
+                "process_rss_kib": t.process_rss_kib,
+                "cpu_total_pct": t.cpu_total_pct,
+                "cpu_process_pct": t.cpu_process_pct,
+                "gpu_busy_pct": t.gpu_busy_pct,
+                "gpu_freq_hz": t.gpu_freq_hz,
+            })
+        });
+
         let snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "host": host,
@@ -208,6 +229,7 @@ impl Aggregator {
             "throughput": throughput,
             "totals": totals,
             "battery": battery,
+            "client_telemetry": client_telemetry,
             "bitrate_directives": self.last_bitrate_directives,
             "exporter": { "failed_posts": self.failed_posts },
         });

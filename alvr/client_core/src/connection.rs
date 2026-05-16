@@ -18,6 +18,8 @@ use alvr_packets::{
     HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
     VIDEO, VideoPacketHeader, VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
 };
+#[cfg(target_os = "android")]
+use alvr_packets::ClientTelemetry;
 use alvr_session::{SocketProtocol, settings_schema::Switch};
 use alvr_sockets::{
     ControlSocketSender, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, PeerType, ProtoControlSocket,
@@ -430,6 +432,10 @@ fn connection_pipeline(
 
             #[cfg(target_os = "android")]
             let mut battery_deadline = Instant::now();
+            #[cfg(target_os = "android")]
+            let mut cpu_sampler = alvr_system_info::CpuSampler::new();
+            #[cfg(target_os = "android")]
+            let mut gpu_sampler = alvr_system_info::GpuSampler::new();
 
             while is_streaming(&ctx) && *lifecycle_state.read() == LifecycleState::Resumed {
                 if let Ok(packet) = log_channel_receiver.recv_timeout(STREAMING_RECV_TIMEOUT)
@@ -458,6 +464,26 @@ fn connection_pipeline(
                     } else {
                         Vec::new()
                     };
+
+                    let (thermal_status, thermal_headroom) =
+                        alvr_system_info::get_thermal_state();
+                    let battery_temperature_c = alvr_system_info::get_battery_temperature_c();
+                    let mem = alvr_system_info::get_meminfo();
+                    let (cpu_total_pct, cpu_process_pct) = cpu_sampler.sample();
+                    let (gpu_busy_pct, gpu_freq_hz) = gpu_sampler.sample();
+                    let telemetry = ClientTelemetry {
+                        battery_temperature_c,
+                        thermal_headroom,
+                        thermal_status,
+                        mem_total_kib: mem.total_kib,
+                        mem_available_kib: mem.available_kib,
+                        process_rss_kib: mem.process_rss_kib,
+                        cpu_total_pct,
+                        cpu_process_pct,
+                        gpu_busy_pct,
+                        gpu_freq_hz,
+                    };
+
                     if let Some(sender) = &mut *ctx.control_sender.lock() {
                         sender
                             .send(&ClientControlPacket::Battery(crate::BatteryInfo {
@@ -481,6 +507,10 @@ fn connection_pipeline(
                                 }))
                                 .ok();
                         }
+
+                        sender
+                            .send(&ClientControlPacket::Telemetry(telemetry))
+                            .ok();
                     }
 
                     battery_deadline = Instant::now() + Duration::from_secs(5);

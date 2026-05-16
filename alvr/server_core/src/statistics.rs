@@ -1,7 +1,7 @@
 use crate::metrics_exporter::{self, Sample};
 use alvr_common::{HEAD_ID, SlidingWindowAverage};
 use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
-use alvr_packets::ClientStatistics;
+use alvr_packets::{ClientStatistics, ClientTelemetry};
 use flume::Sender;
 use std::{
     collections::{HashMap, VecDeque},
@@ -182,6 +182,12 @@ impl StatisticsManager {
                     hmd_plugged: is_plugged,
                 },
             );
+        }
+    }
+
+    pub fn report_client_telemetry(&mut self, telemetry: ClientTelemetry) {
+        if let Some(sender) = &self.metrics_sender {
+            metrics_exporter::try_push(sender, Sample::ClientTelemetry(telemetry));
         }
     }
 
