@@ -9,6 +9,13 @@ use std::time::{Duration, Instant};
 const SAMPLE_CHANNEL_CAPACITY: usize = 4096;
 const WARN_RATE_LIMIT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy)]
+pub enum BatterySlot {
+    Hmd,
+    ControllerLeft,
+    ControllerRight,
+}
+
 #[derive(Clone)]
 pub enum Sample {
     Frame {
@@ -17,8 +24,9 @@ pub enum Sample {
         video_bytes_total: u64,
     },
     Battery {
-        hmd_pct: u32,
-        hmd_plugged: bool,
+        slot: BatterySlot,
+        pct: u32,
+        plugged: bool,
     },
     Bitrate(BitrateDirectives),
     ClientTelemetry(ClientTelemetry),
@@ -97,6 +105,10 @@ struct Aggregator {
     // Last-value state (carried across windows).
     last_battery_hmd_pct: Option<u32>,
     last_battery_hmd_plugged: bool,
+    last_battery_ctl_left_pct: Option<u32>,
+    last_battery_ctl_left_plugged: bool,
+    last_battery_ctl_right_pct: Option<u32>,
+    last_battery_ctl_right_plugged: bool,
     last_bitrate_directives: BitrateDirectives,
     last_client_telemetry: Option<ClientTelemetry>,
 
@@ -134,13 +146,20 @@ impl Aggregator {
                 self.video_bytes_total = video_bytes_total;
                 self.frames += 1;
             }
-            Sample::Battery {
-                hmd_pct,
-                hmd_plugged,
-            } => {
-                self.last_battery_hmd_pct = Some(hmd_pct);
-                self.last_battery_hmd_plugged = hmd_plugged;
-            }
+            Sample::Battery { slot, pct, plugged } => match slot {
+                BatterySlot::Hmd => {
+                    self.last_battery_hmd_pct = Some(pct);
+                    self.last_battery_hmd_plugged = plugged;
+                }
+                BatterySlot::ControllerLeft => {
+                    self.last_battery_ctl_left_pct = Some(pct);
+                    self.last_battery_ctl_left_plugged = plugged;
+                }
+                BatterySlot::ControllerRight => {
+                    self.last_battery_ctl_right_pct = Some(pct);
+                    self.last_battery_ctl_right_plugged = plugged;
+                }
+            },
             Sample::Bitrate(directives) => {
                 self.last_bitrate_directives = directives;
             }
@@ -196,10 +215,23 @@ impl Aggregator {
             "video_mbytes": (self.video_bytes_total as f64 / 1_000_000.0) as u64,
         });
 
-        let battery = self.last_battery_hmd_pct.map(|pct| {
+        // Surface a `battery` object whenever any slot has produced a sample. Each slot's pair
+        // (`<slot>_pct`, `<slot>_plugged`) is independent — the HMD pair can be present while the
+        // controllers stay None (e.g. extended telemetry off, or no controllers paired yet).
+        let battery_any = self.last_battery_hmd_pct.is_some()
+            || self.last_battery_ctl_left_pct.is_some()
+            || self.last_battery_ctl_right_pct.is_some();
+        let battery = battery_any.then(|| {
             json!({
-                "hmd_pct": pct,
-                "hmd_plugged": self.last_battery_hmd_plugged,
+                "hmd_pct": self.last_battery_hmd_pct,
+                "hmd_plugged": self.last_battery_hmd_pct
+                    .map(|_| self.last_battery_hmd_plugged),
+                "ctl_left_pct": self.last_battery_ctl_left_pct,
+                "ctl_left_plugged": self.last_battery_ctl_left_pct
+                    .map(|_| self.last_battery_ctl_left_plugged),
+                "ctl_right_pct": self.last_battery_ctl_right_pct,
+                "ctl_right_plugged": self.last_battery_ctl_right_pct
+                    .map(|_| self.last_battery_ctl_right_plugged),
             })
         });
 

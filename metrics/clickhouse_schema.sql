@@ -146,9 +146,13 @@ CREATE TABLE IF NOT EXISTS alvr.headset
     ts                       DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(1)),
     host                     LowCardinality(String),
 
-    -- ───── battery (Android BATTERY_CHANGED intent) ─────
-    battery_hmd_pct          Nullable(UInt8),
-    battery_hmd_plugged      Nullable(UInt8),
+    -- ───── battery (HMD: Android BATTERY_CHANGED; controllers: InputDevice) ─────
+    battery_hmd_pct              Nullable(UInt8),
+    battery_hmd_plugged          Nullable(UInt8),
+    battery_ctl_left_pct         Nullable(UInt8),
+    battery_ctl_left_plugged     Nullable(UInt8),
+    battery_ctl_right_pct        Nullable(UInt8),
+    battery_ctl_right_plugged    Nullable(UInt8),
 
     -- ───── temperatures & thermal throttling state ─────
     hmd_battery_temp_c       Nullable(Float32),

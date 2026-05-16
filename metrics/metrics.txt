@@ -258,16 +258,38 @@ host                LowCardinality(String)
 
 
 ────────────────────────────────────────────────────────────────────────────────
-BATTERY  (Android BATTERY_CHANGED intent)
+BATTERY  (HMD: Android BATTERY_CHANGED; controllers: InputDevice)
 ────────────────────────────────────────────────────────────────────────────────
 
-battery_hmd_pct          Nullable(UInt8)     [0–100 %]
+The HMD pair is populated whenever the client is connected; the
+controller pairs are populated only when Extended headset telemetry is
+ON *and* the active controllers expose a battery state via
+`InputDevice.getBatteryState` (Quest Touch, etc.). Each pair is
+independent — the HMD may be present while the controllers stay NULL,
+e.g. if controllers haven't been turned on since connection.
+
+All `plugged` columns are stored as UInt8 because ClickHouse Bool is an
+alias for UInt8.
+
+battery_hmd_pct              Nullable(UInt8)   [0–100 %]
     Headset battery level as a percentage. NULL until the first battery
     report is received from the client.
 
-battery_hmd_plugged      Nullable(UInt8)     [0 or 1]
+battery_hmd_plugged          Nullable(UInt8)   [0 or 1]
     1 if the headset is charging, 0 if on battery.
-    Stored as UInt8 because ClickHouse Bool is an alias for UInt8.
+
+battery_ctl_left_pct         Nullable(UInt8)   [0–100 %]
+    Left controller battery level as a percentage.
+
+battery_ctl_left_plugged     Nullable(UInt8)   [0 or 1]
+    1 if the left controller reports CHARGING or FULL via
+    InputDevice.BatteryState.getStatus, 0 otherwise.
+
+battery_ctl_right_pct        Nullable(UInt8)   [0–100 %]
+    Right controller battery level as a percentage.
+
+battery_ctl_right_plugged    Nullable(UInt8)   [0 or 1]
+    1 if the right controller reports CHARGING or FULL, 0 otherwise.
 
 
 ────────────────────────────────────────────────────────────────────────────────

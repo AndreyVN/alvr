@@ -1,5 +1,5 @@
-use crate::metrics_exporter::{self, Sample};
-use alvr_common::{HEAD_ID, SlidingWindowAverage};
+use crate::metrics_exporter::{self, BatterySlot, Sample};
+use alvr_common::{HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, SlidingWindowAverage};
 use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
 use alvr_packets::{ClientStatistics, ClientTelemetry};
 use flume::Sender;
@@ -172,14 +172,23 @@ impl StatisticsManager {
             is_plugged,
         };
 
-        if device_id == *HEAD_ID
-            && let Some(sender) = &self.metrics_sender
-        {
+        let slot = if device_id == *HEAD_ID {
+            Some(BatterySlot::Hmd)
+        } else if device_id == *HAND_LEFT_ID {
+            Some(BatterySlot::ControllerLeft)
+        } else if device_id == *HAND_RIGHT_ID {
+            Some(BatterySlot::ControllerRight)
+        } else {
+            None
+        };
+
+        if let (Some(slot), Some(sender)) = (slot, &self.metrics_sender) {
             metrics_exporter::try_push(
                 sender,
                 Sample::Battery {
-                    hmd_pct: (gauge_value * 100.0) as u32,
-                    hmd_plugged: is_plugged,
+                    slot,
+                    pct: (gauge_value * 100.0) as u32,
+                    plugged: is_plugged,
                 },
             );
         }

@@ -58,11 +58,17 @@ HEADSET_TABLE = "alvr.headset"
 HEADSET_COLS: Tuple[str, ...] = (
     "ts", "host",
     "battery_hmd_pct", "battery_hmd_plugged",
+    "battery_ctl_left_pct", "battery_ctl_left_plugged",
+    "battery_ctl_right_pct", "battery_ctl_right_plugged",
     "hmd_battery_temp_c", "hmd_thermal_status", "hmd_thermal_headroom",
     "hmd_mem_total_kib", "hmd_mem_available_kib", "hmd_process_rss_kib",
     "hmd_cpu_total_pct", "hmd_cpu_process_pct",
     "hmd_gpu_busy_pct", "hmd_gpu_freq_hz",
 )
+
+
+def _bool_to_u8(v: Optional[bool]) -> Optional[int]:
+    return None if v is None else (1 if v else 0)
 
 
 # ─────────────────────────── hardware tables ───────────────────────────
@@ -180,7 +186,11 @@ def headset_row(s: Snapshot) -> Optional[List[Any]]:
         s.ts,
         s.host,
         bat.hmd_pct if bat else None,
-        (1 if bat.hmd_plugged else 0) if bat else None,
+        _bool_to_u8(bat.hmd_plugged) if bat else None,
+        bat.ctl_left_pct if bat else None,
+        _bool_to_u8(bat.ctl_left_plugged) if bat else None,
+        bat.ctl_right_pct if bat else None,
+        _bool_to_u8(bat.ctl_right_plugged) if bat else None,
         tel.battery_temperature_c if tel else None,
         tel.thermal_status if tel else None,
         tel.thermal_headroom if tel else None,

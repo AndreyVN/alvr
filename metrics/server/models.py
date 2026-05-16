@@ -64,8 +64,19 @@ class Totals(BaseModel):
 
 
 class Battery(BaseModel):
-    hmd_pct: int
-    hmd_plugged: bool
+    """Per-slot last-value battery levels. The HMD pair is the only one
+    that pre-dates the extended-telemetry toggle; the controller pairs
+    are populated only when the toggle is on and the headset reports
+    them via `InputDevice.getBatteryState`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    hmd_pct: Optional[int] = None
+    hmd_plugged: Optional[bool] = None
+    ctl_left_pct: Optional[int] = None
+    ctl_left_plugged: Optional[bool] = None
+    ctl_right_pct: Optional[int] = None
+    ctl_right_plugged: Optional[bool] = None
 
 
 class ClientTelemetry(BaseModel):
