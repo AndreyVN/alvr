@@ -1635,6 +1635,15 @@ pub struct MetricsExportConfig {
     ))]
     pub hw_url: String,
 
+    #[schema(strings(
+        display_name = "LibreHardwareMonitor URL",
+        help = "URL of the LibreHardwareMonitor web server (Options → Run web server inside \
+                LHM). Used by the hardware telemetry sampler for temperatures, fan RPM, and \
+                per-DIMM/storage sensors that aren't reachable from sysinfo / nvidia-smi. \
+                Default port is 8085."
+    ))]
+    pub lhm_url: String,
+
     #[schema(strings(display_name = "Push interval"))]
     #[schema(suffix = "ms")]
     #[schema(gui(slider(min = 100, max = 60000, step = 100)))]
@@ -2375,6 +2384,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     host: "".into(),
                     url: "http://127.0.0.1:8086/api/metrics".into(),
                     hw_url: "http://127.0.0.1:8086/api/hw_metrics".into(),
+                    lhm_url: "http://127.0.0.1:8085/data.json".into(),
                     interval_ms: 1000,
                     hw_interval_ms: 1000,
                     timeout_ms: 500,

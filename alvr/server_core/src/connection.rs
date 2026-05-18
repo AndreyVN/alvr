@@ -833,6 +833,7 @@ fn connection_pipeline(
                     timeout: Duration::from_millis(config.timeout_ms),
                     headers: config.headers.clone(),
                     host: config.host.clone(),
+                    lhm_url: config.lhm_url.clone(),
                 };
                 Some(crate::hwmonitor_exporter::spawn(hw_config))
             } else {

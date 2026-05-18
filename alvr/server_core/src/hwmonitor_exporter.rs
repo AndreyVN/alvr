@@ -22,6 +22,8 @@ pub struct HwExporterConfig {
     pub timeout: Duration,
     pub headers: Vec<(String, String)>,
     pub host: String,
+    /// Override for `HwmonitorConfig.lhm_url`. Empty falls back to the default.
+    pub lhm_url: String,
 }
 
 struct Shutdown {
@@ -83,10 +85,14 @@ fn run(config: HwExporterConfig, shutdown: Arc<Shutdown>) {
         config.interval.as_millis()
     );
 
-    let monitor = Hwmonitor::spawn(HwmonitorConfig {
+    let mut hw_config = HwmonitorConfig {
         interval: config.interval,
         ..HwmonitorConfig::default()
-    });
+    };
+    if !config.lhm_url.is_empty() {
+        hw_config.lhm_url = config.lhm_url.clone();
+    }
+    let monitor = Hwmonitor::spawn(hw_config);
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))

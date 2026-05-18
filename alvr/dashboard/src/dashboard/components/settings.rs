@@ -48,6 +48,11 @@ pub struct SettingsTab {
     #[cfg(not(target_arch = "wasm32"))]
     hw_test_running: bool,
     hw_dialog_text: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    lhm_test_result: Arc<Mutex<Option<String>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    lhm_test_running: bool,
+    lhm_dialog_text: Option<String>,
 }
 
 impl SettingsTab {
@@ -105,6 +110,11 @@ impl SettingsTab {
             #[cfg(not(target_arch = "wasm32"))]
             hw_test_running: false,
             hw_dialog_text: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lhm_test_result: Arc::new(Mutex::new(None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            lhm_test_running: false,
+            lhm_dialog_text: None,
         }
     }
 
@@ -147,6 +157,13 @@ impl SettingsTab {
             if let Some(text) = self.hw_test_result.lock().unwrap().take() {
                 self.hw_dialog_text = Some(text);
                 self.hw_test_running = false;
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.lhm_test_running {
+            if let Some(text) = self.lhm_test_result.lock().unwrap().take() {
+                self.lhm_dialog_text = Some(text);
+                self.lhm_test_running = false;
             }
         }
 
@@ -276,6 +293,12 @@ impl SettingsTab {
                             .and_then(|j| j.pointer("/metrics/metrics_export/content/hw_url"))
                             .and_then(|v| v.as_str())
                             .map(str::to_owned);
+                        let lhm_url_opt = self
+                            .session_settings_json
+                            .as_ref()
+                            .and_then(|j| j.pointer("/metrics/metrics_export/content/lhm_url"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
 
                         Grid::new("metrics_test_grid")
                             .num_columns(2)
@@ -315,6 +338,36 @@ impl SettingsTab {
                                         let payload = hw_test_payload();
                                         let text = match ureq::post(&url).send_json(&payload) {
                                             Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
+                                            Err(e) => format!("✗  {e}"),
+                                        };
+                                        *result_arc.lock().unwrap() = Some(text);
+                                        ctx.request_repaint();
+                                    });
+                                }
+                                ui.end_row();
+
+                                ui.label("LibreHardwareMonitor URL");
+                                let lhm_label = if self.lhm_test_running { "Testing…" } else { "Test" };
+                                let lhm_enabled = lhm_url_opt.is_some()
+                                    && !lhm_url_opt.as_deref().unwrap_or("").is_empty()
+                                    && !self.lhm_test_running;
+                                if ui.add_enabled(lhm_enabled, eframe::egui::Button::new(lhm_label)).clicked() {
+                                    let url = lhm_url_opt.clone().unwrap();
+                                    let result_arc = Arc::clone(&self.lhm_test_result);
+                                    let ctx = ui.ctx().clone();
+                                    self.lhm_test_running = true;
+                                    std::thread::spawn(move || {
+                                        // LHM serves its sensor tree as JSON at the configured URL.
+                                        // A successful GET that parses as JSON proves the web server
+                                        // is up and we're reading the right endpoint.
+                                        let text = match ureq::get(&url).call() {
+                                            Ok(mut resp) => {
+                                                let status = resp.status();
+                                                match resp.body_mut().read_json::<serde_json::Value>() {
+                                                    Ok(_) => format!("✓  HTTP {status}  —  LHM responding"),
+                                                    Err(e) => format!("⚠  HTTP {status}  —  body not JSON: {e}"),
+                                                }
+                                            }
                                             Err(e) => format!("✗  {e}"),
                                         };
                                         *result_arc.lock().unwrap() = Some(text);
@@ -362,6 +415,22 @@ impl SettingsTab {
                 });
             if !open || resp.is_some_and(|r| r.inner == Some(true)) {
                 self.hw_dialog_text = None;
+            }
+        }
+        if let Some(text) = self.lhm_dialog_text.clone() {
+            let mut open = true;
+            let resp = eframe::egui::Window::new("LibreHardwareMonitor connection test")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(&text);
+                    ui.add_space(8.0);
+                    ui.button("Close").clicked()
+                });
+            if !open || resp.is_some_and(|r| r.inner == Some(true)) {
+                self.lhm_dialog_text = None;
             }
         }
 
