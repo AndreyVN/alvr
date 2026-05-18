@@ -43,6 +43,11 @@ pub struct SettingsTab {
     #[cfg(not(target_arch = "wasm32"))]
     metrics_test_running: bool,
     metrics_dialog_text: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    hw_test_result: Arc<Mutex<Option<String>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    hw_test_running: bool,
+    hw_dialog_text: Option<String>,
 }
 
 impl SettingsTab {
@@ -95,6 +100,11 @@ impl SettingsTab {
             #[cfg(not(target_arch = "wasm32"))]
             metrics_test_running: false,
             metrics_dialog_text: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hw_test_result: Arc::new(Mutex::new(None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            hw_test_running: false,
+            hw_dialog_text: None,
         }
     }
 
@@ -124,12 +134,19 @@ impl SettingsTab {
     pub fn ui(&mut self, ui: &mut Ui) -> Vec<ServerRequest> {
         let mut requests = vec![];
 
-        // Collect result from the background test thread.
+        // Collect results from the background test threads.
         #[cfg(not(target_arch = "wasm32"))]
         if self.metrics_test_running {
             if let Some(text) = self.metrics_test_result.lock().unwrap().take() {
                 self.metrics_dialog_text = Some(text);
                 self.metrics_test_running = false;
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.hw_test_running {
+            if let Some(text) = self.hw_test_result.lock().unwrap().take() {
+                self.hw_dialog_text = Some(text);
+                self.hw_test_running = false;
             }
         }
 
@@ -237,7 +254,10 @@ impl SettingsTab {
                             }
                         });
 
-                    // "Test metrics connection" button at the bottom of the Extra tab.
+                    // Test buttons paired with the URL fields rendered above.
+                    // Sit below the schema grid because the schema rows are
+                    // auto-generated and we can't inject an extra widget into
+                    // a specific row without touching the shared renderer.
                     #[cfg(not(target_arch = "wasm32"))]
                     if self.selected_top_tab_id == "metrics" {
                         ui.add_space(8.0);
@@ -250,56 +270,59 @@ impl SettingsTab {
                             .and_then(|j| j.pointer("/metrics/metrics_export/content/url"))
                             .and_then(|v| v.as_str())
                             .map(str::to_owned);
+                        let hw_url_opt = self
+                            .session_settings_json
+                            .as_ref()
+                            .and_then(|j| j.pointer("/metrics/metrics_export/content/hw_url"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
 
-                        let button_label = if self.metrics_test_running {
-                            "Testing…"
-                        } else {
-                            "Test metrics connection"
-                        };
-                        let enabled = url_opt.is_some() && !self.metrics_test_running;
+                        Grid::new("metrics_test_grid")
+                            .num_columns(2)
+                            .min_col_width(MIN_COLUMN_SIZE)
+                            .show(ui, |ui| {
+                                ui.label("Endpoint URL");
+                                let label = if self.metrics_test_running { "Testing…" } else { "Test" };
+                                let enabled = url_opt.is_some() && !self.metrics_test_running;
+                                if ui.add_enabled(enabled, eframe::egui::Button::new(label)).clicked() {
+                                    let url = url_opt.clone().unwrap();
+                                    let result_arc = Arc::clone(&self.metrics_test_result);
+                                    let ctx = ui.ctx().clone();
+                                    self.metrics_test_running = true;
+                                    std::thread::spawn(move || {
+                                        let payload = streaming_test_payload();
+                                        let text = match ureq::post(&url).send_json(&payload) {
+                                            Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
+                                            Err(e) => format!("✗  {e}"),
+                                        };
+                                        *result_arc.lock().unwrap() = Some(text);
+                                        ctx.request_repaint();
+                                    });
+                                }
+                                ui.end_row();
 
-                        if ui
-                            .add_enabled(enabled, eframe::egui::Button::new(button_label))
-                            .clicked()
-                        {
-                            let url = url_opt.unwrap();
-                            let result_arc = Arc::clone(&self.metrics_test_result);
-                            let ctx = ui.ctx().clone();
-                            self.metrics_test_running = true;
-
-                            std::thread::spawn(move || {
-                                let payload = serde_json::json!({
-                                    "ts": chrono::Utc::now().to_rfc3339_opts(
-                                        chrono::SecondsFormat::Millis, true),
-                                    "host": "test",
-                                    "window_ms": 1000_u64,
-                                    "frames": 0_u32,
-                                    "dropped_samples": 0_u64,
-                                    "latency_ms": {},
-                                    "fps": {},
-                                    "throughput": {
-                                        "video_packets_per_sec": 0.0_f64,
-                                        "video_mbits_per_sec": 0.0_f64
-                                    },
-                                    "totals": {
-                                        "video_packets": 0_u64,
-                                        "video_mbytes": 0_u64
-                                    },
-                                    "bitrate_directives": {
-                                        "requested_bitrate_bps": 0.0_f32
-                                    },
-                                    "exporter": { "failed_posts": 0_u64 }
-                                });
-
-                                let text = match ureq::post(&url).send_json(&payload) {
-                                    Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
-                                    Err(e) => format!("✗  {e}"),
-                                };
-
-                                *result_arc.lock().unwrap() = Some(text);
-                                ctx.request_repaint();
+                                ui.label("Hardware endpoint URL");
+                                let hw_label = if self.hw_test_running { "Testing…" } else { "Test" };
+                                let hw_enabled = hw_url_opt.is_some()
+                                    && !hw_url_opt.as_deref().unwrap_or("").is_empty()
+                                    && !self.hw_test_running;
+                                if ui.add_enabled(hw_enabled, eframe::egui::Button::new(hw_label)).clicked() {
+                                    let url = hw_url_opt.clone().unwrap();
+                                    let result_arc = Arc::clone(&self.hw_test_result);
+                                    let ctx = ui.ctx().clone();
+                                    self.hw_test_running = true;
+                                    std::thread::spawn(move || {
+                                        let payload = hw_test_payload();
+                                        let text = match ureq::post(&url).send_json(&payload) {
+                                            Ok(resp) => format!("✓  HTTP {}  —  OK", resp.status()),
+                                            Err(e) => format!("✗  {e}"),
+                                        };
+                                        *result_arc.lock().unwrap() = Some(text);
+                                        ctx.request_repaint();
+                                    });
+                                }
+                                ui.end_row();
                             });
-                        }
                     }
                 });
         }
@@ -325,7 +348,61 @@ impl SettingsTab {
                 self.metrics_dialog_text = None;
             }
         }
+        if let Some(text) = self.hw_dialog_text.clone() {
+            let mut open = true;
+            let resp = eframe::egui::Window::new("Hardware metrics connection test")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(&text);
+                    ui.add_space(8.0);
+                    ui.button("Close").clicked()
+                });
+            if !open || resp.is_some_and(|r| r.inner == Some(true)) {
+                self.hw_dialog_text = None;
+            }
+        }
 
         requests
     }
+}
+
+// Minimal streaming `Snapshot` payload — every required field present, every
+// optional field at zero. Mirrors `metrics/server/models.py::Snapshot`.
+#[cfg(not(target_arch = "wasm32"))]
+fn streaming_test_payload() -> json::Value {
+    serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "host": "test",
+        "window_ms": 1000_u64,
+        "frames": 0_u32,
+        "dropped_samples": 0_u64,
+        "latency_ms": {},
+        "fps": {},
+        "throughput": {
+            "video_packets_per_sec": 0.0_f64,
+            "video_mbits_per_sec": 0.0_f64
+        },
+        "totals": {
+            "video_packets": 0_u64,
+            "video_mbytes": 0_u64
+        },
+        "bitrate_directives": {
+            "requested_bitrate_bps": 0.0_f32
+        },
+        "exporter": { "failed_posts": 0_u64 }
+    })
+}
+
+// Minimal hardware `HwSnapshot` payload — `cpu_cores` / `dimms` / `storage`
+// / `network` default to empty lists, so only `ts` + `host` are mandatory.
+// Mirrors `metrics/server/models.py::HwSnapshot`.
+#[cfg(not(target_arch = "wasm32"))]
+fn hw_test_payload() -> json::Value {
+    serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "host": "test",
+    })
 }
