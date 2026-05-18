@@ -1613,10 +1613,27 @@ pub struct NewVersionPopupConfig {
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct MetricsExportConfig {
     #[schema(strings(
+        display_name = "Host",
+        help = "Host label attached to every snapshot (e.g. PC name). \
+                Acts as the primary aggregation key across the `streaming_metrics` and `hw_*` \
+                tables in ClickHouse."
+    ))]
+    pub host: String,
+
+    #[schema(strings(
         display_name = "Endpoint URL",
-        help = "Full URL of the HTTP endpoint that will receive a JSON POST every interval."
+        help = "Full URL of the HTTP endpoint that will receive a JSON POST of streaming \
+                statistics every push interval."
     ))]
     pub url: String,
+
+    #[schema(strings(
+        display_name = "Hardware endpoint URL",
+        help = "Full URL of the HTTP endpoint that will receive a JSON POST of hardware \
+                telemetry (CPU/GPU/DRAM/storage/network) every hardware push interval. \
+                Leave empty to disable hardware metrics export."
+    ))]
+    pub hw_url: String,
 
     #[schema(strings(display_name = "Push interval"))]
     #[schema(suffix = "ms")]
@@ -1624,8 +1641,17 @@ pub struct MetricsExportConfig {
     pub interval_ms: u64,
 
     #[schema(strings(
+        display_name = "Push hardware interval",
+        help = "Push interval for the hardware telemetry endpoint. Set independently of the \
+                streaming push interval since host hardware typically moves on a slower cadence."
+    ))]
+    #[schema(suffix = "ms")]
+    #[schema(gui(slider(min = 100, max = 60000, step = 100)))]
+    pub hw_interval_ms: u64,
+
+    #[schema(strings(
         display_name = "HTTP timeout",
-        help = "POST timeout. Must be smaller than the push interval."
+        help = "POST timeout. Must be smaller than both push intervals."
     ))]
     #[schema(suffix = "ms")]
     #[schema(gui(slider(min = 50, max = 30000, step = 50)))]
@@ -1636,22 +1662,6 @@ pub struct MetricsExportConfig {
         help = "Extra HTTP headers attached to every POST (for example Authorization tokens)."
     ))]
     pub headers: Vec<(String, String)>,
-
-    #[schema(strings(
-        display_name = "Host",
-        help = "Host label attached to every snapshot (e.g. PC name). \
-                Acts as the primary aggregation key across the `streaming_metrics` and `hw_*` \
-                tables in ClickHouse."
-    ))]
-    pub host: String,
-
-    #[schema(strings(
-        display_name = "Hardware metrics endpoint URL",
-        help = "Full URL of the HTTP endpoint that will receive a JSON POST of hardware \
-                telemetry (CPU/GPU/DRAM/storage/network) every interval. Leave empty to \
-                disable hardware metrics export."
-    ))]
-    pub hw_url: String,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2362,8 +2372,11 @@ pub fn session_settings_default() -> SettingsDefault {
             metrics_export: SwitchDefault {
                 enabled: false,
                 content: MetricsExportConfigDefault {
+                    host: "".into(),
                     url: "http://127.0.0.1:8086/api/metrics".into(),
+                    hw_url: "http://127.0.0.1:8086/api/hw_metrics".into(),
                     interval_ms: 1000,
+                    hw_interval_ms: 1000,
                     timeout_ms: 500,
                     headers: DictionaryDefault {
                         gui_collapsed: true,
@@ -2371,8 +2384,6 @@ pub fn session_settings_default() -> SettingsDefault {
                         value: "".into(),
                         content: vec![],
                     },
-                    host: "".into(),
-                    hw_url: "http://127.0.0.1:8086/api/hw_metrics".into(),
                 },
             },
             extended_headset_telemetry: true,

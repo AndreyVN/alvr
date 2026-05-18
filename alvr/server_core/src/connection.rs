@@ -829,7 +829,7 @@ fn connection_pipeline(
             let hw_handle = if !config.hw_url.is_empty() {
                 let hw_config = crate::hwmonitor_exporter::HwExporterConfig {
                     url: config.hw_url.clone(),
-                    interval: Duration::from_millis(config.interval_ms),
+                    interval: Duration::from_millis(config.hw_interval_ms),
                     timeout: Duration::from_millis(config.timeout_ms),
                     headers: config.headers.clone(),
                     host: config.host.clone(),
