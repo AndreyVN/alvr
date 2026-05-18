@@ -6,10 +6,11 @@ Scope: **PC streamer.** Everything that runs on the host: the SteamVR OpenVR dri
 
 | Path | Crate | Responsibility |
 | --- | --- | --- |
-| `alvr/server_core` | `alvr_server_core` (lib) | The platform-agnostic streamer brain. Owns the tokio runtime, the connection state machine (`connection.rs`), the tracking/input/haptics pipelines, `BitrateManager`, `StatisticsManager`, and the embedded web server backing the dashboard. Exposes a C ABI (`c_api.rs`) so Monado and other hosts can drive it. |
+| `alvr/server_core` | `alvr_server_core` (lib) | The platform-agnostic streamer brain. Owns the tokio runtime, the connection state machine (`connection.rs`), the tracking/input/haptics pipelines, `BitrateManager`, `StatisticsManager`, the embedded web server backing the dashboard, and the optional telemetry exporters (`metrics_exporter.rs`, `hwmonitor_exporter.rs`). Exposes a C ABI (`c_api.rs`) so Monado and other hosts can drive it. |
 | `alvr/server_openvr` | `alvr_server_openvr` (cdylib) | The actual file SteamVR loads. C++ glue in `cpp/` bridges OpenVR's `vrserver` ABI to Rust; the Rust side translates events to `server_core`. Built via `bindgen` + `cc`. The `gpl` feature enables FFmpeg on Windows (always on on Linux). |
 | `alvr/server_io` | `alvr_server_io` | `session.json` IO and `ServerSessionManager`. The single writer for persistent server-side config. |
-| `alvr/dashboard` | `alvr_dashboard` | Standalone `eframe`/egui GUI. Compiles both natively and to `wasm32` (`data_sources` vs `data_sources_wasm`). Talks to `server_core`'s embedded web server. |
+| `alvr/dashboard` | `alvr_dashboard` | Standalone `eframe`/egui GUI. Compiles both natively and to `wasm32` (`data_sources` vs `data_sources_wasm`). Talks to `server_core`'s embedded web server. Native build adds a `HWMonitor` tab driven by `alvr_hwmonitor`; settings ship a top-level `Metrics` tab covering metrics export and extended headset telemetry. |
+| `alvr/hwmonitor` | `alvr_hwmonitor` | Host hardware telemetry sampler. Background thread queries `sysinfo`, the LibreHardwareMonitor JSON web server (preferred over WMI), `nvidia-smi`, and Win32 WMI for adapter counters. Exposes a `Snapshot` consumed by the dashboard's `HWMonitor` tab and by `server_core::hwmonitor_exporter`. PC-side only. |
 | `alvr/launcher` | `alvr_launcher` | Separate `eframe` app that downloads/installs ALVR releases and handles ADB-based client install. |
 | `alvr/vulkan_layer` | `alvr_vulkan_layer` | Linux Vulkan layer that intercepts SteamVR/`vrcompositor` GPU work. (The user spec calls this `alvr/vulkan-layer`; the actual crate is `alvr_vulkan_layer`.) |
 | `alvr/vrcompositor_wrapper` | `alvr_vrcompositor_wrapper` | Linux shim that wraps SteamVR's `vrcompositor-launcher` to inject the Vulkan layer. |
@@ -22,6 +23,7 @@ Scope: **PC streamer.** Everything that runs on the host: the SteamVR OpenVR dri
 - `OpenvrConfig` (`alvr_session`) is the only sanctioned way to push config into the OpenVR driver — see `connection::contruct_openvr_config`. Adding a new property means updating the schema, the constructor, and the C++ side.
 - GPU encoder selection (NVENC / AMF / VPL / FFmpeg software) is decided based on `Settings.video.encoder_config` plus runtime capability detection. Changes here cross the Rust/C++ boundary in `server_openvr`.
 - `--gpl` only enables FFmpeg on Windows; AMD/Intel paths use OS-vendored APIs (AMF / VPL) and are not gated by it.
+- The two exporter threads (`metrics_exporter`, `hwmonitor_exporter`) are spawned by `connection_pipeline` only when `Settings.metrics.metrics_export` is `Switch::Enabled`; `hwmonitor_exporter` is additionally gated on a non-empty `hw_url`. Producers (`statistics_thread`, `control_receive_thread`) must use the non-blocking `try_push` helper — never block the hot path waiting on the export channel. The wire shape of the POSTed JSON is paired with `metrics/clickhouse_schema.sql`; changes must land in lockstep.
 
 ## Running and testing
 
@@ -31,6 +33,7 @@ cargo check  -p alvr_server_core
 cargo check  -p alvr_server_openvr           # requires `cargo xtask prepare-deps --platform <host>` first
 cargo check  -p alvr_dashboard
 cargo check  -p alvr_launcher
+cargo check  -p alvr_hwmonitor
 cargo clippy -p alvr_server_core -- -D warnings
 cargo clippy -p alvr_server_openvr -- -D warnings
 

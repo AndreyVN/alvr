@@ -22,6 +22,7 @@ The user spec mentions `alvr/client` and `alvr/vr_compositor`; those names don't
 - Frame-critical paths must avoid allocation on the render thread. `video_decoder/android.rs` already runs a dedicated `dequeue_thread`; new decode/render work should follow that split.
 - All logging is `alvr_common::{info, warn, error, debug}`. The Android log backend forwards through the `log` crate to Android logcat; the tag is `ALVR` — see `alvr_client_core::logging_backend`.
 - `client_core` and `client_openxr` both expose a C ABI (`c_api.rs`) for non-cargo-apk integrators (Monado, third-party engines). Treat those signatures as product surface.
+- Headset telemetry is sourced from `alvr_system_info::android` and emitted by `control_send_thread` (`alvr/client_core/src/connection.rs`) on the battery interval. The HMD `BatteryInfo` is always sent. The controller `BatteryInfo`s (`InputDevice.getBatteryState`, API 29+) and the bundled `ClientTelemetry` payload (battery temperature, `PowerManager` thermal status/headroom, `/proc/meminfo`, `/proc/self/status`, CPU sampler, KGSL Adreno GPU sampler) are gated on `Settings.metrics.extended_headset_telemetry` — when the toggle is off, the client falls back to legacy "HMD battery only" behavior. Every `ClientTelemetry` field is `Option<_>`; a platform that can't read a sensor must omit it, never substitute a sentinel.
 
 ## Running, testing, deploying
 

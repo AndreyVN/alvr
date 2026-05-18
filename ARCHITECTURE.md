@@ -7,7 +7,7 @@ ALVR is two cooperating processes:
 - A **PC streamer** that runs as a SteamVR driver: ingests submitted frames + tracking from SteamVR, encodes video, and ships everything to the headset over Wi-Fi.
 - A **headset client** (Android OpenXR app, plus a desktop mock and a C-ABI library) that decodes video, presents it through OpenXR, and ships tracking/input/audio back.
 
-The two halves share a single Rust workspace (`Cargo.toml`, edition 2024, MSRV 1.92, ~22 crates under `alvr/`).
+The two halves share a single Rust workspace (`Cargo.toml`, edition 2024, MSRV 1.92, ~23 crates under `alvr/`).
 
 ## Module overview
 
@@ -17,7 +17,7 @@ The two halves share a single Rust workspace (`Cargo.toml`, edition 2024, MSRV 1
 | --- | --- |
 | `alvr_common` | Re-exports (`anyhow`, `glam`, `log`, `parking_lot`, `semver`, `settings_schema`), shared primitives (`Pose`, `Fov`, `DeviceMotion`, device-ID constants), `ConnectionState`/`LifecycleState` enums, the logging frontend, and a C ABI for integrators. Every other crate depends on it. |
 | `alvr_session` | The settings schema, derived via `settings-schema-rs` (pinned git rev). `SessionConfig` / `Settings` is the single source of truth for everything user-configurable; field changes propagate to the dashboard UI and to `OpenvrConfig`. |
-| `alvr_packets` | Every wire type exchanged between streamer and client: control packets (`ClientControlPacket`, `ServerControlPacket`), `TrackingData`, `VideoPacketHeader`, `StreamConfigPacket`, `ClientStatistics`, `Haptics`, etc. Also the numeric stream IDs (`TRACKING`, `VIDEO`, `AUDIO`, `HAPTICS`, `STATISTICS`). |
+| `alvr_packets` | Every wire type exchanged between streamer and client: control packets (`ClientControlPacket`, `ServerControlPacket`), `TrackingData`, `VideoPacketHeader`, `StreamConfigPacket`, `ClientStatistics`, `Haptics`, `BatteryInfo`, `ClientTelemetry`, etc. Also the numeric stream IDs (`TRACKING`, `VIDEO`, `AUDIO`, `HAPTICS`, `STATISTICS`). |
 | `alvr_sockets` | Control socket (TCP, port 9943) and stream socket (UDP/TCP with throttling). Constants: `CONTROL_PORT`, `KEEPALIVE_INTERVAL`, `KEEPALIVE_TIMEOUT`, mDNS service type `_alvr._tcp.local.`. |
 | `alvr_events` | Structured event types the streamer emits for the dashboard / web UI. |
 | `alvr_audio` | Cross-platform audio capture/playback (`oboe-rs` on Android, OS APIs elsewhere). |
@@ -26,6 +26,7 @@ The two halves share a single Rust workspace (`Cargo.toml`, edition 2024, MSRV 1
 | `alvr_system_info` | OS / platform / headset detection. |
 | `alvr_adb` | ADB client used by the launcher and by the wired-streaming path. |
 | `alvr_gui_common` | Shared egui widgets between the dashboard and the launcher. |
+| `alvr_hwmonitor` | Host hardware telemetry sampler (PC-side only). Background thread that queries `sysinfo`, the LibreHardwareMonitor JSON web server, `nvidia-smi`, and Win32 WMI for adapter counters, and exposes the result as a `Snapshot` (`CpuSample`/`GpuSample`/`MemorySample`/`StorageSample`/`NetSample`/`DimmSample`). Used by the dashboard's `HWMonitor` tab and by `alvr_server_core::hwmonitor_exporter`. |
 
 ### Streamer (PC)
 
@@ -84,6 +85,17 @@ This is the latency-critical path. The streamer never queues more than one frame
 
 The audio path mirrors the video path on its own stream (`AUDIO`), and haptics flow server → client on `HAPTICS`.
 
+### Telemetry & metrics export
+
+A separate, optional pipeline collects out-of-band health signals (battery, headset thermals, host hardware) and ships them to an external TSDB. None of this is on the latency-critical path.
+
+1. **Client `control_send_thread`** (`alvr/client_core/src/connection.rs`): every battery interval samples Android sensors via `alvr_system_info::android` — HMD battery (`BatteryManager`), controller batteries (`InputDevice.getBatteryState`, API 29+), battery temperature, `PowerManager` thermal status/headroom, `/proc/meminfo`, `/proc/self/status`, `/proc/stat`-derived CPU load, and Adreno KGSL GPU counters. The HMD `BatteryInfo` is always sent. The controller `BatteryInfo`s and the `ClientTelemetry` payload are sent only when `metrics.extended_headset_telemetry` is true; otherwise the client falls back to the legacy "HMD battery only" behavior.
+2. **Wire**: `ClientControlPacket::Battery(BatteryInfo { device_id, gauge_value, is_plugged })` for each device (HMD plus, optionally, both controllers) and a single `ClientControlPacket::Telemetry(ClientTelemetry)` per interval. Both ride the control socket.
+3. **Server `control_receive_thread`** demuxes them. `Battery` produces a `ServerCoreEvent::Battery` and a `metrics_exporter::Sample::Battery { slot, pct, plugged }` (where `slot` is `Hmd` / `ControllerLeft` / `ControllerRight`, derived from `device_id`). `Telemetry` becomes `metrics_exporter::Sample::ClientTelemetry`. The OpenVR driver side surfaces controller battery via `SetBattery` → `Prop_DeviceBatteryPercentage_Float`; the `DeviceProvidesBatteryStatusBool` advertisement on controllers is gated on `metrics.extended_headset_telemetry` (see `alvr/server_openvr/src/props.rs`).
+4. **`metrics_exporter`** (PC, `alvr/server_core/src/metrics_exporter.rs`): a bounded `flume` channel feeds the `metrics_exporter` thread, which folds `Frame` samples into min/max/avg accumulators per latency/FPS/throughput dimension, carries the latest battery/telemetry/bitrate-directive values across windows, and POSTs a single JSON snapshot per `interval_ms` to `metrics.metrics_export.url`. Producers use non-blocking `try_push`; the channel drops on overflow rather than backpressuring the hot path.
+5. **`hwmonitor_exporter`** (PC, `alvr/server_core/src/hwmonitor_exporter.rs`): in parallel, an `alvr_hwmonitor::Hwmonitor` sampler runs on its own thread (sources: `sysinfo`, the LibreHardwareMonitor JSON web server, `nvidia-smi`, Win32 WMI for network counters). On the same interval, `hwmonitor_exporter` POSTs a per-resource JSON payload to `metrics.metrics_export.hw_url`. The two endpoints can be served by the same ingest service or different ones — they're independently switchable. See `metrics/` at the repo root for the ClickHouse schema (`metrics/clickhouse_schema.sql`) and Grafana provisioning (`metrics/setup_grafana.py`) used by the reference setup.
+6. **Dashboard `HWMonitor` tab** (`alvr/dashboard/src/dashboard/components/hwmonitor.rs`, native-only): polls the same `alvr_hwmonitor` snapshot locally inside the dashboard process for an at-a-glance live view of host hardware, independent of whether metrics export is enabled.
+
 ## Critical threads & classes
 
 Names below are grep-able. They live in `alvr/server_core/src/connection.rs` and `alvr/client_core/src/connection.rs` unless noted.
@@ -96,7 +108,8 @@ Names below are grep-able. They live in `alvr/server_core/src/connection.rs` and
 | `video_send_thread` | `connection.rs` | Pulls `VideoPacket`s off the encoder channel and ships them on the `VIDEO` stream. The hot path for latency. |
 | `tracking_receive_thread` | `connection.rs` | Receives `TrackingData` on the `TRACKING` stream, hands it to `TrackingManager`. |
 | `statistics_thread` | `connection.rs` | Receives `ClientStatistics`; drives `BitrateManager`. |
-| `metrics_exporter` | `metrics_exporter.rs` | Optional. Aggregates per-frame stats into min/max/avg over a configurable window and POSTs JSON to an external HTTP endpoint (Grafana / TSDB ingest). Spawned only when `extra.metrics_export` is enabled. |
+| `metrics_exporter` | `metrics_exporter.rs` | Optional. Aggregates per-frame stats, HMD + controller battery samples, and the client-reported `ClientTelemetry` into min/max/avg over a configurable window, then POSTs the snapshot to an external HTTP endpoint (Grafana / ClickHouse ingest). Spawned by `connection_pipeline` only when `metrics.metrics_export` is enabled. |
+| `hwmonitor_exporter` | `hwmonitor_exporter.rs` | Optional. Owns an `alvr_hwmonitor::Hwmonitor` sampler and POSTs a per-resource JSON payload (cpu / gpu / dram / dimms / storage / network / cpu_cores) to a separate `hw_url` on the same cadence as the streaming-metrics exporter. Spawned alongside `metrics_exporter` whenever `metrics.metrics_export.hw_url` is non-empty. |
 | `real_time_update_thread` | `connection.rs` | Periodically (`REAL_TIME_UPDATE_INTERVAL = 1s`) pushes `RealTimeConfig` updates to the client. |
 | `keepalive_thread` | `connection.rs` | Sends keepalives at `KEEPALIVE_INTERVAL` over the control socket. |
 | `control_receive_thread` | `connection.rs` | Demuxes `ClientControlPacket`s — buttons, statistics, view config changes, disconnect. |
@@ -133,6 +146,7 @@ Names below are grep-able. They live in `alvr/server_core/src/connection.rs` and
 - `ServerCoreEvent` (`alvr/server_core/src/lib.rs`) is the variant type the server-side connection emits to the C++ driver glue; new device properties, battery updates, and client connect/disconnect events all flow through here.
 - `ClientCoreEvent` (`alvr/client_core/src/lib.rs`) is the corresponding type emitted by the client core to whichever frontend (cdylib OpenXR app, mock, or C-ABI consumer) is driving it.
 - `VideoPacket` / `VideoPacketHeader` (`alvr_packets`) is the per-NAL unit shipped on the `VIDEO` stream. Don't change its layout without a wire-compat plan.
+- `BatteryInfo` (`alvr_packets`) carries a per-device battery sample over the control socket; `device_id` discriminates HMD vs. left/right controller. `ClientTelemetry` (`alvr_packets`) bundles client-side resource utilization (battery temperature, thermal status/headroom, memory, CPU, GPU). Both are optional, gated by `metrics.extended_headset_telemetry`; their fields are `Option<_>` so a platform that can't read a sensor omits it rather than lying.
 
 ## Where to extend
 
@@ -140,3 +154,4 @@ Names below are grep-able. They live in `alvr/server_core/src/connection.rs` and
 - New **wire packet**: add the type in `alvr_packets`, assign a stream ID, add send/receive plumbing in both `server_core::connection` and `client_core::connection`. Bump compatibility expectations and document the migration.
 - New **per-vendor extension** on the headset: add a module under `alvr/client_openxr/src/extra_extensions/`, gate it on extension availability, normalize its output into existing `TrackingData` fields (don't grow the wire format unless you have to).
 - New **encoder backend**: extend the C++ encoder selection in `alvr/server_openvr/cpp/` and the `CodecType` / encoder config in `alvr_session`. Don't bypass the bitrate-manager feedback loop.
+- New **telemetry signal**: if it's client-sourced, add an optional field to `ClientTelemetry` in `alvr_packets` (don't grow `ClientControlPacket` with a new variant unless it can't fit) and surface it in `metrics_exporter::Aggregator::flush`. If it's host-sourced, add it as a sampler in `alvr_hwmonitor` (`Snapshot` field) and expose it through `build_payload` in `hwmonitor_exporter`. Update `metrics/clickhouse_schema.sql` and `metrics/setup_grafana.py` in lockstep so the ingest stays compatible.
