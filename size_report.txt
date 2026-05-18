@@ -1,0 +1,136 @@
+================================================================================
+ALVR Metrics — Wire Packet & ClickHouse Storage Size Report
+================================================================================
+Generated:           2026-05-18
+Data source (CH):    alvr database, metrics server 193.104.57.232
+Measurement window:  ~3 min of live ingest, plus OPTIMIZE TABLE ... FINAL
+Authoritative code:  alvr/server_core/src/metrics_exporter.rs   (Aggregator::flush)
+                     alvr/server_core/src/hwmonitor_exporter.rs (HwSnapshot)
+                     metrics/clickhouse_schema.sql              (schema + TTLs)
+
+
+================================================================================
+1. Wire packet sizes (JSON POSTed by the streamer)
+================================================================================
+
+Methodology
+-----------
+Snapshots were generated with metrics/gen_test_data.py and serialized with
+json.dumps(..., separators=(',', ':')) — the same compact form that ureq's
+send_json() writes. 1000 sample snapshots measured per endpoint.
+
+streaming_metrics  (POST /metrics, every metrics_export.interval_ms; default 1000 ms)
+-------------------------------------------------------------------------------
+    min          1403 B
+    p50          1410 B
+    p95          1412 B
+    max          1413 B
+    mean       ~ 1410 B   (≈ 1.41 KB)
+
+    Extended-telemetry ON vs OFF differs by only ~3 B; the schema is dominated
+    by 9 latency stages × 4 fields, fps, throughput, totals, bitrate_directives.
+
+hw_metrics  (POST /hw_metrics, in parallel at hw_metrics_export.interval_ms)
+-------------------------------------------------------------------------------
+    min          1607 B
+    p50          2171 B
+    p95          2535 B
+    max          2538 B
+    mean       ~ 2068 B   (≈ 2.07 KB)
+
+    Variance is driven by cpu_cores[] (6–16 entries), dimms[], storage[],
+    network[] array lengths.
+
+On-the-wire overhead (per POST): add ~200–400 B for HTTP request line +
+Content-Type / Content-Length / Host / configured headers.
+
+At the default 1 s push interval, body throughput per streamer:
+    streaming_metrics ≈ 1.4 KB/s
+    streaming + hw    ≈ 3.5 KB/s
+
+
+================================================================================
+2. ClickHouse on-disk storage (per-row, measured)
+================================================================================
+
+Numbers come from system.parts on the live alvr database after
+OPTIMIZE TABLE ... FINAL on every table. Compression codec: ZSTD(1) for ts;
+default LZ4 for the rest.
+
+  Table                Rows    Compressed   B/row (compressed)   B/row (uncomp.)   ZSTD/LZ4 ratio
+  ───────────────────  ────    ──────────   ──────────────────   ───────────────   ──────────────
+  streaming_metrics    179     30.0 KiB     171.6                350.6             0.489
+  headset              178      5.9 KiB      33.7                 92.5             0.364
+  hw_cpu               176      5.2 KiB      30.2                 47.5             0.635
+  hw_cpu_cores        2182     21.2 KiB      10.0                 34.0             0.292
+  hw_dimms             458      3.2 KiB       7.2                 29.2             0.247
+  hw_dram              176      5.2 KiB      30.2                 70.5             0.429
+  hw_gpu               176      7.4 KiB      42.9                 79.4             0.540
+  hw_network           229      6.9 KiB      30.7                 74.9             0.409
+  hw_storage           334      6.4 KiB      19.6                 43.6             0.449
+
+Why streaming_metrics is so much bigger per row:
+  ~90 columns, most of them Nullable(Float32) min/max/avg/n triples for each
+  latency stage. The Null-mask + per-column header overhead inflates per-row
+  cost relative to the narrow hw_* tables.
+
+
+================================================================================
+3. Per-day storage at the default 1 s push interval
+================================================================================
+
+86,400 snapshots/host/day. Multiply B/row × rows/day:
+
+  Table                 Rows/day per host        Per host / day (compressed)
+  ───────────────────   ──────────────────────   ───────────────────────────
+  streaming_metrics      86 400                   14.14 MiB
+  headset                86 400                    2.78 MiB
+  hw_cpu                 86 400                    2.49 MiB
+  hw_cpu_cores           86 400 × N_cores          0.82 MiB × cores
+  hw_dimms               86 400 × N_dimms          0.59 MiB × dimms
+  hw_dram                86 400                    2.49 MiB
+  hw_gpu                 86 400                    3.53 MiB
+  hw_network             86 400 × N_adapters       2.53 MiB × adapters
+  hw_storage             86 400 × N_devices        1.61 MiB × devices
+
+Typical-host totals
+-------------------
+  Host shape (cores / DIMMs / adapters / storage)   Per day      Per 90-day TTL
+  ───────────────────────────────────────────────   ─────────    ──────────────
+   8 /  2 / 1 / 1                                   ≈ 37 MiB     ≈ 3.3 GiB
+  16 /  4 / 2 / 2                                   ≈ 50 MiB     ≈ 4.4 GiB
+
+Just streaming_metrics (independent of host hardware shape):
+  per host per day        14.1 MiB compressed   /   28.9 MiB uncompressed
+  per host per 90 days   ≈ 1.24 GiB compressed
+
+
+================================================================================
+4. Scaling notes
+================================================================================
+
+Interval sensitivity
+  All daily figures scale linearly with metrics_export.interval_ms and
+  hw_metrics_export.interval_ms. Doubling the interval halves all numbers.
+
+Fleet sizing
+  Multiply per-host figures by the number of streamers writing to the same
+  ClickHouse instance. Example: 10 hosts × 50 MiB/day ≈ 500 MiB/day,
+  ≈ 45 GiB over the 90-day TTL.
+
+TTL caps total table size
+  Every table has `TTL toDateTime(ts) + INTERVAL 90 DAY` (see
+  metrics/clickhouse_schema.sql:121 et seq.). Steady-state table size is
+  bounded at ~90× the per-day figure per host.
+
+Compression behaviour at scale
+  Numbers above are taken AFTER OPTIMIZE FINAL on small parts. As parts grow,
+  ZSTD/LZ4 ratios typically improve modestly for narrow time-series columns
+  (DoubleDelta on ts already amortizes; remaining columns are dominated by
+  Float32 noise that does not compress strongly). Treat the per-row figures
+  as a sound upper bound — real production numbers should be at or slightly
+  below these.
+
+================================================================================
+End of report.
+================================================================================
