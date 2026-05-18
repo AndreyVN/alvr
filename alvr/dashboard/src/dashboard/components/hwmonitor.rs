@@ -2,6 +2,7 @@ use alvr_hwmonitor::{
     CpuSample, DimmSample, GpuSample, Hwmonitor, HwmonitorConfig, MemorySample, NamedValue,
     NetSample, Snapshot, StorageSample,
 };
+use alvr_session::{Settings, settings_schema::Switch};
 use eframe::egui::{CollapsingHeader, Grid, RichText, ScrollArea, Ui};
 use std::time::Duration;
 
@@ -9,13 +10,45 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct HwmonitorTab {
     monitor: Hwmonitor,
+    /// LHM URL the currently running sampler was spawned with. When the user
+    /// edits `metrics.metrics_export.lhm_url`, `update_settings` notices the
+    /// drift and respawns the monitor so the tab tracks the configured server.
+    current_lhm_url: String,
+    /// Built-in default, captured once from `HwmonitorConfig::default()`.
+    /// Used as the fallback when the metrics switch is off or the URL is empty.
+    default_lhm_url: String,
 }
 
 impl HwmonitorTab {
     pub fn new() -> Self {
+        let config = HwmonitorConfig::default();
+        let default_lhm_url = config.lhm_url.clone();
         Self {
-            monitor: Hwmonitor::spawn(HwmonitorConfig::default()),
+            current_lhm_url: default_lhm_url.clone(),
+            default_lhm_url,
+            monitor: Hwmonitor::spawn(config),
         }
+    }
+
+    /// Called from the dashboard's `EventType::Session` handler. Picks the
+    /// desired LHM URL (configured value or built-in default) and respawns
+    /// the sampler if it doesn't match what the current monitor is using.
+    /// Reassignment to `self.monitor` drops the old one — its `Drop` signals
+    /// shutdown and joins the background thread before the new one starts,
+    /// so we never have two samplers racing on the same URL.
+    pub fn update_settings(&mut self, settings: &Settings) {
+        let desired_url = match &settings.metrics.metrics_export {
+            Switch::Enabled(cfg) if !cfg.lhm_url.is_empty() => cfg.lhm_url.as_str(),
+            _ => self.default_lhm_url.as_str(),
+        };
+        if desired_url == self.current_lhm_url {
+            return;
+        }
+        self.current_lhm_url = desired_url.to_string();
+        self.monitor = Hwmonitor::spawn(HwmonitorConfig {
+            lhm_url: self.current_lhm_url.clone(),
+            ..HwmonitorConfig::default()
+        });
     }
 
     pub fn ui(&self, ui: &mut Ui) {

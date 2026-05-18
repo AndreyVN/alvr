@@ -176,6 +176,8 @@ impl eframe::App for Dashboard {
                     self.settings_tab.update_session(&session.session_settings);
                     self.logs_tab.update_settings(&settings);
                     self.notification_bar.update_settings(&settings);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.hwmonitor_tab.update_settings(&settings);
                     if self.just_opened {
                         if settings.extra.open_setup_wizard {
                             self.setup_wizard_open = true;
