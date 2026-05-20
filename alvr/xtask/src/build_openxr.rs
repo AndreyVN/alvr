@@ -13,10 +13,13 @@
 use crate::build::Profile;
 use alvr_filesystem as afs;
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process,
 };
+use sysinfo::System;
 use xshell::{Shell, cmd};
 
 fn openxr_source_dir() -> PathBuf {
@@ -147,6 +150,17 @@ fn publish_active_runtime_manifest(build_dir: &Path) {
     }
 }
 
+/// Detect a live SteamVR `vrserver` process. Mirrors the check in
+/// `alvr/dashboard/src/steamvr_launcher/mod.rs` so the two modes share the
+/// same "is the other runtime busy?" signal. Used by [`register_openxr_runtime`]
+/// for mutual exclusion (Phase 4 §3 of openxr-migration.md).
+fn is_steamvr_running() -> bool {
+    System::new_all()
+        .processes_by_name(OsStr::new(&afs::exec_fname("vrserver")))
+        .count()
+        != 0
+}
+
 /// Resolve the published manifest path for `profile`, exiting with an error if
 /// the build artefact isn't present. Shared by register / unregister so they
 /// both refer to exactly the same file the build produced.
@@ -180,7 +194,21 @@ fn locate_published_manifest(profile: Profile) -> PathBuf {
 /// This action is **system-modifying for the current user**: every OpenXR
 /// application launched after this point will use ALVR's Monado runtime until
 /// `unregister-openxr-runtime` runs (or another runtime overwrites it).
+///
+/// Mutual exclusion: refuses to register while SteamVR's `vrserver` is alive.
+/// Both runtimes want the same headset connection from the client; letting
+/// them race produces a stream that goes nowhere useful. The user-facing
+/// fix is to close SteamVR (or use the dashboard's "Restart SteamVR" with
+/// runtime set to OpenXR) first.
 pub fn register_openxr_runtime(profile: Profile) {
+    if is_steamvr_running() {
+        eprintln!(
+            "error: SteamVR (vrserver) is running. Both modes claim the headset \
+             connection — close SteamVR before registering the OpenXR runtime."
+        );
+        process::exit(1);
+    }
+
     let manifest = locate_published_manifest(profile);
 
     if cfg!(target_os = "windows") {

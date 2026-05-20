@@ -551,6 +551,7 @@ dependencies = [
  "pkg-config",
  "serde",
  "serde_json",
+ "sysinfo",
  "walkdir",
  "xshell",
 ]
