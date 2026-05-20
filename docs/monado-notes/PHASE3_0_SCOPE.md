@@ -112,16 +112,24 @@ Independent of Win32 decision, the C/Rust ABI boundary needs to be unified:
 
 ## Recommended scoping → Option C in three slices
 
-### Slice 1 — Linux extraction (2 days)
+### Slice 1 — Linux extraction (LANDED 2026-05-20)
 
 The Linux side is already runtime-agnostic; the work is just to relocate so it's reachable from both runtimes.
 
-1. Move `platform/linux/EncodePipeline*`, `FrameRender.{h,cpp}` (linux), `Renderer.{h,cpp}`, `ffmpeg_helper.{h,cpp}`, `FormatConverter.{h,cpp}` to `alvr/server_openvr/cpp/encoder/linux/`.
-2. Keep `platform/linux/CEncoder.{h,cpp}` (the OpenVR Unix-socket receiver) in place.
-3. Update `alvr_server_openvr/build.rs` includes; verify `cargo xtask build-streamer --gpl` on Linux still produces a working driver.
-4. Surface `EncodePipeline::Create` to the OpenXR side via `alvr_server_openxr/build.rs`.
+Final scope (smaller than originally drafted, because `FrameRender.h` `#include`s `protocol.h` and `protocol.h` is shared with `alvr_vulkan_layer` — both stayed in `platform/linux/`):
 
-**Exit:** Linux-only `cargo check -p alvr_server_openxr` succeeds AND the existing `cargo xtask build-streamer --gpl` on Linux produces bit-identical NALs.
+1. ✅ Moved to `alvr/server_openvr/cpp/encoder/linux/`: `EncodePipeline.{h,cpp}`, `EncodePipelineNvEnc.{h,cpp}`, `EncodePipelineSW.{h,cpp}`, `EncodePipelineVAAPI.{h,cpp}`, `Renderer.{h,cpp}`, `ffmpeg_helper.{h,cpp}`, `FormatConverter.{h,cpp}` (14 files).
+2. ✅ Kept in `platform/linux/`: `CEncoder.{h,cpp}` (OpenVR Unix-socket receiver), `FrameRender.{h,cpp}` (uses `protocol.h`), `protocol.h` (shared with Vulkan layer), `CrashHandler.cpp`, `shader/`.
+3. ✅ `alvr_server_openvr/build.rs`: added `encoder` to common-walker exclusions, walks `cpp/encoder/linux` on Linux, and adds it to the include path so sibling-style `#include "X.h"` from `CEncoder.cpp` / `FrameRender.h` still resolves moved headers.
+4. ⏭ `alvr_server_openxr/build.rs` not modified — there's nothing to compile yet. Slice 2/Phase 3.1 will add that crate's cc::Build when there's a `VkEncoderBackend` family to compile against.
+
+**Verified from Windows host:** `cargo check -p alvr_server_openvr -p alvr_server_openxr` passes — confirms the Win32 build doesn't try to pick up Linux files (the walker exclusion works).
+
+**STILL TO DO from a Linux host before merge:**
+- `cargo xtask build-streamer --gpl` succeeds.
+- Side-by-side stream against `master`: bitstream byte-diff is zero across NVENC, VAAPI, and SW backends.
+
+`FrameRender` decoupling from `protocol.h` is left to a later slice (3.2 or 3.5) — it's a real cross-runtime issue but doesn't block Slice 2 or Phase 3.1.
 
 ### Slice 2 — Windows interface extraction (3–4 days)
 
@@ -167,7 +175,7 @@ After this scope doc, in order:
 
 1. `alvr/server_openvr/cpp/platform/win32/CEncoder.cpp` — the backend-selection logic. Anchor for Slice 2.
 2. `alvr/server_openvr/cpp/platform/win32/VideoEncoder.h` — the existing interface. The new `D3d11EncoderBackend` wraps this.
-3. `alvr/server_openvr/cpp/platform/linux/EncodePipeline.h` — already-correct shape. Reference for the new `IEncoderBackend`.
+3. `alvr/server_openvr/cpp/encoder/linux/EncodePipeline.h` — already-correct shape. Reference for the new `IEncoderBackend`.
 4. `alvr/server_openvr/cpp/platform/win32/OvrDirectModeComponent.cpp` — the SteamVR-coupled entry point. Don't change it in Slice 2.
 5. `alvr/server_openvr/cpp/alvr_server/bindings.h` — the Rust↔C++ ABI. Encoder-relevant symbols are listed in the "Cross-platform shape" section above.
 6. `alvr/server_openvr/build.rs` — the `cc::Build` source-list. Path changes during slice moves.

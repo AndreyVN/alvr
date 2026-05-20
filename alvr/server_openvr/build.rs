@@ -32,11 +32,23 @@ fn main() {
         _ => panic!(),
     };
 
+    // Per-OS subdirs under cpp/encoder/. Phase 3.0 (encoder refactor) Slice 1
+    // lifted the runtime-agnostic Linux encoder files (EncodePipeline*,
+    // Renderer, ffmpeg_helper, FormatConverter) out of cpp/platform/linux/ so
+    // alvr_server_openxr can share them. The common walker below filters
+    // "encoder" out the same way it filters "platform" so Windows builds
+    // never try to compile Linux files.
+    let encoder_subpath: Option<&str> = match platform_name.as_str() {
+        "linux" => Some("cpp/encoder/linux"),
+        _ => None,
+    };
+
     let common_iter = walkdir::WalkDir::new("cpp")
         .into_iter()
         .filter_entry(|entry| {
             entry.file_name() != "tools"
                 && entry.file_name() != "platform"
+                && entry.file_name() != "encoder"
                 && (platform_name != "macos" || entry.file_name() != "amf")
                 && (platform_name != "linux" || entry.file_name() != "amf")
         });
@@ -45,6 +57,12 @@ fn main() {
 
     let cpp_paths = common_iter
         .chain(platform_iter)
+        .chain(
+            encoder_subpath
+                .map(walkdir::WalkDir::new)
+                .into_iter()
+                .flat_map(|w| w.into_iter()),
+        )
         .filter_map(|maybe_entry| maybe_entry.ok())
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
@@ -65,6 +83,14 @@ fn main() {
         .files(source_files_paths)
         .include(alvr_filesystem::workspace_dir().join("openvr/headers"))
         .include("cpp");
+
+    // After Slice 1, the remaining Linux encoder consumers (CEncoder.cpp,
+    // FrameRender.h in cpp/platform/linux/) still reference moved headers
+    // via sibling-style `#include "X.h"`. Putting cpp/encoder/linux on the
+    // search path resolves them without having to rewrite every include.
+    if let Some(enc) = encoder_subpath {
+        build.include(enc);
+    }
 
     if platform_name == "windows" {
         build
