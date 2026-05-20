@@ -6,33 +6,40 @@
 //! `openxr/src/xrt/drivers/alvr/` loads this cdylib and calls into the
 //! functions declared here.
 //!
-//! ## Current status (Phase 3.1.2 of openxr-migration.md)
+//! ## Current status (Phase 3.1.3 of openxr-migration.md)
 //!
 //! Live:
 //!   - [`alvr_oxr_init`] / [`alvr_oxr_shutdown`] — construct/drop a real
 //!     `alvr_server_core::ServerCoreContext`, spawn an event-drain thread.
-//!   - [`alvr_oxr_get_head_pose`] — reads the latest tracking sample via
-//!     `context.get_device_motion(HEAD_ID, target)`.
+//!   - [`alvr_oxr_get_head_pose`] / [`alvr_oxr_get_controller_state`] —
+//!     latest tracking sample via `context.get_device_motion`.
+//!   - [`alvr_oxr_set_haptic`] — forwards to `context.send_haptics`.
+//!   - [`alvr_oxr_get_hmd_info`] / [`alvr_oxr_get_controller_info`] —
+//!     write stable bridge-side serials (`ALVR_HMD`, `ALVR_Controller_*`).
 //!   - [`alvr_oxr_poll_session_event`] — drains client-connect/disconnect
 //!     events surfaced by the drain thread.
 //!
-//! Stubs awaiting later sub-slices:
-//!   - [`alvr_oxr_get_hmd_info`] / [`alvr_oxr_get_controller_info`] — 3.1.3.
-//!   - [`alvr_oxr_get_controller_state`] / [`alvr_oxr_set_haptic`] — 3.1.3.
-//!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3 (Vulkan-input NVENC).
+//! Pending:
+//!   - Trigger / squeeze / thumbstick / button bitfield in
+//!     [`AlvrOxrControllerState`] — Phase 3.1.4 will add a button-state
+//!     cache fed by the drain thread on `ServerCoreEvent::Buttons`.
+//!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3
+//!     (Vulkan-input NVENC; needs Vulkan SDK + NVENC 12.1+ + Monado).
 //!
 //! Nothing here is loaded by the OpenVR/SteamVR path; that remains the default
 //! mode and is unaffected.
 
 use alvr_common::{
-    HEAD_ID, ViewParams, error, info,
+    HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, ViewParams, error, info,
     parking_lot::{Mutex, RwLock},
     warn,
 };
+use alvr_packets::Haptics;
 use alvr_server_core::{ServerCoreContext, ServerCoreEvent};
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
+    ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc,
@@ -40,6 +47,31 @@ use std::{
     thread,
     time::Duration,
 };
+
+/// Copy a NUL-terminated UTF-8 string into a caller-provided buffer. Truncates
+/// to fit `buf_len - 1` bytes plus the trailing NUL. Returns Ok on success,
+/// Failed when out_serial is NULL or buf_len is 0.
+fn write_c_string(out: *mut c_char, buf_len: usize, value: &str) -> AlvrOxrResult {
+    if out.is_null() || buf_len == 0 {
+        return AlvrOxrResult::Failed;
+    }
+    let bytes = value.as_bytes();
+    let copy_len = bytes.len().min(buf_len - 1);
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, out, copy_len);
+        *out.add(copy_len) = 0;
+    }
+    AlvrOxrResult::Ok
+}
+
+/// Per-controller device-ID lookup. Independent of [`AlvrOxrSide`]'s discriminant
+/// so the bridge ABI can change without affecting the device-ID mapping.
+fn side_device_id(side: AlvrOxrSide) -> u64 {
+    match side {
+        AlvrOxrSide::Left => *HAND_LEFT_ID,
+        AlvrOxrSide::Right => *HAND_RIGHT_ID,
+    }
+}
 
 // Shared state across the bridge surface. Mirrors the structure used by
 // `alvr_server_openvr/src/lib.rs`.
@@ -234,9 +266,14 @@ pub unsafe extern "C" fn alvr_oxr_get_hmd_info(
     out_serial: *mut c_char,
     buf_len: usize,
 ) -> AlvrOxrResult {
-    let _ = (out_serial, buf_len);
-    warn!("alvr_oxr_get_hmd_info: not yet wired up");
-    AlvrOxrResult::NotImplemented
+    // Phase 3.1.3 returns a stable bridge-specific serial. The OpenVR mode
+    // maps this through HeadsetEmulationMode (props.rs:118) to mimic
+    // Quest/Vive/etc. serials for SteamVR consumers; Monado generally
+    // doesn't pin behaviour off the serial string the way SteamVR does, so
+    // a single "ALVR_HMD" is sufficient for the runtime. A 3.1.5 follow-up
+    // could thread HeadsetEmulationMode through if a downstream tool needs
+    // the spoofed serials.
+    write_c_string(out_serial, buf_len, "ALVR_HMD")
 }
 
 /// Fill `out_serial` with the controller's serial string. See
@@ -251,9 +288,11 @@ pub unsafe extern "C" fn alvr_oxr_get_controller_info(
     out_serial: *mut c_char,
     buf_len: usize,
 ) -> AlvrOxrResult {
-    let _ = (side, out_serial, buf_len);
-    warn!("alvr_oxr_get_controller_info: not yet wired up");
-    AlvrOxrResult::NotImplemented
+    let serial = match side {
+        AlvrOxrSide::Left => "ALVR_Controller_Left",
+        AlvrOxrSide::Right => "ALVR_Controller_Right",
+    };
+    write_c_string(out_serial, buf_len, serial)
 }
 
 /// Pose returned by the bridge. Coordinate convention follows OpenXR
@@ -332,11 +371,34 @@ pub unsafe extern "C" fn alvr_oxr_get_controller_state(
     at_timestamp_ns: i64,
     out_state: *mut AlvrOxrControllerState,
 ) -> AlvrOxrResult {
-    let _ = (side, at_timestamp_ns);
-    if !out_state.is_null() {
-        unsafe { *out_state = AlvrOxrControllerState::default() };
+    if out_state.is_null() {
+        return AlvrOxrResult::Failed;
     }
-    AlvrOxrResult::NotImplemented
+    unsafe { *out_state = AlvrOxrControllerState::default() };
+
+    let target = Duration::from_nanos(at_timestamp_ns.max(0) as u64);
+
+    let Some(context) = &*SERVER_CORE_CONTEXT.read() else {
+        return AlvrOxrResult::NotInitialised;
+    };
+
+    if let Some(motion) = context.get_device_motion(side_device_id(side), target) {
+        unsafe {
+            (*out_state).pose = AlvrOxrPose {
+                position: motion.pose.position.to_array(),
+                orientation: motion.pose.orientation.to_array(),
+            };
+            (*out_state).linear_velocity = motion.linear_velocity.to_array();
+            (*out_state).angular_velocity = motion.angular_velocity.to_array();
+        }
+    }
+
+    // TODO(phase-3.1.4): populate trigger / squeeze / thumbstick / buttons
+    // from a button-state cache fed by the drain thread on
+    // ServerCoreEvent::Buttons. Cache layout TBD — likely an array indexed
+    // by side with parking_lot::Mutex<TouchProfileState> per side.
+
+    AlvrOxrResult::Ok
 }
 
 /// Haptic pulse parameters. Maps onto OpenXR `XrHapticVibration`.
@@ -357,8 +419,23 @@ pub unsafe extern "C" fn alvr_oxr_set_haptic(
     side: AlvrOxrSide,
     params: *const AlvrOxrHaptic,
 ) -> AlvrOxrResult {
-    let _ = (side, params);
-    AlvrOxrResult::NotImplemented
+    if params.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+    let params = unsafe { *params };
+
+    let Some(context) = &*SERVER_CORE_CONTEXT.read() else {
+        return AlvrOxrResult::NotInitialised;
+    };
+
+    context.send_haptics(Haptics {
+        device_id: side_device_id(side),
+        duration: Duration::from_nanos(params.duration_ns.max(0) as u64),
+        frequency: params.frequency_hz,
+        amplitude: params.amplitude,
+    });
+
+    AlvrOxrResult::Ok
 }
 
 /// One submitted OpenXR composition layer. The Monado-side compositor builds
