@@ -63,10 +63,7 @@ void CEncoder::Run() {
 
         if (m_FrameRender->GetTexture()) {
             m_encoderBackend->Transmit(
-                m_FrameRender->GetTexture().Get(),
-                m_presentationTime,
-                m_targetTimestampNs,
-                m_scheduler.CheckIDRInsertion()
+                m_FrameRender->GetTexture().Get(), m_presentationTime, m_targetTimestampNs
             );
         }
 
@@ -88,8 +85,8 @@ void CEncoder::NewFrameReady() {
 
 void CEncoder::WaitForEncode() { m_encodeFinished.Wait(); }
 
-void CEncoder::OnStreamStart() { m_scheduler.OnStreamStart(); }
+void CEncoder::OnStreamStart() { m_encoderBackend->OnStreamStart(); }
 
-void CEncoder::InsertIDR() { m_scheduler.InsertIDR(); }
+void CEncoder::InsertIDR() { m_encoderBackend->InsertIDR(); }
 
 void CEncoder::CaptureFrame() { }

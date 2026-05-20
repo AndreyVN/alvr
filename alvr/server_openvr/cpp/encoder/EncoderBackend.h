@@ -26,8 +26,18 @@ public:
     // before the rest of the driver shuts down.
     virtual void Shutdown() = 0;
 
-    // Phase 3.0 Slice 2.4 will add OnStreamStart / InsertIDR / SetParams
-    // here once IDR scheduling and FfiDynamicEncoderParams handling move
-    // out of CEncoder. Keeping the interface minimal for 2.2 so that the
-    // refactor stays purely extractive.
+    // IDR (instantaneous decode refresh) scheduling. OnStreamStart is
+    // called once per client connection; InsertIDR is called whenever a
+    // keyframe is requested out-of-band (e.g. a packet-loss recovery
+    // signal from the client). The backend owns its IDRScheduler instance
+    // and consults it once per submitted frame; callers do not pass an
+    // explicit IDR flag through the hot path.
+    virtual void OnStreamStart() = 0;
+    virtual void InsertIDR() = 0;
+
+    // FfiDynamicEncoderParams handling is currently per-backend on
+    // Windows (each VideoEncoder* polls GetDynamicEncoderParams() in its
+    // Transmit) and explicit on Linux (EncodePipeline::SetParams). A
+    // future sub-slice may unify these behind a SetParams method on this
+    // interface; deferred to keep 2.3 narrowly scoped to IDR scheduling.
 };

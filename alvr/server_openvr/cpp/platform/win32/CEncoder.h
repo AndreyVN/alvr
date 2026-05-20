@@ -5,7 +5,6 @@
 
 #include "D3d11EncoderBackend.h"
 #include "FrameRender.h"
-#include "alvr_server/IDRScheduler.h"
 #include "alvr_server/Utils.h"
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -69,6 +68,4 @@ private:
     uint64_t m_targetTimestampNs;
 
     std::shared_ptr<FrameRender> m_FrameRender;
-
-    IDRScheduler m_scheduler;
 };

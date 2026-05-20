@@ -1,6 +1,7 @@
 #pragma once
 
 #include "VideoEncoder.h"
+#include "alvr_server/IDRScheduler.h"
 #include "encoder/EncoderBackend.h"
 #include "shared/d3drender.h"
 
@@ -23,18 +24,20 @@ public:
 
     // IEncoderBackend
     void Shutdown() override;
+    void OnStreamStart() override;
+    void InsertIDR() override;
 
     // D3D11-typed hot-path call. Not on IEncoderBackend because the input
-    // texture type differs per backend family.
+    // texture type differs per backend family. The IDR flag is no longer a
+    // parameter — the backend consults its owned IDRScheduler internally
+    // right before forwarding to the underlying VideoEncoder.
     void Transmit(
-        ID3D11Texture2D* pTexture,
-        uint64_t presentationTime,
-        uint64_t targetTimestampNs,
-        bool insertIDR
+        ID3D11Texture2D* pTexture, uint64_t presentationTime, uint64_t targetTimestampNs
     );
 
 private:
     explicit D3d11EncoderBackend(std::shared_ptr<VideoEncoder> videoEncoder);
 
     std::shared_ptr<VideoEncoder> m_videoEncoder;
+    IDRScheduler m_scheduler;
 };

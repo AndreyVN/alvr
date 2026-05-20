@@ -99,11 +99,14 @@ void D3d11EncoderBackend::Shutdown() {
     }
 }
 
+void D3d11EncoderBackend::OnStreamStart() { m_scheduler.OnStreamStart(); }
+
+void D3d11EncoderBackend::InsertIDR() { m_scheduler.InsertIDR(); }
+
 void D3d11EncoderBackend::Transmit(
-    ID3D11Texture2D* pTexture,
-    uint64_t presentationTime,
-    uint64_t targetTimestampNs,
-    bool insertIDR
+    ID3D11Texture2D* pTexture, uint64_t presentationTime, uint64_t targetTimestampNs
 ) {
-    m_videoEncoder->Transmit(pTexture, presentationTime, targetTimestampNs, insertIDR);
+    m_videoEncoder->Transmit(
+        pTexture, presentationTime, targetTimestampNs, m_scheduler.CheckIDRInsertion()
+    );
 }
