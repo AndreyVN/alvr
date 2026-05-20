@@ -74,22 +74,27 @@ Suggested shape:
 
 This refactor must land before 3.5 or both paths duplicate code.
 
-### 3.1 — Wire `alvr_server_core` into the bridge stubs
+### 3.1 — Wire `alvr_server_core` into the bridge stubs — LANDED 2026-05-20 (except `submit_layers`)
 
-`alvr/server_openxr/src/lib.rs` currently has 10 stub `extern "C"` functions. Implement them:
+| Stub | Status | Notes |
+| --- | --- | --- |
+| `alvr_oxr_init` | ✅ 3.1.1 | Takes `root_dir`; constructs `ServerCoreContext`, starts connection, spawns event-drain thread (3.1.2). |
+| `alvr_oxr_shutdown` | ✅ 3.1.1 | Flips SHUTDOWN_FLAG, drops context, joins drain thread. |
+| `alvr_oxr_get_hmd_info` / `_get_controller_info` | ✅ 3.1.3 | Returns stable bridge-side serials (`ALVR_HMD`, `ALVR_Controller_{Left,Right}`). HeadsetEmulationMode spoofing left as a follow-up if a downstream tool needs it. |
+| `alvr_oxr_get_head_pose` | ✅ 3.1.2 | `context.get_device_motion(HEAD_ID, target)`; explicit `motion.predict()` deferred (Monado already passes a future predicted timestamp). |
+| `alvr_oxr_get_controller_state` | ✅ 3.1.3 + 3.1.4 | Pose + velocities via `get_device_motion`; trigger / squeeze / thumbstick / 16-bit buttons bitfield from `CONTROLLER_BUTTON_CACHE` populated by the drain thread on `ServerCoreEvent::Buttons`. |
+| `alvr_oxr_set_haptic` | ✅ 3.1.3 | Forwards to `context.send_haptics`. |
+| `alvr_oxr_submit_layers` | ⏸ pending | **Only stub left.** Awaits Slice 3.2/3.3 (Vulkan-input NVENC encoder); needs Vulkan SDK + NVENC 12.1+ + Monado verification environment. |
+| `alvr_oxr_poll_session_event` | ✅ 3.1.2 | Drains a `SESSION_EVENTS_RX` queue the drain thread populates from `ClientConnected` / `ClientDisconnected` / `ShutdownPending`. |
+| `alvr_oxr_get_view_params` (new in 3.1.5) | ✅ 3.1.5 | Per-eye pose + FOV from the `LOCAL_VIEW_PARAMS` cache the drain thread maintains. Drives Monado's `xrLocateViews` equivalent. |
 
-| Stub | Wires to |
-| --- | --- |
-| `alvr_oxr_init` | Construct `alvr_server_core::ServerCoreContext`; store in `OnceLock`. Start connection. |
-| `alvr_oxr_shutdown` | Drop the context. |
-| `alvr_oxr_get_hmd_info` / `_get_controller_info` | Pull serial from the connected client's negotiation; for now hard-code matching what `alvr_packets` carries. |
-| `alvr_oxr_get_head_pose` | Read from `LOCAL_VIEW_PARAMS` + the head pose queue (mirror what `server_openvr/src/lib.rs` does at lines 38–80). |
-| `alvr_oxr_get_controller_state` | Read from the same tracking event stream. |
-| `alvr_oxr_set_haptic` | Send `Haptics` packet via `ServerCoreContext`. |
-| `alvr_oxr_submit_layers` | Feed into the refactored encoder from 3.0. |
-| `alvr_oxr_poll_session_event` | Drain `ServerCoreEvent` queue; translate `ClientConnected`/`ClientDisconnected`/refresh-rate events. |
+Reference impl: `alvr/server_openvr/src/lib.rs`. Notable deviations from OpenVR mode: no `SetTracking`/`SetButton` FFI push (Monado pulls on demand); no `event_loop` thread runs on the OpenVR side — instead a dedicated `alvr_oxr_event_drain` thread.
 
-Reference impl: `alvr/server_openvr/src/lib.rs` — same patterns apply.
+### 3.1.x — follow-ups outstanding
+
+- Battery / RefreshRate `AlvrOxrEventType` variants + drain handlers (currently only `StateChange` / `ConnectionLost` are emitted).
+- Battery payload encoding into `AlvrOxrEvent::data[4]` (device id, gauge %, plugged bool).
+- Monado-side `alvr_hmd.c` wiring of `alvr_oxr_get_view_params` (today the driver returns identity views). Lives on the fork's `alvr` branch per Option A.
 
 ### 3.2 — Fake compositor in `comp_alvr.c`
 
