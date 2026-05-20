@@ -12,6 +12,38 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
+
+#define ALVR_OXR_BUTTON_A_TOUCH (1 << 1)
+
+#define ALVR_OXR_BUTTON_B_CLICK (1 << 2)
+
+#define ALVR_OXR_BUTTON_B_TOUCH (1 << 3)
+
+#define ALVR_OXR_BUTTON_X_CLICK (1 << 4)
+
+#define ALVR_OXR_BUTTON_X_TOUCH (1 << 5)
+
+#define ALVR_OXR_BUTTON_Y_CLICK (1 << 6)
+
+#define ALVR_OXR_BUTTON_Y_TOUCH (1 << 7)
+
+#define ALVR_OXR_BUTTON_MENU_CLICK (1 << 8)
+
+#define ALVR_OXR_BUTTON_SYSTEM_CLICK (1 << 9)
+
+#define ALVR_OXR_BUTTON_THUMBSTICK_CLICK (1 << 10)
+
+#define ALVR_OXR_BUTTON_THUMBSTICK_TOUCH (1 << 11)
+
+#define ALVR_OXR_BUTTON_TRIGGER_CLICK (1 << 12)
+
+#define ALVR_OXR_BUTTON_TRIGGER_TOUCH (1 << 13)
+
+#define ALVR_OXR_BUTTON_SQUEEZE_CLICK (1 << 14)
+
+#define ALVR_OXR_BUTTON_THUMBREST_TOUCH (1 << 15)
+
 /**
  * Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
  * loosely but is intentionally a separate enum so that the bridge ABI can
@@ -87,8 +119,7 @@ typedef struct AlvrOxrPose {
 
 /**
  * Per-frame controller state passed back over the bridge. Buttons and
- * analogue values mirror the OpenXR Touch profile layout. Fields will be
- * extended in Phase 3 as `alvr_packets::TrackingPacket` features are wired in.
+ * analogue values mirror the OpenXR Touch profile layout.
  */
 typedef struct AlvrOxrControllerState {
   struct AlvrOxrPose pose;

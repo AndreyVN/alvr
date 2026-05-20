@@ -6,23 +6,23 @@
 //! `openxr/src/xrt/drivers/alvr/` loads this cdylib and calls into the
 //! functions declared here.
 //!
-//! ## Current status (Phase 3.1.3 of openxr-migration.md)
+//! ## Current status (Phase 3.1.4 of openxr-migration.md)
 //!
 //! Live:
 //!   - [`alvr_oxr_init`] / [`alvr_oxr_shutdown`] — construct/drop a real
 //!     `alvr_server_core::ServerCoreContext`, spawn an event-drain thread.
 //!   - [`alvr_oxr_get_head_pose`] / [`alvr_oxr_get_controller_state`] —
-//!     latest tracking sample via `context.get_device_motion`.
+//!     latest tracking sample via `context.get_device_motion`. Controller
+//!     state also returns trigger / squeeze / thumbstick / button
+//!     bitfield from a cache the drain thread maintains on
+//!     `ServerCoreEvent::Buttons`.
 //!   - [`alvr_oxr_set_haptic`] — forwards to `context.send_haptics`.
 //!   - [`alvr_oxr_get_hmd_info`] / [`alvr_oxr_get_controller_info`] —
 //!     write stable bridge-side serials (`ALVR_HMD`, `ALVR_Controller_*`).
 //!   - [`alvr_oxr_poll_session_event`] — drains client-connect/disconnect
 //!     events surfaced by the drain thread.
 //!
-//! Pending:
-//!   - Trigger / squeeze / thumbstick / button bitfield in
-//!     [`AlvrOxrControllerState`] — Phase 3.1.4 will add a button-state
-//!     cache fed by the drain thread on `ServerCoreEvent::Buttons`.
+//! Only stub left:
 //!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3
 //!     (Vulkan-input NVENC; needs Vulkan SDK + NVENC 12.1+ + Monado).
 //!
@@ -30,11 +30,21 @@
 //! mode and is unaffected.
 
 use alvr_common::{
-    HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, ViewParams, error, info,
+    BUTTON_INFO, HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, LEFT_A_CLICK_ID, LEFT_A_TOUCH_ID,
+    LEFT_B_CLICK_ID, LEFT_B_TOUCH_ID, LEFT_MENU_CLICK_ID, LEFT_SQUEEZE_CLICK_ID,
+    LEFT_SQUEEZE_VALUE_ID, LEFT_SYSTEM_CLICK_ID, LEFT_THUMBREST_TOUCH_ID, LEFT_THUMBSTICK_CLICK_ID,
+    LEFT_THUMBSTICK_TOUCH_ID, LEFT_THUMBSTICK_X_ID, LEFT_THUMBSTICK_Y_ID, LEFT_TRIGGER_CLICK_ID,
+    LEFT_TRIGGER_TOUCH_ID, LEFT_TRIGGER_VALUE_ID, LEFT_X_CLICK_ID, LEFT_X_TOUCH_ID,
+    LEFT_Y_CLICK_ID, LEFT_Y_TOUCH_ID, RIGHT_A_CLICK_ID, RIGHT_A_TOUCH_ID, RIGHT_B_CLICK_ID,
+    RIGHT_B_TOUCH_ID, RIGHT_MENU_CLICK_ID, RIGHT_SQUEEZE_CLICK_ID, RIGHT_SQUEEZE_VALUE_ID,
+    RIGHT_SYSTEM_CLICK_ID, RIGHT_THUMBREST_TOUCH_ID, RIGHT_THUMBSTICK_CLICK_ID,
+    RIGHT_THUMBSTICK_TOUCH_ID, RIGHT_THUMBSTICK_X_ID, RIGHT_THUMBSTICK_Y_ID,
+    RIGHT_TRIGGER_CLICK_ID, RIGHT_TRIGGER_TOUCH_ID, RIGHT_TRIGGER_VALUE_ID, RIGHT_X_CLICK_ID,
+    RIGHT_X_TOUCH_ID, RIGHT_Y_CLICK_ID, RIGHT_Y_TOUCH_ID, ViewParams, error, info,
     parking_lot::{Mutex, RwLock},
     warn,
 };
-use alvr_packets::Haptics;
+use alvr_packets::{ButtonValue, Haptics};
 use alvr_server_core::{ServerCoreContext, ServerCoreEvent};
 use std::{
     ffi::{CStr, c_char},
@@ -97,6 +107,99 @@ static SESSION_EVENTS_RX: Mutex<Option<mpsc::Receiver<AlvrOxrEvent>>> = Mutex::n
 static EVENT_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None);
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
 
+/// Cached analogue + button state for one side. Indexed by AlvrOxrSide
+/// discriminant (Left = 0, Right = 1). Written by the event-drain thread on
+/// `ServerCoreEvent::Buttons`, read by [`alvr_oxr_get_controller_state`].
+#[derive(Clone, Copy)]
+struct TouchAnalog {
+    trigger: f32,
+    squeeze: f32,
+    thumbstick: [f32; 2],
+    buttons: u32,
+}
+
+const TOUCH_ANALOG_INIT: TouchAnalog = TouchAnalog {
+    trigger: 0.0,
+    squeeze: 0.0,
+    thumbstick: [0.0; 2],
+    buttons: 0,
+};
+
+static CONTROLLER_BUTTON_CACHE: Mutex<[TouchAnalog; 2]> = Mutex::new([TOUCH_ANALOG_INIT; 2]);
+
+/// Translate a button path ID + value into the appropriate cache field
+/// update. Unmapped paths are silently ignored — the Touch profile bridge
+/// surface intentionally covers a subset; trackpad/back/sensor sub-paths
+/// are dropped on the floor here because no current consumer maps them.
+fn apply_button(state: &mut TouchAnalog, path_id: u64, value: ButtonValue) {
+    match value {
+        ButtonValue::Scalar(v) => {
+            if path_id == *LEFT_TRIGGER_VALUE_ID || path_id == *RIGHT_TRIGGER_VALUE_ID {
+                state.trigger = v;
+            } else if path_id == *LEFT_SQUEEZE_VALUE_ID || path_id == *RIGHT_SQUEEZE_VALUE_ID {
+                state.squeeze = v;
+            } else if path_id == *LEFT_THUMBSTICK_X_ID || path_id == *RIGHT_THUMBSTICK_X_ID {
+                state.thumbstick[0] = v;
+            } else if path_id == *LEFT_THUMBSTICK_Y_ID || path_id == *RIGHT_THUMBSTICK_Y_ID {
+                state.thumbstick[1] = v;
+            }
+        }
+        ButtonValue::Binary(pressed) => {
+            let mask = button_bit_for(path_id);
+            if mask != 0 {
+                if pressed {
+                    state.buttons |= mask;
+                } else {
+                    state.buttons &= !mask;
+                }
+            }
+        }
+    }
+}
+
+/// Maps a binary-button path ID to the corresponding `ALVR_OXR_BUTTON_*`
+/// bit, or 0 if the path isn't in the bridge's bit table. Both sides share
+/// the same bit positions (each side's path IDs are distinct), so callers
+/// must already have routed to the right slot via `BUTTON_INFO.device_id`
+/// before consulting this map.
+fn button_bit_for(path_id: u64) -> u32 {
+    if path_id == *LEFT_A_CLICK_ID || path_id == *RIGHT_A_CLICK_ID {
+        ALVR_OXR_BUTTON_A_CLICK
+    } else if path_id == *LEFT_A_TOUCH_ID || path_id == *RIGHT_A_TOUCH_ID {
+        ALVR_OXR_BUTTON_A_TOUCH
+    } else if path_id == *LEFT_B_CLICK_ID || path_id == *RIGHT_B_CLICK_ID {
+        ALVR_OXR_BUTTON_B_CLICK
+    } else if path_id == *LEFT_B_TOUCH_ID || path_id == *RIGHT_B_TOUCH_ID {
+        ALVR_OXR_BUTTON_B_TOUCH
+    } else if path_id == *LEFT_X_CLICK_ID || path_id == *RIGHT_X_CLICK_ID {
+        ALVR_OXR_BUTTON_X_CLICK
+    } else if path_id == *LEFT_X_TOUCH_ID || path_id == *RIGHT_X_TOUCH_ID {
+        ALVR_OXR_BUTTON_X_TOUCH
+    } else if path_id == *LEFT_Y_CLICK_ID || path_id == *RIGHT_Y_CLICK_ID {
+        ALVR_OXR_BUTTON_Y_CLICK
+    } else if path_id == *LEFT_Y_TOUCH_ID || path_id == *RIGHT_Y_TOUCH_ID {
+        ALVR_OXR_BUTTON_Y_TOUCH
+    } else if path_id == *LEFT_MENU_CLICK_ID || path_id == *RIGHT_MENU_CLICK_ID {
+        ALVR_OXR_BUTTON_MENU_CLICK
+    } else if path_id == *LEFT_SYSTEM_CLICK_ID || path_id == *RIGHT_SYSTEM_CLICK_ID {
+        ALVR_OXR_BUTTON_SYSTEM_CLICK
+    } else if path_id == *LEFT_THUMBSTICK_CLICK_ID || path_id == *RIGHT_THUMBSTICK_CLICK_ID {
+        ALVR_OXR_BUTTON_THUMBSTICK_CLICK
+    } else if path_id == *LEFT_THUMBSTICK_TOUCH_ID || path_id == *RIGHT_THUMBSTICK_TOUCH_ID {
+        ALVR_OXR_BUTTON_THUMBSTICK_TOUCH
+    } else if path_id == *LEFT_TRIGGER_CLICK_ID || path_id == *RIGHT_TRIGGER_CLICK_ID {
+        ALVR_OXR_BUTTON_TRIGGER_CLICK
+    } else if path_id == *LEFT_TRIGGER_TOUCH_ID || path_id == *RIGHT_TRIGGER_TOUCH_ID {
+        ALVR_OXR_BUTTON_TRIGGER_TOUCH
+    } else if path_id == *LEFT_SQUEEZE_CLICK_ID || path_id == *RIGHT_SQUEEZE_CLICK_ID {
+        ALVR_OXR_BUTTON_SQUEEZE_CLICK
+    } else if path_id == *LEFT_THUMBREST_TOUCH_ID || path_id == *RIGHT_THUMBREST_TOUCH_ID {
+        ALVR_OXR_BUTTON_THUMBREST_TOUCH
+    } else {
+        0
+    }
+}
+
 fn event_loop(
     events_receiver: mpsc::Receiver<ServerCoreEvent>,
     session_events_tx: mpsc::Sender<AlvrOxrEvent>,
@@ -130,13 +233,34 @@ fn event_loop(
                 ServerCoreEvent::LocalViewParams(params) => {
                     *LOCAL_VIEW_PARAMS.write() = params;
                 }
+                ServerCoreEvent::Buttons(entries) => {
+                    // Route each entry by device_id from BUTTON_INFO.
+                    // Entries for non-controller devices (HMD path buttons
+                    // etc.) are silently dropped — the bridge surface only
+                    // exposes left/right controller analogues.
+                    let mut cache = CONTROLLER_BUTTON_CACHE.lock();
+                    for entry in entries {
+                        let Some(info) = BUTTON_INFO.get(&entry.path_id) else { continue };
+                        let slot = if info.device_id == *HAND_LEFT_ID {
+                            0
+                        } else if info.device_id == *HAND_RIGHT_ID {
+                            1
+                        } else {
+                            continue;
+                        };
+                        apply_button(&mut cache[slot], entry.path_id, entry.value);
+                    }
+                }
                 // Other events are drained but not yet routed.
-                //   - Tracking / Buttons:  read on-demand by
-                //     alvr_oxr_get_head_pose / _controller_state via
-                //     context.get_device_motion (Tracking) and (3.1.3+)
-                //     via context state for Buttons.
-                //   - SetOpenvrProperty:   irrelevant in OpenXR mode.
-                //   - Battery / Playspace / etc.: 3.1.4+.
+                //   - Tracking:           read on-demand by
+                //                         alvr_oxr_get_head_pose /
+                //                         _controller_state via
+                //                         context.get_device_motion.
+                //   - SetOpenvrProperty:  irrelevant in OpenXR mode.
+                //   - Battery / RefreshRate / Playspace: pending in a
+                //                         future sub-slice once the
+                //                         bridge ABI gains the matching
+                //                         AlvrOxrEvent variants.
                 _ => {}
             },
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -346,9 +470,29 @@ pub unsafe extern "C" fn alvr_oxr_get_head_pose(
     AlvrOxrResult::Ok
 }
 
+// `AlvrOxrControllerState::buttons` bitfield. Both sides share the same
+// bit positions — left/right is implied by which controller's state you
+// query. Trackpad / back-click / sensor sub-paths intentionally absent;
+// add new bits at the next free position rather than reusing.
+pub const ALVR_OXR_BUTTON_A_CLICK: u32 = 1 << 0;
+pub const ALVR_OXR_BUTTON_A_TOUCH: u32 = 1 << 1;
+pub const ALVR_OXR_BUTTON_B_CLICK: u32 = 1 << 2;
+pub const ALVR_OXR_BUTTON_B_TOUCH: u32 = 1 << 3;
+pub const ALVR_OXR_BUTTON_X_CLICK: u32 = 1 << 4;
+pub const ALVR_OXR_BUTTON_X_TOUCH: u32 = 1 << 5;
+pub const ALVR_OXR_BUTTON_Y_CLICK: u32 = 1 << 6;
+pub const ALVR_OXR_BUTTON_Y_TOUCH: u32 = 1 << 7;
+pub const ALVR_OXR_BUTTON_MENU_CLICK: u32 = 1 << 8;
+pub const ALVR_OXR_BUTTON_SYSTEM_CLICK: u32 = 1 << 9;
+pub const ALVR_OXR_BUTTON_THUMBSTICK_CLICK: u32 = 1 << 10;
+pub const ALVR_OXR_BUTTON_THUMBSTICK_TOUCH: u32 = 1 << 11;
+pub const ALVR_OXR_BUTTON_TRIGGER_CLICK: u32 = 1 << 12;
+pub const ALVR_OXR_BUTTON_TRIGGER_TOUCH: u32 = 1 << 13;
+pub const ALVR_OXR_BUTTON_SQUEEZE_CLICK: u32 = 1 << 14;
+pub const ALVR_OXR_BUTTON_THUMBREST_TOUCH: u32 = 1 << 15;
+
 /// Per-frame controller state passed back over the bridge. Buttons and
-/// analogue values mirror the OpenXR Touch profile layout. Fields will be
-/// extended in Phase 3 as `alvr_packets::TrackingPacket` features are wired in.
+/// analogue values mirror the OpenXR Touch profile layout.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AlvrOxrControllerState {
@@ -358,7 +502,7 @@ pub struct AlvrOxrControllerState {
     pub trigger: f32,
     pub squeeze: f32,
     pub thumbstick: [f32; 2],
-    pub buttons: u32, // bitfield, see ALVR_OXR_BUTTON_* (to be defined)
+    pub buttons: u32, // bitfield, see ALVR_OXR_BUTTON_*
 }
 
 /// Query the controller state at `at_timestamp_ns`.
@@ -393,10 +537,17 @@ pub unsafe extern "C" fn alvr_oxr_get_controller_state(
         }
     }
 
-    // TODO(phase-3.1.4): populate trigger / squeeze / thumbstick / buttons
-    // from a button-state cache fed by the drain thread on
-    // ServerCoreEvent::Buttons. Cache layout TBD — likely an array indexed
-    // by side with parking_lot::Mutex<TouchProfileState> per side.
+    // Analogue + button bitfield from the cache maintained by the drain
+    // thread on ServerCoreEvent::Buttons. The cache slot index matches
+    // AlvrOxrSide's discriminant (Left = 0, Right = 1).
+    let cache = CONTROLLER_BUTTON_CACHE.lock();
+    let slot = &cache[side as usize];
+    unsafe {
+        (*out_state).trigger = slot.trigger;
+        (*out_state).squeeze = slot.squeeze;
+        (*out_state).thumbstick = slot.thumbstick;
+        (*out_state).buttons = slot.buttons;
+    }
 
     AlvrOxrResult::Ok
 }
