@@ -478,13 +478,19 @@ fn apply_cpu_temperature(name_l: &str, value: f32, cpu: &mut CpuSensors) {
     let is_aggregate =
         name_l.contains("max") || name_l.contains("average") || name_l.contains("avg");
 
+    // Precedence note: the OR'd branch consumes the value for any of three
+    // mutually-distinguishable sources. The first sub-condition (Intel package
+    // or AMD overall) is the authoritative one and overwrites whatever's
+    // there; the second/third are best-effort fallbacks that only fire if no
+    // authoritative reading has landed yet. Clippy's identical-blocks lint
+    // doesn't model the `cpu.package_temp_c.is_none()` short-circuit, so
+    // collapsing into a single arm reads cleaner anyway.
     if is_per_core_intel {
         cpu.per_core_temp_c.push(value);
-    } else if is_intel_package || is_amd_overall {
-        cpu.package_temp_c = Some(value);
-    } else if is_amd_chiplet && cpu.package_temp_c.is_none() {
-        cpu.package_temp_c = Some(value);
-    } else if !is_aggregate && cpu.package_temp_c.is_none() && name_l.contains("cpu") {
+    } else if (is_intel_package || is_amd_overall)
+        || (is_amd_chiplet && cpu.package_temp_c.is_none())
+        || (!is_aggregate && cpu.package_temp_c.is_none() && name_l.contains("cpu"))
+    {
         cpu.package_temp_c = Some(value);
     }
 }

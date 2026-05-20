@@ -117,11 +117,11 @@ fn run(config: HwExporterConfig, shutdown: Arc<Shutdown>) {
         for (k, v) in &config.headers {
             req = req.header(k.as_str(), v.as_str());
         }
-        if let Err(e) = req.send_json(&payload) {
-            if last_warn.elapsed() >= WARN_RATE_LIMIT {
-                warn!("hwmonitor_exporter: POST failed: {e}");
-                last_warn = Instant::now();
-            }
+        if let Err(e) = req.send_json(&payload)
+            && last_warn.elapsed() >= WARN_RATE_LIMIT
+        {
+            warn!("hwmonitor_exporter: POST failed: {e}");
+            last_warn = Instant::now();
         }
     }
 

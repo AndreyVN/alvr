@@ -146,25 +146,25 @@ impl SettingsTab {
 
         // Collect results from the background test threads.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.metrics_test_running {
-            if let Some(text) = self.metrics_test_result.lock().unwrap().take() {
-                self.metrics_dialog_text = Some(text);
-                self.metrics_test_running = false;
-            }
+        if self.metrics_test_running
+            && let Some(text) = self.metrics_test_result.lock().unwrap().take()
+        {
+            self.metrics_dialog_text = Some(text);
+            self.metrics_test_running = false;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.hw_test_running {
-            if let Some(text) = self.hw_test_result.lock().unwrap().take() {
-                self.hw_dialog_text = Some(text);
-                self.hw_test_running = false;
-            }
+        if self.hw_test_running
+            && let Some(text) = self.hw_test_result.lock().unwrap().take()
+        {
+            self.hw_dialog_text = Some(text);
+            self.hw_test_running = false;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.lhm_test_running {
-            if let Some(text) = self.lhm_test_result.lock().unwrap().take() {
-                self.lhm_dialog_text = Some(text);
-                self.lhm_test_running = false;
-            }
+        if self.lhm_test_running
+            && let Some(text) = self.lhm_test_result.lock().unwrap().take()
+        {
+            self.lhm_dialog_text = Some(text);
+            self.lhm_test_running = false;
         }
 
         let now = Instant::now();
