@@ -47,7 +47,7 @@ alvr_hmd_get_tracked_pose(struct xrt_device *xdev,
 
 	AlvrOxrPose pose = {0};
 	AlvrOxrResult br = alvr_oxr_get_head_pose(at_timestamp_ns, &pose);
-	if (br != ALVR_OXR_OK) {
+	if (br != ALVR_OXR_RESULT_OK) {
 		// Fall back to identity so the compositor doesn't crash during scaffolding.
 		U_ZERO(out_relation);
 		out_relation->relation_flags = XRT_SPACE_RELATION_BITMASK_NONE;

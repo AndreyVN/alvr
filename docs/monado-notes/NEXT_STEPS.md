@@ -29,15 +29,15 @@ What landed (this is the "starting state" for future work):
 
 These block real progress; fix them in this order.
 
-### 1. The bridge header is sparse
+### 1. The bridge header — RESOLVED (2026-05-20)
 
-`alvr/server_openxr/include/alvr_runtime_bridge.h` was overwritten by cbindgen 0.27 during the first `cargo check` and ended up containing only `#include` lines + the header guard — no types, no function declarations. I made the regeneration opt-in (`ALVR_REGENERATE_BRIDGE_HEADER=1`) so it stops happening on every build, but the current header is unusable.
+Root cause was cbindgen 0.27's syn version not parsing Rust 2024 syntax (`#[unsafe(no_mangle)]`, `unsafe extern "C" fn`); it silently dropped the entire C surface. Fixed by bumping the build-dep to `cbindgen = "0.29"` and adding `enumeration.rename_variants = QualifiedScreamingSnakeCase` to the cbindgen `Config` in `alvr/server_openxr/build.rs` (matches the convention in `alvr/server_core/cbindgen.toml`).
 
-**Either**:
-- (A) Fix the cbindgen config in `alvr/server_openxr/build.rs` so `ALVR_REGENERATE_BRIDGE_HEADER=1 cargo build -p alvr_server_openxr` produces a populated header. Likely needs `parse.parse_deps = false`, `parse.include = ["alvr_server_openxr"]`, and possibly a `cbindgen.toml` file at the crate root. Verify by checking that `alvr_oxr_init`, `AlvrOxrPose`, `AlvrOxrLayer` etc. appear in the output.
-- (B) Restore the hand-written header from the original Write in this session (it's in the conversation transcript) and tag the cbindgen step as documentation-only. Less ergonomic but unblocks Phase 3.
+Regeneration stays opt-in via `ALVR_REGENERATE_BRIDGE_HEADER=1 cargo build -p alvr_server_openxr` so unrelated `cargo check` runs don't churn the header on disk.
 
-CMakeLists.txt in `openxr/src/xrt/drivers/alvr/` already errors clearly if the header is missing or empty, so the failure mode is loud.
+Driver C consumers also updated to match: `AlvrOxrSide side` (typedef, 1 byte — was `enum AlvrOxrSide`, 4 bytes, ABI mismatch with `#[repr(u8)]`); `ALVR_OXR_RESULT_OK` (was `ALVR_OXR_OK`); `ALVR_OXR_SIDE_LEFT/RIGHT` now actually emitted by cbindgen.
+
+Note: CMakeLists.txt only checks file existence, not content. A future hardening would be to also check the header isn't a bare include-guard shell.
 
 ### 2. The Monado-side patches conflict with the submodule plan
 
@@ -136,7 +136,7 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
 | F1 | Driver shape — in-tree (`openxr/src/xrt/drivers/alvr/`) vs out-of-tree overlay | in-tree | submodule conversion |
 | F2 | Frame ingress path — fake compositor vs custom `comp_target` | fake compositor (`comp_alvr.c`) | Phase 3.2 |
 | F3 | Build wiring — standalone CMake vs subsumed into xtask | standalone CMake invoked by xtask | never (locked) |
-| F4 | Bridge header — cbindgen vs hand-maintained | TBD (currently broken; see "Known issues") | first thing in next session |
+| F4 | Bridge header — cbindgen vs hand-maintained | cbindgen 0.29 + `Config` in `build.rs`, opt-in regen via `ALVR_REGENERATE_BRIDGE_HEADER=1` (resolved 2026-05-20) | only revisit if migrating to a `cbindgen.toml` file to match other crates |
 | F5 | Submodule architecture — fork branch / patch overlay / upstream PR | TBD | before any Phase 3 commits |
 
 ## Files a future session should read first

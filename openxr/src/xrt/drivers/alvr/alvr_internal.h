@@ -47,14 +47,14 @@ struct alvr_hmd
 struct alvr_controller
 {
 	struct xrt_device base;
-	enum AlvrOxrSide side;
+	AlvrOxrSide side;
 };
 
 struct xrt_device *
 alvr_hmd_create(void);
 
 struct xrt_device *
-alvr_controller_create(enum AlvrOxrSide side);
+alvr_controller_create(AlvrOxrSide side);
 
 #ifdef __cplusplus
 }

@@ -43,7 +43,7 @@ alvr_create_devices(struct xrt_session_event_sink *broadcast,
 	}
 
 	AlvrOxrResult init_res = alvr_oxr_init();
-	if (init_res != ALVR_OXR_OK) {
+	if (init_res != ALVR_OXR_RESULT_OK) {
 		ALVR_ERROR("alvr_oxr_init failed: %d", (int)init_res);
 		return XRT_ERROR_DEVICE_CREATION_FAILED;
 	}

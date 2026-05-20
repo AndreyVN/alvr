@@ -24,4 +24,4 @@ alvr_server_core.workspace = true
 alvr_session.workspace = true
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29"

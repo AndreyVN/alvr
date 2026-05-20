@@ -75,7 +75,7 @@ alvr_controller_set_output(struct xrt_device *xdev,
 }
 
 struct xrt_device *
-alvr_controller_create(enum AlvrOxrSide side)
+alvr_controller_create(AlvrOxrSide side)
 {
 	enum u_device_alloc_flags flags = U_DEVICE_ALLOC_TRACKING_NONE;
 	struct alvr_controller *ctrl = U_DEVICE_ALLOCATE(struct alvr_controller, flags, 1, 1);
