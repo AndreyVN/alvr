@@ -4,14 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-ALVR streams VR games from a PC to a standalone headset over Wi-Fi. The PC side ("streamer") encodes frames from SteamVR and ships them to a headset app ("client"); the client decodes, displays, and ships back tracking/input/audio. Everything is one Rust workspace (`Cargo.toml`) split into ~23 crates under `alvr/`. The OpenVR driver glue and a few low-level GPU/codec pieces are C++ under `alvr/server_openvr/cpp`; everything else is Rust. Two directories are git submodules: `openvr/` (Valve's SDK) and `openxr/` (an ALVR fork of Monado, branched at `v25.1.0` — see `docs/monado-notes/SUBMODULE_PIN.md`). Clone with `--recurse-submodules` or run `git submodule update --init --recursive` after clone. The Android client is built with `cargo-apk` from `alvr/client_openxr` and links against the C-ABI `alvr_client_core` library.
+ALVR streams VR games from a PC to a standalone headset over Wi-Fi. The PC side ("streamer") encodes frames from SteamVR and ships them to a headset app ("client"); the client decodes, displays, and ships back tracking/input/audio. Everything is one Rust workspace (`Cargo.toml`) split into ~24 crates under `alvr/`. The OpenVR driver glue and a few low-level GPU/codec pieces are C++ under `alvr/server_openvr/cpp`; everything else is Rust. Two directories are git submodules: `openvr/` (Valve's SDK) and `openxr/` (an ALVR fork of Monado at `github.com/AndreyVN/monado@alvr`, branched at `v25.1.0` — see `docs/monado-notes/SUBMODULE_PIN.md`). Clone with `--recurse-submodules` or run `git submodule update --init --recursive` after clone. The Android client is built with `cargo-apk` from `alvr/client_openxr` and links against the C-ABI `alvr_client_core` library.
+
+**PC runtime mode** (`Settings.extra.runtime`, default `Steamvr`): the streamer can run as a SteamVR driver (`alvr_server_openvr` cdylib loaded by `vrserver`) or as a Monado-based OpenXR runtime (`alvr_server_openxr` cdylib loaded by the in-fork Monado driver at `openxr/src/xrt/drivers/alvr/`). The OpenXR mode is preview-only and gated behind `cargo xtask build-openxr-runtime --enable-alvr-driver`; the SteamVR mode is the default and always builds. The two runtimes share `alvr_server_core` (state machine, sockets, embedded web server, statistics). See `docs/monado-notes/NEXT_STEPS.md` and `openxr-migration.md` for the migration plan.
 
 This fork also ships a host-side telemetry stack on top of upstream ALVR: an `alvr_hwmonitor` crate samples CPU/GPU/RAM/storage/network on the PC; `alvr_server_core::metrics_exporter` aggregates streaming statistics, headset & controller battery, and an Android `ClientTelemetry` payload over each export window; and `alvr_server_core::hwmonitor_exporter` POSTs the hardware snapshot in parallel. The dashboard exposes both via a top-level `HWMonitor` tab and a dedicated `Metrics` settings tab; a reference ingest (ClickHouse + Grafana) lives under `metrics/`.
 
 ## Technical context
 
 - **Rust backend** (workspace edition 2024, MSRV 1.92): server core, client core, dashboard, launcher, all shared crates. Tokio is used inside `server_core` for the embedded web server and async sockets, but most hot paths are plain `std::thread` + `parking_lot` locks + `mpsc` channels.
-- **C++ on the PC side** (`alvr/server_openvr/cpp`): the SteamVR `vrserver` driver entry point and OpenVR shims, bridged to Rust via `bindgen`/`cc`.
+- **C++ on the PC side** (`alvr/server_openvr/cpp`): the SteamVR `vrserver` driver entry point and OpenVR shims, bridged to Rust via `bindgen`/`cc`. Encoder backends live under `cpp/encoder/` — Linux `EncodePipeline*` under `encoder/linux/`, Windows D3D11 backends under `encoder/win32_d3d11/`, and a Vulkan-input skeleton for OpenXR mode under `encoder/win32_vk/` that `alvr_server_openxr` compiles via its own `cc::Build`.
+- **OpenXR mode bridge** (`alvr/server_openxr`): a cdylib that exports a small C ABI (`include/alvr_runtime_bridge.h`, regenerated via cbindgen) consumed by the Monado-side ALVR driver inside `openxr/`. Mirrors what `alvr_server_openvr` does for SteamVR, but for Monado.
 - **Android client** (`alvr/client_openxr` cdylib): an OpenXR app packaged via `cargo-apk` and `cargo xtask build-client`. Decoding uses Android `MediaCodec` (called from `alvr_client_core::video_decoder::android`); rendering uses Vulkan via OpenXR swapchains and `alvr_graphics` (wgpu).
 - **Build system**: every workflow goes through `cargo xtask` (alias in `.cargo/config.toml` → `cargo run -p alvr_xtask --`). There is no Makefile, npm script, or shell wrapper. CI calls the same xtask subcommands; they're the source of truth. See `alvr/xtask/src/main.rs`.
 
@@ -29,6 +32,11 @@ cargo xtask clippy [--ci]                                           # curated re
 cargo xtask clean                                                   # nukes ./build, ./deps, and ./target
 cargo xtask bump --version <X.Y.Z> [--nightly]
 cargo xtask kill-oculus                                             # Windows only: kills OVR* processes before debugging
+cargo xtask build-openxr-runtime [--release] [--enable-alvr-driver] # PC OpenXR mode: drives CMake on openxr/. --enable-alvr-driver
+                                                                    # also turns on XRT_FEATURE_COMP_ALVR.
+cargo xtask register-openxr-runtime / unregister-openxr-runtime     # Activate/deactivate the built ALVR-Monado runtime per-user.
+                                                                    # Windows: HKCU registry. Linux: XDG file. Refuses to clobber
+                                                                    # a different vendor's manifest on unregister.
 ```
 
 Important flags: `--gpl` bundles FFmpeg on Windows (always on for Linux); `--no-nvidia` strips NVENC support on Linux `prepare-deps`; `--ci` enables CI tweaks — most importantly it skips the elevated `choco install` step in Windows `prepare-deps`, so use it when the host already has zip/unzip/llvm/vulkan-sdk/pkgconfiglite/cmake on PATH (no UAC prompt that way); `--keep-config` preserves `session.json` between rebuilds. Artifacts land in `./build/` (not `./target/`); native deps live in `./deps/` and are managed by `prepare-deps` — never modify them by hand.
@@ -37,11 +45,12 @@ For the exact list of host-side tools, versions, and env vars that make these co
 
 ## Core verification & run commands
 
-These are the day-to-day "did I break it" commands. Note the crate-name mapping: this fork has no single `alvr_server` crate — the SteamVR driver split into `alvr_server_core` (platform-agnostic streamer brain) and `alvr_server_openvr` (the cdylib SteamVR loads).
+These are the day-to-day "did I break it" commands. Note the crate-name mapping: this fork has no single `alvr_server` crate — the SteamVR driver split into `alvr_server_core` (platform-agnostic streamer brain) and `alvr_server_openvr` (the cdylib SteamVR loads). The OpenXR-mode counterpart is `alvr_server_openxr`.
 
 ```
 cargo check -p alvr_server_core              # type-check the streamer brain
 cargo check -p alvr_server_openvr            # type-check the OpenVR driver cdylib (needs prepare-deps first)
+cargo check -p alvr_server_openxr            # type-check the OpenXR-mode bridge cdylib (Monado-loaded; Vulkan SDK ideal)
 cargo check -p alvr_dashboard                # type-check the dashboard GUI
 cargo test  --workspace                      # run the (small) test suite — CI only requires -p alvr_session
 cargo run   -p alvr_dashboard                # launch the dashboard standalone (use `cargo xtask run-streamer` for the full streamer)
