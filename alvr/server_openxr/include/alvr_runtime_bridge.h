@@ -12,6 +12,25 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/**
+ * Bridge ABI version. Bump this **and** the matching expectation in the
+ * Monado-side ALVR driver (`openxr/src/xrt/drivers/alvr/alvr_hub.c`'s
+ * `ALVR_OXR_BRIDGE_ABI_EXPECTED`) on every incompatible change to the
+ * surface defined below — added/removed/reordered exports, changed struct
+ * layouts, changed enum discriminants, changed argument lists, semantic
+ * changes to existing calls.
+ *
+ * Initial value `1`. Increment monotonically; do not reuse old values.
+ *
+ * At driver init the Monado side calls [`alvr_oxr_get_bridge_abi_version`]
+ * and compares against the macro cbindgen emits for this const. A mismatch
+ * means the loaded `alvr_server_openxr` cdylib was built against a
+ * different bridge surface than the driver's compiled header expected
+ * (typically: somebody rebuilt one half without bumping the submodule
+ * pointer for the other half).
+ */
+#define ALVR_OXR_BRIDGE_ABI_VERSION 1
+
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
 #define ALVR_OXR_BUTTON_A_TOUCH (1 << 1)
@@ -201,6 +220,15 @@ typedef struct AlvrOxrEvent {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Return the bridge ABI version baked into this cdylib at compile time.
+ * See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
+ *
+ * # Safety
+ * Always safe to call; no preconditions, no shared state touched.
+ */
+uint32_t alvr_oxr_get_bridge_abi_version(void);
 
 /**
  * Initialise the OpenXR-mode bridge. Called once by the Monado-side ALVR

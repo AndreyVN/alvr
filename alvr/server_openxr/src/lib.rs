@@ -289,6 +289,33 @@ fn event_loop(
     }
 }
 
+/// Bridge ABI version. Bump this **and** the matching expectation in the
+/// Monado-side ALVR driver (`openxr/src/xrt/drivers/alvr/alvr_hub.c`'s
+/// `ALVR_OXR_BRIDGE_ABI_EXPECTED`) on every incompatible change to the
+/// surface defined below — added/removed/reordered exports, changed struct
+/// layouts, changed enum discriminants, changed argument lists, semantic
+/// changes to existing calls.
+///
+/// Initial value `1`. Increment monotonically; do not reuse old values.
+///
+/// At driver init the Monado side calls [`alvr_oxr_get_bridge_abi_version`]
+/// and compares against the macro cbindgen emits for this const. A mismatch
+/// means the loaded `alvr_server_openxr` cdylib was built against a
+/// different bridge surface than the driver's compiled header expected
+/// (typically: somebody rebuilt one half without bumping the submodule
+/// pointer for the other half).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 1;
+
+/// Return the bridge ABI version baked into this cdylib at compile time.
+/// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
+///
+/// # Safety
+/// Always safe to call; no preconditions, no shared state touched.
+#[unsafe(no_mangle)]
+pub extern "C" fn alvr_oxr_get_bridge_abi_version() -> u32 {
+    ALVR_OXR_BRIDGE_ABI_VERSION
+}
+
 /// Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
 /// loosely but is intentionally a separate enum so that the bridge ABI can
 /// evolve independently of Monado.
