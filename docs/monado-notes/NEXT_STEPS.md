@@ -55,9 +55,7 @@ What's still on the maintainer:
 
 Until step 3 is run, do not run `git submodule add openxr` by hand — it will erase the Phase 2 files.
 
-### 3. `target_builder_alvr.c` is not yet wired into Monado's target list
-
-`openxr/src/xrt/targets/common/target_lists.c` (lines ~114–164) lists every builder. I added the builder file but did not edit `target_lists.c` to insert `t_builder_alvr_create` into `target_builder_list[]`. Add an entry near the top (after `qwerty`, `remote`) guarded by `#ifdef XRT_BUILD_DRIVER_ALVR`, plus the `#include "../drivers/alvr/alvr_interface.h"` pulled in by `XRT_BUILD_DRIVER_ALVR`. This was deliberately deferred because it's inside the soon-to-be-submodule and the resolution above affects how the change is delivered.
+### 3. ~~`target_builder_alvr.c` is not yet wired into Monado's target list~~ — RESOLVED in fork commit `c2ee5dffc` (the same one that converted `openxr/` to a real submodule). `target_lists.c` includes `alvr_interface.h` under `XRT_BUILD_DRIVER_ALVR` and slots `t_builder_alvr_create` at the top of `target_builder_list[]`. `target_instance.c` selects `comp_alvr` over `comp_main`/`comp_null` when built in (fork commit landing 2026-05-21 alongside this doc update).
 
 ## Phase 3 — the next real chunk (5–10 days)
 
@@ -105,7 +103,7 @@ Reference impl: `alvr/server_openvr/src/lib.rs`. Notable deviations from OpenVR 
 - Allocate swapchains via `compositor/util/comp_swapchain.c` (gets you Vulkan images that can be exported as Win32 NT handles / DMABUF fds).
 - Override `layer_commit`: walk the submitted layer list, package per-layer data + native image handles into `AlvrOxrLayer[]`, call `alvr_oxr_submit_layers`.
 - For Phase 3 ship projection layer only. Other layer types log a warning and are skipped.
-- Wire `XRT_FEATURE_COMP_ALVR` in `openxr/src/xrt/targets/common/target_instance.c` (line ~113) so that when `XRT_BUILD_DRIVER_ALVR` is active the fake compositor is selected instead of `comp_main` / `comp_null`.
+- ✅ `XRT_FEATURE_COMP_ALVR` is now wired into `target_instance.c`: when built in, `comp_alvr_create_system_compositor` runs ahead of `comp_main`/`comp_null` (env `XRT_COMPOSITOR_NULL=1` still wins for headless smoke tests). Fork commit 2026-05-21, alvr-side bump.
 
 ### 3.3 — Frame pacing markers
 
