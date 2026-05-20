@@ -42,7 +42,20 @@ alvr_create_devices(struct xrt_session_event_sink *broadcast,
 		return XRT_ERROR_ALLOCATION;
 	}
 
-	AlvrOxrResult init_res = alvr_oxr_init();
+	// Phase 3.1.1: pass a root_dir to alvr_oxr_init so the Rust side can
+	// set up its filesystem layout (session.json, logs, web-server dir).
+	// Prefer the ALVR_ROOT env var; fall back to a sentinel directory in
+	// /tmp so that an unconfigured developer build still gets _somewhere_
+	// to write rather than crashing at startup.
+	const char *root_dir = getenv("ALVR_ROOT");
+	if (root_dir == NULL) {
+		root_dir = "/tmp/alvr_openxr_root";
+		ALVR_WARN(
+		    "ALVR_ROOT not set; defaulting to %s (set the env var for production use)",
+		    root_dir);
+	}
+
+	AlvrOxrResult init_res = alvr_oxr_init(root_dir);
 	if (init_res != ALVR_OXR_RESULT_OK) {
 		ALVR_ERROR("alvr_oxr_init failed: %d", (int)init_res);
 		return XRT_ERROR_DEVICE_CREATION_FAILED;

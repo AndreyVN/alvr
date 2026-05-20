@@ -15,8 +15,28 @@
 //! Nothing here is loaded by the OpenVR/SteamVR path; that remains the default
 //! mode and is unaffected.
 
-use alvr_common::{info, warn};
-use std::ffi::c_char;
+use alvr_common::{
+    error, info,
+    parking_lot::{Mutex, RwLock},
+    warn,
+};
+use alvr_server_core::ServerCoreContext;
+use std::{
+    ffi::{CStr, c_char},
+    path::PathBuf,
+    sync::mpsc,
+};
+
+// Shared state across the bridge surface. Mirrors the structure used by
+// `alvr_server_openvr/src/lib.rs`. Phase 3.1.1 initialises only the
+// context + the events_receiver; tracking-pose readback (3.1.2+) will
+// add the equivalent LOCAL_VIEW_PARAMS / HEAD_POSE_QUEUE caches.
+//
+// EVENTS_RECEIVER is a Mutex rather than an RwLock because
+// `mpsc::Receiver` is Send but not Sync.
+static SERVER_CORE_CONTEXT: RwLock<Option<ServerCoreContext>> = RwLock::new(None);
+static EVENTS_RECEIVER: Mutex<Option<mpsc::Receiver<alvr_server_core::ServerCoreEvent>>> =
+    Mutex::new(None);
 
 /// Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
 /// loosely but is intentionally a separate enum so that the bridge ABI can
@@ -45,13 +65,50 @@ pub enum AlvrOxrSide {
 /// Initialise the OpenXR-mode bridge. Called once by the Monado-side ALVR
 /// driver at process start (after Monado has loaded `libalvr_server_openxr`).
 ///
+/// `root_dir` is the parent directory ALVR uses for `session.json`, log
+/// output, and the embedded web server's working dir — the OpenXR-mode
+/// analogue of the OpenVR driver root. The Monado-side driver typically
+/// derives this from an env var (`ALVR_ROOT`) or from the path of the
+/// loaded cdylib.
+///
 /// # Safety
-/// Must be called from a single thread before any other bridge function.
+/// `root_dir` must be a valid NUL-terminated UTF-8 C string. The bridge
+/// must be called from a single thread before any other bridge function.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn alvr_oxr_init() -> AlvrOxrResult {
-    info!("alvr_oxr_init: OpenXR mode bridge stub initialised");
-    // TODO(phase-3): construct an alvr_server_core::ServerCoreContext here
-    // and store it in a Once/OnceLock.
+pub unsafe extern "C" fn alvr_oxr_init(root_dir: *const c_char) -> AlvrOxrResult {
+    if root_dir.is_null() {
+        error!("alvr_oxr_init: root_dir is null");
+        return AlvrOxrResult::Failed;
+    }
+    let root_dir = match unsafe { CStr::from_ptr(root_dir) }.to_str() {
+        Ok(s) => PathBuf::from(s),
+        Err(err) => {
+            error!("alvr_oxr_init: root_dir is not valid UTF-8: {err}");
+            return AlvrOxrResult::Failed;
+        }
+    };
+
+    if SERVER_CORE_CONTEXT.read().is_some() {
+        warn!("alvr_oxr_init: already initialised; ignoring duplicate call");
+        return AlvrOxrResult::Ok;
+    }
+
+    let filesystem_layout = alvr_filesystem::Layout::new(&root_dir);
+    alvr_server_core::initialize_environment(filesystem_layout.clone());
+
+    let log_to_disk = alvr_server_core::settings().extra.logging.log_to_disk;
+    alvr_server_core::init_logging(
+        log_to_disk.then(|| filesystem_layout.session_log()),
+        Some(filesystem_layout.crash_log()),
+    );
+
+    let (context, events_receiver) = ServerCoreContext::new();
+    context.start_connection();
+
+    *SERVER_CORE_CONTEXT.write() = Some(context);
+    *EVENTS_RECEIVER.lock() = Some(events_receiver);
+
+    info!("alvr_oxr_init: OpenXR mode bridge ready (root_dir={root_dir:?})");
     AlvrOxrResult::Ok
 }
 
@@ -62,8 +119,12 @@ pub unsafe extern "C" fn alvr_oxr_init() -> AlvrOxrResult {
 /// Must be called after the last bridge call has returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alvr_oxr_shutdown() {
-    info!("alvr_oxr_shutdown: OpenXR mode bridge stub shut down");
-    // TODO(phase-3): drop the ServerCoreContext.
+    if SERVER_CORE_CONTEXT.write().take().is_none() {
+        warn!("alvr_oxr_shutdown: not initialised; ignoring");
+        return;
+    }
+    EVENTS_RECEIVER.lock().take();
+    info!("alvr_oxr_shutdown: OpenXR mode bridge torn down");
 }
 
 /// Fill `out_serial` with the HMD's serial string. `buf_len` is the caller's

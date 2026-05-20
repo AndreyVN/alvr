@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 alvr_common.workspace = true
+alvr_filesystem.workspace = true
 alvr_packets.workspace = true
 alvr_server_core.workspace = true
 alvr_session.workspace = true

@@ -142,10 +142,17 @@ extern "C" {
  * Initialise the OpenXR-mode bridge. Called once by the Monado-side ALVR
  * driver at process start (after Monado has loaded `libalvr_server_openxr`).
  *
+ * `root_dir` is the parent directory ALVR uses for `session.json`, log
+ * output, and the embedded web server's working dir — the OpenXR-mode
+ * analogue of the OpenVR driver root. The Monado-side driver typically
+ * derives this from an env var (`ALVR_ROOT`) or from the path of the
+ * loaded cdylib.
+ *
  * # Safety
- * Must be called from a single thread before any other bridge function.
+ * `root_dir` must be a valid NUL-terminated UTF-8 C string. The bridge
+ * must be called from a single thread before any other bridge function.
  */
-AlvrOxrResult alvr_oxr_init(void);
+AlvrOxrResult alvr_oxr_init(const char *root_dir);
 
 /**
  * Shut down the OpenXR-mode bridge. Called once by the Monado-side ALVR

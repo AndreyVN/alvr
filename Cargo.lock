@@ -471,6 +471,7 @@ name = "alvr_server_openxr"
 version = "21.0.0-dev13"
 dependencies = [
  "alvr_common",
+ "alvr_filesystem",
  "alvr_packets",
  "alvr_server_core",
  "alvr_session",
