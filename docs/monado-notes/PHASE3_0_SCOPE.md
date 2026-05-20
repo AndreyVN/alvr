@@ -160,10 +160,12 @@ Three sub-slices. Originally estimated 3 days total in one shot, but the verifia
 
 **Sub-slice 3.1 — LANDED 2026-05-20**: `cpp/encoder/win32_vk/VkEncoderBackend.{h,cpp}` skeleton. Class conforms to `IEncoderBackend` (same `Shutdown` / `OnStreamStart` / `InsertIDR` as the D3D11 backend). `Submit(SubmitDesc)` takes opaque external-memory Vulkan handles + sync semaphore + timing — the `SubmitDesc` field layout mirrors `AlvrOxrLayer` from the bridge header so future wiring is a straight copy. `Create` throws `std::runtime_error`; all per-frame methods stub out. Deliberately self-contained: no `alvr_server/Logger.h` or `Utils.h` includes so this TU can compile in any future `alvr_server_openxr` `cc::Build` without dragging in the OpenVR-side logging-callback glue. Verified: `g++ -std=c++17 -Wall -Wextra` compiles clean. **Not yet integrated into any build** — design landing only.
 
-**Sub-slice 3.2 — DEFERRED**: integrate `cpp/encoder/win32_vk/` into a new `cc::Build` in `alvr_server_openxr/build.rs` (the crate currently does cbindgen only). Needs:
-1. Vulkan SDK lookup (already at `C:\VulkanSDK\1.4.341.0\` on this dev host; needs to surface in `alvr_filesystem` deps or hard-coded in build.rs).
-2. NVENC SDK 12.1+ headers — currently bundled in `alvr/server_openvr/cpp/encoder/win32_d3d11/NvEncoder.h` etc., but the Vulkan-input API uses different entry points (`nvEncRegisterResource` with `NV_ENC_INPUT_RESOURCE_TYPE_VULKAN_IMAGE_HANDLE`); may need to upgrade or ship the SDK.
-3. C-ABI bindgen between `alvr_server_openxr/src/lib.rs` and the new static lib.
+**Sub-slice 3.2 — LANDED 2026-05-20**: `alvr_server_openxr/build.rs` gains a `cc::Build` step that compiles the `win32_vk/` skeleton on Windows. Vulkan SDK include path picked up from `$VULKAN_SDK` (LunarG installer convention); `vulkan-1.lib` link is deliberately deferred to 3.3 since the skeleton uses opaque uint64_t handles and references no Vulkan symbols. Cross-crate include of `../server_openvr/cpp` resolves the shared `encoder/EncoderBackend.h`. Produces a 178KB `alvr_server_openxr_encoder.lib` bundled into the cdylib. Bridge ABI unchanged.
+
+Still left for the actual Vulkan-input encoder (Sub-slice 3.3):
+1. NVENC SDK 12.1+ headers — currently bundled in `alvr/server_openvr/cpp/encoder/win32_d3d11/NvEncoder.h` etc., but the Vulkan-input API uses different entry points (`nvEncRegisterResource` with `NV_ENC_INPUT_RESOURCE_TYPE_VULKAN_IMAGE_HANDLE`); may need to upgrade or ship the SDK.
+2. C-ABI between `alvr_server_openxr/src/lib.rs` and the new static lib (Rust-side wrapper that constructs/destructs VkEncoderBackend + calls Submit on submitted layers).
+3. Wiring `alvr_oxr_submit_layers` to forward the `AlvrOxrLayer[]` into the backend.
 
 **Sub-slice 3.3 — DEFERRED**: implement `VkEncoderBackend_NVENC::Submit`. External-memory import via `VK_KHR_external_memory_win32`, semaphore wait via `VK_KHR_external_semaphore_win32`, then feed to NVENC's Vulkan-image input. Wire `alvr_oxr_submit_layers` in Rust to construct the SubmitDesc and call into Submit.
 
