@@ -36,6 +36,15 @@ SUBCOMMANDS:
                         Does not affect the OpenVR/SteamVR path. Requires the
                         openxr/ source tree to be present. Pass --enable-alvr-driver
                         to also build the in-tree ALVR Monado driver.
+    register-openxr-runtime
+                        Register the built Monado-as-ALVR runtime as the per-user
+                        OpenXR active runtime. Windows: HKCU registry value.
+                        Linux: file at $XDG_CONFIG_HOME/openxr/1/active_runtime.json.
+                        System-modifying — affects every OpenXR app for this user
+                        until unregistered or another runtime overwrites it.
+    unregister-openxr-runtime
+                        Reverse of register-openxr-runtime. Refuses to clear if
+                        the currently-registered runtime isn't this profile's.
     run-streamer        Build streamer and then open the dashboard
     run-launcher        Build launcher and then open it
     format              Autoformat all code
@@ -249,6 +258,12 @@ fn main() {
                 }
                 "build-openxr-runtime" => {
                     build_openxr::build_openxr_runtime(profile, enable_alvr_driver)
+                }
+                "register-openxr-runtime" => {
+                    build_openxr::register_openxr_runtime(profile)
+                }
+                "unregister-openxr-runtime" => {
+                    build_openxr::unregister_openxr_runtime(profile)
                 }
                 "run-streamer" => {
                     if !no_rebuild {

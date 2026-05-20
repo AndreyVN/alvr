@@ -116,10 +116,12 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
 ## Phase 4 — runtime registration (2–3 days)
 
 1. ✅ **4.1 (LANDED 2026-05-21)**: `cargo xtask build-openxr-runtime --enable-alvr-driver` now also turns on `XRT_FEATURE_COMP_ALVR` (the two were artificially separate) and publishes Monado's auto-generated dev manifest to a stable filename `build/openxr-{profile}/active_runtime_alvr.json`. Loader can be pointed at it with `XR_RUNTIME_JSON=<path>` for dev.
-2. **4.2 (next)**: Add a launcher action that installs the published manifest to the per-user OpenXR config path:
-   - Windows: `%LOCALAPPDATA%\openxr\1\active_runtime.json`
-   - Linux: `$XDG_CONFIG_HOME/openxr/1/active_runtime.json` (or `~/.config/openxr/1/active_runtime.json`)
-   With matching uninstall, since the OpenXR loader spec is "exactly one active runtime per user".
+2. ✅ **4.2 (LANDED 2026-05-21)**: `cargo xtask register-openxr-runtime` / `unregister-openxr-runtime` cross-platform:
+   - **Windows**: writes `HKCU\Software\Khronos\OpenXR\1\ActiveRuntime` via `reg.exe`. (Earlier draft of this doc said `%LOCALAPPDATA%\openxr\1\active_runtime.json` — that's wrong; Windows OpenXR loader uses the registry, not a file at that path.)
+   - **Linux / BSD**: writes `$XDG_CONFIG_HOME/openxr/1/active_runtime.json` (fallback `$HOME/.config/openxr/1/...`).
+   - macOS deliberately unsupported (no released Monado/ALVR target).
+   Unregister refuses to clear when the currently-registered value doesn't match this profile's manifest — won't stomp on a different vendor's runtime.
+   The action is **system-modifying for the current user**; the launcher GUI doesn't surface it yet (deliberate — a CLI-only path keeps the side-effect explicit until a UI for it is in place).
 3. Mutual exclusion: in `alvr/dashboard/src/steamvr_launcher/mod.rs` (the warn-out already in place), reject starting OpenXR mode if `vrserver` is alive, and vice versa for the SteamVR path. Both want the same headset stream.
 4. Smoke tests beyond `hello_xr` — one OpenXR SDK sample and one production game that the OpenVR path also supports.
 

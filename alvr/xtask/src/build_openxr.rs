@@ -13,8 +13,9 @@
 use crate::build::Profile;
 use alvr_filesystem as afs;
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
+    process,
 };
 use xshell::{Shell, cmd};
 
@@ -144,4 +145,175 @@ fn publish_active_runtime_manifest(build_dir: &Path) {
             dst.display()
         ),
     }
+}
+
+/// Resolve the published manifest path for `profile`, exiting with an error if
+/// the build artefact isn't present. Shared by register / unregister so they
+/// both refer to exactly the same file the build produced.
+fn locate_published_manifest(profile: Profile) -> PathBuf {
+    let manifest = openxr_build_dir(profile).join(ACTIVE_RUNTIME_FILENAME);
+    if !manifest.exists() {
+        eprintln!(
+            "error: {} not found.\n\
+             Run `cargo xtask build-openxr-runtime --enable-alvr-driver` first.",
+            manifest.display()
+        );
+        process::exit(1);
+    }
+    manifest
+}
+
+/// Register the built Monado-as-ALVR runtime as the per-user OpenXR active
+/// runtime.
+///
+/// Platform behaviour follows the OpenXR loader spec:
+/// * **Windows**: writes `HKCU\Software\Khronos\OpenXR\1\ActiveRuntime` (REG_SZ)
+///   via `reg.exe`. The loader reads this key — there is *no* file-based
+///   convention at `%LOCALAPPDATA%\openxr\1\active_runtime.json` despite what
+///   the original NEXT_STEPS.md draft suggested.
+/// * **Linux / BSD**: writes the manifest contents to
+///   `$XDG_CONFIG_HOME/openxr/1/active_runtime.json`, falling back to
+///   `$HOME/.config/openxr/1/active_runtime.json`.
+///
+/// macOS is intentionally unhandled — no released Monado/ALVR target.
+///
+/// This action is **system-modifying for the current user**: every OpenXR
+/// application launched after this point will use ALVR's Monado runtime until
+/// `unregister-openxr-runtime` runs (or another runtime overwrites it).
+pub fn register_openxr_runtime(profile: Profile) {
+    let manifest = locate_published_manifest(profile);
+
+    if cfg!(target_os = "windows") {
+        register_runtime_windows(&manifest);
+    } else if cfg!(target_os = "macos") {
+        eprintln!("error: macOS active-runtime registration is not supported.");
+        process::exit(1);
+    } else {
+        register_runtime_unix(&manifest);
+    }
+}
+
+/// Reverse of [`register_openxr_runtime`]. Refuses to act when the currently
+/// registered runtime is *not* the manifest this profile published — the
+/// uninstall path must not stomp on a different vendor's runtime.
+pub fn unregister_openxr_runtime(profile: Profile) {
+    let manifest = locate_published_manifest(profile);
+
+    if cfg!(target_os = "windows") {
+        unregister_runtime_windows(&manifest);
+    } else if cfg!(target_os = "macos") {
+        eprintln!("error: macOS active-runtime registration is not supported.");
+        process::exit(1);
+    } else {
+        unregister_runtime_unix(&manifest);
+    }
+}
+
+#[cfg(target_os = "windows")]
+const OPENXR_REGISTRY_KEY: &str = r"HKCU\Software\Khronos\OpenXR\1";
+
+#[cfg(target_os = "windows")]
+fn register_runtime_windows(manifest: &Path) {
+    let manifest_str = manifest.to_string_lossy().into_owned();
+    let sh = Shell::new().unwrap();
+    cmd!(
+        sh,
+        "reg add {OPENXR_REGISTRY_KEY} /v ActiveRuntime /t REG_SZ /d {manifest_str} /f"
+    )
+    .run()
+    .unwrap();
+    println!(
+        "Registered as the current user's OpenXR runtime.\n  Registry: {OPENXR_REGISTRY_KEY}\\ActiveRuntime\n  Manifest: {manifest_str}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn unregister_runtime_windows(manifest: &Path) {
+    let manifest_str = manifest.to_string_lossy().into_owned();
+    let sh = Shell::new().unwrap();
+    let query = cmd!(
+        sh,
+        "reg query {OPENXR_REGISTRY_KEY} /v ActiveRuntime"
+    )
+    .ignore_status()
+    .read()
+    .unwrap_or_default();
+    if !query.contains(&manifest_str) {
+        eprintln!(
+            "warning: current ActiveRuntime value doesn't reference {manifest_str}; \
+             leaving registry alone so we don't stomp on another vendor's runtime.\n\
+             reg query output:\n{query}"
+        );
+        return;
+    }
+    cmd!(
+        sh,
+        "reg delete {OPENXR_REGISTRY_KEY} /v ActiveRuntime /f"
+    )
+    .run()
+    .unwrap();
+    println!("Unregistered ALVR runtime ({OPENXR_REGISTRY_KEY}\\ActiveRuntime cleared).");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_runtime_windows(_manifest: &Path) {
+    unreachable!("register_runtime_windows called off Windows")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unregister_runtime_windows(_manifest: &Path) {
+    unreachable!("unregister_runtime_windows called off Windows")
+}
+
+fn openxr_unix_config_dir() -> PathBuf {
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(xdg).join("openxr").join("1")
+    } else if let Some(home) = env::var_os("HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(home).join(".config").join("openxr").join("1")
+    } else {
+        eprintln!("error: neither $XDG_CONFIG_HOME nor $HOME is set; can't locate OpenXR config dir.");
+        process::exit(1);
+    }
+}
+
+fn register_runtime_unix(manifest: &Path) {
+    let dir = openxr_unix_config_dir();
+    fs::create_dir_all(&dir).unwrap_or_else(|err| {
+        eprintln!("error: failed to create {}: {err}", dir.display());
+        process::exit(1);
+    });
+    let dst = dir.join("active_runtime.json");
+    fs::copy(manifest, &dst).unwrap_or_else(|err| {
+        eprintln!("error: failed to copy {} → {}: {err}", manifest.display(), dst.display());
+        process::exit(1);
+    });
+    println!(
+        "Registered as the current user's OpenXR runtime.\n  Path:     {}\n  Source:   {}",
+        dst.display(),
+        manifest.display()
+    );
+}
+
+fn unregister_runtime_unix(manifest: &Path) {
+    let dst = openxr_unix_config_dir().join("active_runtime.json");
+    if !dst.exists() {
+        println!("Nothing to unregister: {} doesn't exist.", dst.display());
+        return;
+    }
+    let installed = fs::read(&dst).unwrap_or_default();
+    let ours = fs::read(manifest).unwrap_or_default();
+    if installed != ours {
+        eprintln!(
+            "warning: {} doesn't match {}; leaving it alone so we don't stomp on another \
+             vendor's manifest.",
+            dst.display(),
+            manifest.display()
+        );
+        return;
+    }
+    fs::remove_file(&dst).unwrap_or_else(|err| {
+        eprintln!("error: failed to remove {}: {err}", dst.display());
+        process::exit(1);
+    });
+    println!("Unregistered ALVR runtime ({} removed).", dst.display());
 }
