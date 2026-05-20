@@ -97,13 +97,10 @@ Reference impl: `alvr/server_openvr/src/lib.rs`. Notable deviations from OpenVR 
 
 ### 3.2 — Fake compositor in `comp_alvr.c`
 
-`openxr/src/xrt/compositor/alvr/comp_alvr.c` is currently a stub. Implement for real:
-
-- Extend `comp_base` (see `openxr/src/xrt/compositor/util/comp_base.{c,h}` for the inheritance pattern; `compositor/null/` and `compositor/main/comp_compositor.c` are the two reference impls).
-- Allocate swapchains via `compositor/util/comp_swapchain.c` (gets you Vulkan images that can be exported as Win32 NT handles / DMABUF fds).
-- Override `layer_commit`: walk the submitted layer list, package per-layer data + native image handles into `AlvrOxrLayer[]`, call `alvr_oxr_submit_layers`.
-- For Phase 3 ship projection layer only. Other layer types log a warning and are skipped.
-- ✅ `XRT_FEATURE_COMP_ALVR` is now wired into `target_instance.c`: when built in, `comp_alvr_create_system_compositor` runs ahead of `comp_main`/`comp_null` (env `XRT_COMPOSITOR_NULL=1` still wins for headless smoke tests). Fork commit 2026-05-21, alvr-side bump.
+- ✅ **3.2.1 (LANDED 2026-05-21)** — fork commit `74635c623`; alvr-side bump `3d093476`. `comp_alvr.c` is no longer a 33-line stub: it now mirrors `compositor/null/null_compositor.c` line-for-line. A new internal header `comp_alvr_internal.h` holds `struct comp_alvr_compositor` (extends `comp_base`), logging macros, and the down-cast helper. The .c body brings up the Vulkan bundle via `comp_vulkan_init_bundle` (same instance/device extension lists as `null`, plus the platform `external_memory_*` / `external_semaphore_*` extensions Phase 3.2.2 needs), `comp_swapchain_shared_init`, a fake pacer seeded from `xdev->hmd->screens[0].nominal_frame_interval_ns` (72 Hz today), and `system_compositor_info` built from `xdev->hmd->view_count` + blend modes. The compositor wraps via `comp_multi_create_system_compositor`. `layer_commit` is a no-op stub that runs the pacing markers (`U_TIMING_POINT_BEGIN` / `SUBMIT_BEGIN` / `SUBMIT_END`) and `comp_swapchain_shared_garbage_collect`. **Verification ceiling**: `cargo xtask build-openxr-runtime --enable-alvr-driver` on this Windows host fails at Monado's CMake configure for upstream Eigen3 dep (not installed locally). The change is structurally identical to the `null` reference, so end-to-end compile gate stays open until a host with Monado's full dependency set is available.
+- ⏸ **3.2.2** — real `layer_commit`: walk `c->base.layer_accum`, filter to projection layers, package per-view native image handles into `AlvrOxrLayer[]`, call `alvr_oxr_submit_layers`. Other layer types log a warning and are skipped.
+- ⏸ **3.2.3** — sync-handle plumbing: convert `xrt_graphics_sync_handle_t` to the bridge's `u64 sync_handle` with proper ref/unref.
+- ✅ `XRT_FEATURE_COMP_ALVR` is wired into `target_instance.c`: when built in, `comp_alvr_create_system_compositor` runs ahead of `comp_main`/`comp_null` (env `XRT_COMPOSITOR_NULL=1` still wins for headless smoke tests). Fork commit 2026-05-21, alvr-side bump.
 
 ### 3.3 — Frame pacing markers
 
