@@ -39,13 +39,21 @@ Driver C consumers also updated to match: `AlvrOxrSide side` (typedef, 1 byte �
 
 Note: CMakeLists.txt only checks file existence, not content. A future hardening would be to also check the header isn't a bare include-guard shell.
 
-### 2. The Monado-side patches conflict with the submodule plan
+### 2. The Monado-side patches conflict with the submodule plan — PREPPED (2026-05-20)
 
-`openxr/src/xrt/drivers/alvr/`, `openxr/src/xrt/compositor/alvr/`, and `openxr/src/xrt/targets/common/target_builder_alvr.c` all live **inside** what's about to become a clean upstream submodule. `docs/monado-notes/SUBMODULE_PIN.md` lays out the three resolutions (fork branch / patch overlay / upstream PR).
+Path forward decided: **Option A (fork branch)**. Local prep artefacts now live in `docs/monado-notes/`:
 
-Recommendation: **Option A (fork branch)**. Push the snapshot's contents to a `alvr-org/monado` fork on GitLab, add the Phase 2 files there on an `alvr` branch, then add as submodule pointing to that branch. After that, future Phase 3+ work happens in the fork repo, not in this one's `openxr/` directory.
+- `PHASE2_MANIFEST.md` — 10 Phase 2 files inventoried; upstream baseline pinned to Monado 25.1.0; lists upstream-file edits (parent CMakeLists subdir registrations, `target_lists.c`, top-level options) that must be authored on the fork branch alongside the patch.
+- `phase2_alvr.patch` — mailbox-format patch with all 10 additive files. Verified `git am`-applicable to an empty repo. Apply onto `v25.1.0` checkout.
+- `convert_to_submodule.sh` — annotated conversion script. Edit `FORK_URL`, then run from the ALVR repo root.
+- `SUBMODULE_PIN.md` — full procedure pointing at the above.
 
-Until this is resolved, do not run `git submodule add openxr` — it will erase the Phase 2 files.
+What's still on the maintainer:
+1. Create `alvr-org/monado` fork (or equivalent) on GitLab.
+2. Build the `alvr` branch from `v25.1.0`, apply `phase2_alvr.patch`, hand-author the upstream-file edits in `PHASE2_MANIFEST.md`, push.
+3. Edit `FORK_URL` in `convert_to_submodule.sh` and run it.
+
+Until step 3 is run, do not run `git submodule add openxr` by hand — it will erase the Phase 2 files.
 
 ### 3. `target_builder_alvr.c` is not yet wired into Monado's target list
 
@@ -137,7 +145,7 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
 | F2 | Frame ingress path — fake compositor vs custom `comp_target` | fake compositor (`comp_alvr.c`) | Phase 3.2 |
 | F3 | Build wiring — standalone CMake vs subsumed into xtask | standalone CMake invoked by xtask | never (locked) |
 | F4 | Bridge header — cbindgen vs hand-maintained | cbindgen 0.29 + `Config` in `build.rs`, opt-in regen via `ALVR_REGENERATE_BRIDGE_HEADER=1` (resolved 2026-05-20) | only revisit if migrating to a `cbindgen.toml` file to match other crates |
-| F5 | Submodule architecture — fork branch / patch overlay / upstream PR | TBD | before any Phase 3 commits |
+| F5 | Submodule architecture — fork branch / patch overlay / upstream PR | Option A (fork branch). Local prep done 2026-05-20 (PHASE2_MANIFEST.md / phase2_alvr.patch / convert_to_submodule.sh). Awaits fork creation. | when maintainer has pushed the fork's alvr branch |
 
 ## Files a future session should read first
 
