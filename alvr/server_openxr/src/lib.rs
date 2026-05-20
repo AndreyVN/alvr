@@ -6,37 +6,113 @@
 //! `openxr/src/xrt/drivers/alvr/` loads this cdylib and calls into the
 //! functions declared here.
 //!
-//! ## Current status (Phase 1 of openxr-migration.md)
+//! ## Current status (Phase 3.1.2 of openxr-migration.md)
 //!
-//! All entrypoints return [`AlvrOxrResult::NotImplemented`] and log a warning.
-//! Wiring them up to `alvr_server_core` happens in Phase 3 — see the migration
-//! plan at `openxr-migration.md` for the order of operations.
+//! Live:
+//!   - [`alvr_oxr_init`] / [`alvr_oxr_shutdown`] — construct/drop a real
+//!     `alvr_server_core::ServerCoreContext`, spawn an event-drain thread.
+//!   - [`alvr_oxr_get_head_pose`] — reads the latest tracking sample via
+//!     `context.get_device_motion(HEAD_ID, target)`.
+//!   - [`alvr_oxr_poll_session_event`] — drains client-connect/disconnect
+//!     events surfaced by the drain thread.
+//!
+//! Stubs awaiting later sub-slices:
+//!   - [`alvr_oxr_get_hmd_info`] / [`alvr_oxr_get_controller_info`] — 3.1.3.
+//!   - [`alvr_oxr_get_controller_state`] / [`alvr_oxr_set_haptic`] — 3.1.3.
+//!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3 (Vulkan-input NVENC).
 //!
 //! Nothing here is loaded by the OpenVR/SteamVR path; that remains the default
 //! mode and is unaffected.
 
 use alvr_common::{
-    error, info,
+    HEAD_ID, ViewParams, error, info,
     parking_lot::{Mutex, RwLock},
     warn,
 };
-use alvr_server_core::ServerCoreContext;
+use alvr_server_core::{ServerCoreContext, ServerCoreEvent};
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
 };
 
 // Shared state across the bridge surface. Mirrors the structure used by
-// `alvr_server_openvr/src/lib.rs`. Phase 3.1.1 initialises only the
-// context + the events_receiver; tracking-pose readback (3.1.2+) will
-// add the equivalent LOCAL_VIEW_PARAMS / HEAD_POSE_QUEUE caches.
+// `alvr_server_openvr/src/lib.rs`.
 //
-// EVENTS_RECEIVER is a Mutex rather than an RwLock because
-// `mpsc::Receiver` is Send but not Sync.
+// Phase 3.1.2 adds:
+//   - LOCAL_VIEW_PARAMS:  written by the event-drain thread when
+//                         ServerCoreEvent::LocalViewParams fires, read by
+//                         future per-view APIs (xrLocateViews equivalent).
+//   - SESSION_EVENTS_RX:  the queue alvr_oxr_poll_session_event drains —
+//                         populated by the event-drain thread for
+//                         ClientConnected / ClientDisconnected etc.
+//   - EVENT_THREAD:       JoinHandle for the drain thread spawned in init.
+//   - SHUTDOWN_FLAG:      cooperative-shutdown signal so the drain loop
+//                         exits on alvr_oxr_shutdown without waiting for
+//                         a Disconnected error.
+//
+// EVENTS_RECEIVER is no longer parked in a static — alvr_oxr_init moves
+// it directly into the spawned drain thread, which owns it for the
+// thread's lifetime.
 static SERVER_CORE_CONTEXT: RwLock<Option<ServerCoreContext>> = RwLock::new(None);
-static EVENTS_RECEIVER: Mutex<Option<mpsc::Receiver<alvr_server_core::ServerCoreEvent>>> =
-    Mutex::new(None);
+static LOCAL_VIEW_PARAMS: RwLock<[ViewParams; 2]> = RwLock::new([ViewParams::DUMMY; 2]);
+static SESSION_EVENTS_RX: Mutex<Option<mpsc::Receiver<AlvrOxrEvent>>> = Mutex::new(None);
+static EVENT_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None);
+static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+
+fn event_loop(
+    events_receiver: mpsc::Receiver<ServerCoreEvent>,
+    session_events_tx: mpsc::Sender<AlvrOxrEvent>,
+) {
+    // Recv timeout keeps the loop responsive to SHUTDOWN_FLAG without
+    // wasting CPU. 50ms is a balance — short enough that shutdown
+    // returns promptly, long enough that we're not spinning when idle.
+    let recv_timeout = Duration::from_millis(50);
+
+    while !SHUTDOWN_FLAG.load(Ordering::Acquire) {
+        match events_receiver.recv_timeout(recv_timeout) {
+            Ok(event) => match event {
+                ServerCoreEvent::ClientConnected => {
+                    let _ = session_events_tx.send(AlvrOxrEvent {
+                        event_type: AlvrOxrEventType::StateChange,
+                        timestamp_ns: 0,
+                        // data[0] = 1 marks "connected"; the Monado-side
+                        // driver compares against this constant. Schema
+                        // will firm up in 3.1.4 when the bridge ABI is
+                        // re-spec'd against real consumers.
+                        data: [1, 0, 0, 0],
+                    });
+                }
+                ServerCoreEvent::ClientDisconnected | ServerCoreEvent::ShutdownPending => {
+                    let _ = session_events_tx.send(AlvrOxrEvent {
+                        event_type: AlvrOxrEventType::ConnectionLost,
+                        timestamp_ns: 0,
+                        data: [0; 4],
+                    });
+                }
+                ServerCoreEvent::LocalViewParams(params) => {
+                    *LOCAL_VIEW_PARAMS.write() = params;
+                }
+                // Other events are drained but not yet routed.
+                //   - Tracking / Buttons:  read on-demand by
+                //     alvr_oxr_get_head_pose / _controller_state via
+                //     context.get_device_motion (Tracking) and (3.1.3+)
+                //     via context state for Buttons.
+                //   - SetOpenvrProperty:   irrelevant in OpenXR mode.
+                //   - Battery / Playspace / etc.: 3.1.4+.
+                _ => {}
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            // Disconnected means ServerCoreContext was dropped — exit cleanly.
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
 
 /// Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
 /// loosely but is intentionally a separate enum so that the bridge ABI can
@@ -105,8 +181,16 @@ pub unsafe extern "C" fn alvr_oxr_init(root_dir: *const c_char) -> AlvrOxrResult
     let (context, events_receiver) = ServerCoreContext::new();
     context.start_connection();
 
+    let (session_events_tx, session_events_rx) = mpsc::channel::<AlvrOxrEvent>();
+    SHUTDOWN_FLAG.store(false, Ordering::Release);
+    let drain_thread = thread::Builder::new()
+        .name("alvr_oxr_event_drain".to_owned())
+        .spawn(move || event_loop(events_receiver, session_events_tx))
+        .expect("failed to spawn alvr_oxr_event_drain thread");
+
     *SERVER_CORE_CONTEXT.write() = Some(context);
-    *EVENTS_RECEIVER.lock() = Some(events_receiver);
+    *SESSION_EVENTS_RX.lock() = Some(session_events_rx);
+    *EVENT_THREAD.lock() = Some(drain_thread);
 
     info!("alvr_oxr_init: OpenXR mode bridge ready (root_dir={root_dir:?})");
     AlvrOxrResult::Ok
@@ -119,11 +203,23 @@ pub unsafe extern "C" fn alvr_oxr_init(root_dir: *const c_char) -> AlvrOxrResult
 /// Must be called after the last bridge call has returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alvr_oxr_shutdown() {
+    // Signal the drain thread to exit, then drop the context (which drops
+    // the events_sender — the thread's recv will return Disconnected if
+    // the timeout poll hadn't already exited it via SHUTDOWN_FLAG).
+    SHUTDOWN_FLAG.store(true, Ordering::Release);
+
     if SERVER_CORE_CONTEXT.write().take().is_none() {
         warn!("alvr_oxr_shutdown: not initialised; ignoring");
         return;
     }
-    EVENTS_RECEIVER.lock().take();
+
+    if let Some(join) = EVENT_THREAD.lock().take()
+        && let Err(err) = join.join()
+    {
+        error!("alvr_oxr_shutdown: drain thread panicked: {err:?}");
+    }
+    SESSION_EVENTS_RX.lock().take();
+
     info!("alvr_oxr_shutdown: OpenXR mode bridge torn down");
 }
 
@@ -178,11 +274,37 @@ pub unsafe extern "C" fn alvr_oxr_get_head_pose(
     at_timestamp_ns: i64,
     out_pose: *mut AlvrOxrPose,
 ) -> AlvrOxrResult {
-    let _ = at_timestamp_ns;
-    if !out_pose.is_null() {
-        unsafe { *out_pose = AlvrOxrPose::default() };
+    if out_pose.is_null() {
+        return AlvrOxrResult::Failed;
     }
-    AlvrOxrResult::NotImplemented
+    unsafe { *out_pose = AlvrOxrPose::default() };
+
+    let target = Duration::from_nanos(at_timestamp_ns.max(0) as u64);
+
+    let Some(context) = &*SERVER_CORE_CONTEXT.read() else {
+        return AlvrOxrResult::NotInitialised;
+    };
+
+    // get_device_motion returns the latest received tracking sample at or
+    // before the requested timestamp. Phase 3.1.2 mirrors the OpenVR
+    // pattern (server_openvr/src/lib.rs L96-L116) sans the explicit
+    // predict() step — Monado already gives us a future predicted
+    // timestamp, and an internal predict layer would require us to know
+    // the source poll_timestamp. If timing accuracy turns out to need it,
+    // a 3.1.5 follow-up can wire `motion.predict(now, target)` in.
+    if let Some(motion) = context.get_device_motion(*HEAD_ID, target) {
+        unsafe {
+            *out_pose = AlvrOxrPose {
+                position: motion.pose.position.to_array(),
+                orientation: motion.pose.orientation.to_array(),
+            };
+        }
+    }
+    // No tracking yet (client hasn't connected, headset hasn't sent a
+    // sample, etc.) → identity is fine; Monado treats Ok+identity as
+    // "device present but uninitialised". Returning NotInitialised here
+    // would make Monado disable the device.
+    AlvrOxrResult::Ok
 }
 
 /// Per-frame controller state passed back over the bridge. Buttons and
@@ -301,14 +423,22 @@ pub struct AlvrOxrEvent {
 /// `out_event` must be a writable `AlvrOxrEvent`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alvr_oxr_poll_session_event(out_event: *mut AlvrOxrEvent) -> AlvrOxrResult {
-    if !out_event.is_null() {
-        unsafe {
-            *out_event = AlvrOxrEvent {
-                event_type: AlvrOxrEventType::None,
-                timestamp_ns: 0,
-                data: [0; 4],
-            }
-        };
+    if out_event.is_null() {
+        return AlvrOxrResult::Failed;
     }
+
+    let mut event = AlvrOxrEvent {
+        event_type: AlvrOxrEventType::None,
+        timestamp_ns: 0,
+        data: [0; 4],
+    };
+
+    if let Some(rx) = SESSION_EVENTS_RX.lock().as_ref()
+        && let Ok(received) = rx.try_recv()
+    {
+        event = received;
+    }
+
+    unsafe { *out_event = event };
     AlvrOxrResult::Ok
 }

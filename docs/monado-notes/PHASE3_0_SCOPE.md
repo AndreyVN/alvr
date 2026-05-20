@@ -143,7 +143,11 @@ The hard one. Pure refactor — no new behavior. Broken into sub-slices so each 
 
 **Sub-slice 2.4 — DEFERRED to Phase 3.1** — originally planned to make Linux's `EncodePipeline` conform to `IEncoderBackend`. Re-evaluated 2026-05-20: not actually required for Slice 3 (`VkEncoderBackend` only needs the current `IEncoderBackend` shape), and forcing it now would (a) require Linux-side compile verification we cannot run from a Windows host, and (b) require merging two structurally different submission patterns (Windows synchronous `Transmit` vs Linux queue-based `PushFrame`/`GetEncoded`). Re-pick this up in Phase 3.1, when `alvr_server_openxr/src/lib.rs` actually wires up the Linux backend and the merge can be informed by real consumers.
 
-**Verification gate (after each sub-slice).** Run a controlled A/B against `master`:
+**Phase 3.1.2 (LANDED 2026-05-20, related work).** Event-drain thread now spawned in `alvr_oxr_init`; `alvr_oxr_get_head_pose` and `alvr_oxr_poll_session_event` are real. `ClientConnected/Disconnected/ShutdownPending` are translated to `AlvrOxrEvent` variants the drain thread pushes to a `SESSION_EVENTS_RX` queue. `LocalViewParams` cached in `LOCAL_VIEW_PARAMS` ready for future per-eye APIs. Tracking events drained without explicit handling — `get_head_pose` reads directly via `context.get_device_motion`. Tracked as Phase 3.1 work, not Phase 3.0; included in the scope-doc for continuity.
+
+---
+
+**Verification gate (after each Slice-2 sub-slice).** Run a controlled A/B against `master`:
 - Same headset, same SteamVR app, same Settings.video.
 - Capture 60s of encoded bitstream both ways via `dump_video_to_file`-style probe.
 - Diff byte-for-byte. **Identical** is the bar.
