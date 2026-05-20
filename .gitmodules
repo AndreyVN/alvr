@@ -2,3 +2,14 @@
 	path = openvr
 	url = https://github.com/ValveSoftware/openvr.git
 	shallow = true
+
+# NOTE: openxr/ is a vendored snapshot of Monado today, not yet a real submodule.
+# When the maintainer is ready to convert it, follow docs/monado-notes/SUBMODULE_PIN.md.
+# The block below is the target shape — it is intentionally commented out so that
+# `git submodule update` does NOT try to materialise it yet.
+#
+# [submodule "openxr"]
+# 	path = openxr
+# 	url = https://gitlab.freedesktop.org/monado/monado.git
+# 	shallow = true
+

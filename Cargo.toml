@@ -22,6 +22,7 @@ alvr_hwmonitor = { path = "alvr/hwmonitor" }
 alvr_packets = { path = "alvr/packets" }
 alvr_server_core = { path = "alvr/server_core"}
 alvr_server_io = { path = "alvr/server_io" }
+alvr_server_openxr = { path = "alvr/server_openxr" }
 alvr_session = { path = "alvr/session" }
 alvr_sockets = { path = "alvr/sockets" }
 alvr_system_info = { path = "alvr/system_info" }

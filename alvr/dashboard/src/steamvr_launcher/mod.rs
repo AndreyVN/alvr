@@ -114,6 +114,26 @@ pub struct Launcher {
 
 impl Launcher {
     pub fn launch_steamvr(&self) {
+        // Respect the runtime selector. When the OpenXR (Monado) mode is active
+        // we must NOT auto-start SteamVR — the user expects the new runtime path.
+        // OpenXR mode is scaffolding-only today: log and bail out instead of
+        // launching anything. Phase 4 of openxr-migration.md replaces this with
+        // a real launch of monado-service / the libopenxr_monado runtime.
+        if matches!(
+            data_sources::get_read_only_local_session()
+                .settings()
+                .extra
+                .runtime,
+            alvr_session::RuntimeMode::Openxr
+        ) {
+            warn!(
+                "Runtime is set to OpenXR (Monado) — refusing to launch SteamVR. \
+                 The OpenXR path is preview-only; switch back to SteamVR in Extra > Runtime \
+                 to stream."
+            );
+            return;
+        }
+
         // The ADB server might be left running because of an unclean termination of SteamVR.
         // Kill it unconditionally to ensure clean state, regardless of current connection mode.
         // Note: this will also kill a system-wide ADB server not started by ALVR.

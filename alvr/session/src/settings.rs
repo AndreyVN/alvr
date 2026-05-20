@@ -1552,6 +1552,28 @@ pub struct LoggingConfig {
     pub debug_groups: DebugGroupsConfig,
 }
 
+/// Runtime backend used on the PC side. ALVR can either drive SteamVR via the
+/// legacy OpenVR driver (`alvr_server_openvr`) or the new Monado-based OpenXR
+/// path (`alvr_server_openxr`). The Steamvr variant is the default and matches
+/// historical behaviour; selecting Openxr is currently scaffolding only and
+/// shows a friendly "under development" message until Phase 3 of
+/// openxr-migration.md lands.
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[schema(gui = "button_group")]
+pub enum RuntimeMode {
+    #[schema(strings(
+        display_name = "SteamVR (OpenVR)",
+        help = "Stream to a SteamVR driver. Default — unchanged behaviour."
+    ))]
+    Steamvr,
+    #[schema(strings(
+        display_name = "Monado (OpenXR) — preview",
+        help = "Stream to a Monado-based OpenXR runtime. Scaffolding only; no \
+                frames are encoded yet. Use SteamVR for production."
+    ))]
+    Openxr,
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct SteamvrLauncher {
     #[schema(strings(
@@ -1675,6 +1697,14 @@ pub struct MetricsExportConfig {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct ExtraConfig {
+    #[schema(strings(
+        display_name = "Runtime",
+        help = "Selects the PC-side runtime ALVR streams to. SteamVR is the \
+                default. Monado (OpenXR) is preview-only — see \
+                docs/monado-notes/INTEGRATION_NOTES.md."
+    ))]
+    pub runtime: RuntimeMode,
+
     #[schema(strings(display_name = "SteamVR Launcher"))]
     pub steamvr_launcher: SteamvrLauncher,
     pub capture: CaptureConfig,
@@ -2309,6 +2339,9 @@ pub fn session_settings_default() -> SettingsDefault {
             statistics_history_size: 256,
         },
         extra: ExtraConfigDefault {
+            runtime: RuntimeModeDefault {
+                variant: RuntimeModeDefaultVariant::Steamvr,
+            },
             logging: LoggingConfigDefault {
                 client_log_report_level: SwitchDefault {
                     enabled: true,
