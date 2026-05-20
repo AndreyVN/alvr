@@ -145,6 +145,8 @@ The hard one. Pure refactor — no new behavior. Broken into sub-slices so each 
 
 **Phase 3.1.2 (LANDED 2026-05-20, related work).** Event-drain thread now spawned in `alvr_oxr_init`; `alvr_oxr_get_head_pose` and `alvr_oxr_poll_session_event` are real. `ClientConnected/Disconnected/ShutdownPending` are translated to `AlvrOxrEvent` variants the drain thread pushes to a `SESSION_EVENTS_RX` queue. `LocalViewParams` cached in `LOCAL_VIEW_PARAMS` ready for future per-eye APIs. Tracking events drained without explicit handling — `get_head_pose` reads directly via `context.get_device_motion`. Tracked as Phase 3.1 work, not Phase 3.0; included in the scope-doc for continuity.
 
+**Phase 3.1.6 (LANDED 2026-05-21, related work).** Battery event wiring on the bridge: added `AlvrOxrEventType::Battery = 2`, `ALVR_OXR_DEVICE_KIND_{HMD,LEFT_CONTROLLER,RIGHT_CONTROLLER}` discriminants, and `ALVR_OXR_BATTERY_GAUGE_SCALE = 10 000`. Drain thread now translates `ServerCoreEvent::Battery` into `AlvrOxrEvent { event_type: Battery, data: [kind, gauge_bp, plugged, 0] }`. Unknown device IDs are dropped silently. RefreshRate intentionally not wired — no upstream `ServerCoreEvent::RefreshRate` exists; the enum value stays reserved.
+
 ---
 
 **Verification gate (after each Slice-2 sub-slice).** Run a controlled A/B against `master`:

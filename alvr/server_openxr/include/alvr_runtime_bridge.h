@@ -44,6 +44,21 @@
 
 #define ALVR_OXR_BUTTON_THUMBREST_TOUCH (1 << 15)
 
+#define ALVR_OXR_DEVICE_KIND_OTHER 0
+
+#define ALVR_OXR_DEVICE_KIND_HMD 1
+
+#define ALVR_OXR_DEVICE_KIND_LEFT_CONTROLLER 2
+
+#define ALVR_OXR_DEVICE_KIND_RIGHT_CONTROLLER 3
+
+/**
+ * Resolution of the basis-points gauge encoding in [`encode_battery`]:
+ * `gauge_value ∈ [0.0, 1.0]` becomes `0..=ALVR_OXR_BATTERY_GAUGE_SCALE`.
+ * 10000 gives 0.01% resolution, plenty for a battery percent indicator.
+ */
+#define ALVR_OXR_BATTERY_GAUGE_SCALE 10000
+
 /**
  * Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
  * loosely but is intentionally a separate enum so that the bridge ABI can
@@ -101,6 +116,7 @@ enum AlvrOxrEventType
  {
   ALVR_OXR_EVENT_TYPE_NONE = 0,
   ALVR_OXR_EVENT_TYPE_STATE_CHANGE = 1,
+  ALVR_OXR_EVENT_TYPE_BATTERY = 2,
   ALVR_OXR_EVENT_TYPE_CONNECTION_LOST = 4,
   ALVR_OXR_EVENT_TYPE_REFRESH_RATE_CHANGE = 5,
 };

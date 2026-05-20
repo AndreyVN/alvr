@@ -92,9 +92,10 @@ Reference impl: `alvr/server_openvr/src/lib.rs`. Notable deviations from OpenVR 
 
 ### 3.1.x — follow-ups outstanding
 
-- Battery / RefreshRate `AlvrOxrEventType` variants + drain handlers (currently only `StateChange` / `ConnectionLost` are emitted).
-- Battery payload encoding into `AlvrOxrEvent::data[4]` (device id, gauge %, plugged bool).
+- ✅ Battery `AlvrOxrEventType` variant + drain handler. `ServerCoreEvent::Battery` now emits `AlvrOxrEvent::Battery` with `data[4]` = `[device_kind, gauge_bp, plugged, 0]` where `device_kind` is one of `ALVR_OXR_DEVICE_KIND_{HMD,LEFT_CONTROLLER,RIGHT_CONTROLLER}` (other tracking IDs are dropped) and `gauge_bp ∈ 0..=ALVR_OXR_BATTERY_GAUGE_SCALE` (10 000). Landed 2026-05-21.
+- RefreshRate variant intentionally **not** wired: no `ServerCoreEvent::RefreshRate` exists upstream (rate is negotiated once at connection time). `AlvrOxrEventType::RefreshRateChange = 5` stays reserved for the day one lands.
 - Monado-side `alvr_hmd.c` wiring of `alvr_oxr_get_view_params` (today the driver returns identity views). Lives on the fork's `alvr` branch per Option A.
+- Monado-side handler for the new `Battery` event (consume `data[0..3]` and surface to the headset / dashboard if a use case appears).
 
 ### 3.2 — Fake compositor in `comp_alvr.c`
 

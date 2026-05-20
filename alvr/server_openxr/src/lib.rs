@@ -47,7 +47,7 @@ use alvr_common::{
     parking_lot::{Mutex, RwLock},
     warn,
 };
-use alvr_packets::{ButtonValue, Haptics};
+use alvr_packets::{BatteryInfo, ButtonValue, Haptics};
 use alvr_server_core::{ServerCoreContext, ServerCoreEvent};
 use std::{
     ffi::{CStr, c_char},
@@ -254,16 +254,32 @@ fn event_loop(
                         apply_button(&mut cache[slot], entry.path_id, entry.value);
                     }
                 }
+                ServerCoreEvent::Battery(info) => {
+                    if let Some(data) = encode_battery(&info) {
+                        let _ = session_events_tx.send(AlvrOxrEvent {
+                            event_type: AlvrOxrEventType::Battery,
+                            timestamp_ns: 0,
+                            data,
+                        });
+                    }
+                    // Devices not in the kind table (body trackers etc.) are
+                    // dropped silently — the bridge ABI doesn't surface them.
+                }
                 // Other events are drained but not yet routed.
                 //   - Tracking:           read on-demand by
                 //                         alvr_oxr_get_head_pose /
                 //                         _controller_state via
                 //                         context.get_device_motion.
                 //   - SetOpenvrProperty:  irrelevant in OpenXR mode.
-                //   - Battery / RefreshRate / Playspace: pending in a
-                //                         future sub-slice once the
-                //                         bridge ABI gains the matching
-                //                         AlvrOxrEvent variants.
+                //   - RefreshRate:        no upstream ServerCoreEvent variant
+                //                         exists today — refresh-rate is
+                //                         negotiated once at connection time.
+                //                         The bridge ABI keeps
+                //                         AlvrOxrEventType::RefreshRateChange
+                //                         reserved for when one lands.
+                //   - Playspace / ProximityState: not yet on the bridge
+                //                         surface; defer until a Monado-side
+                //                         consumer needs them.
                 _ => {}
             },
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -494,6 +510,53 @@ pub const ALVR_OXR_BUTTON_TRIGGER_TOUCH: u32 = 1 << 13;
 pub const ALVR_OXR_BUTTON_SQUEEZE_CLICK: u32 = 1 << 14;
 pub const ALVR_OXR_BUTTON_THUMBREST_TOUCH: u32 = 1 << 15;
 
+// Device-kind discriminant for [`AlvrOxrEvent`] payloads that carry a per-device
+// value (currently [`AlvrOxrEventType::Battery`]). `ServerCoreEvent::Battery`
+// reports a `device_id: u64` hash; the bridge ABI can only fit `[i32; 4]`, so
+// `device_id` is mapped to one of these small codes via [`device_kind_for`].
+// Unknown devices (`Other`) are dropped before being pushed onto the queue —
+// the Monado-side driver has no use for raw `u64` hashes here.
+pub const ALVR_OXR_DEVICE_KIND_OTHER: i32 = 0;
+pub const ALVR_OXR_DEVICE_KIND_HMD: i32 = 1;
+pub const ALVR_OXR_DEVICE_KIND_LEFT_CONTROLLER: i32 = 2;
+pub const ALVR_OXR_DEVICE_KIND_RIGHT_CONTROLLER: i32 = 3;
+
+/// Resolution of the basis-points gauge encoding in [`encode_battery`]:
+/// `gauge_value ∈ [0.0, 1.0]` becomes `0..=ALVR_OXR_BATTERY_GAUGE_SCALE`.
+/// 10000 gives 0.01% resolution, plenty for a battery percent indicator.
+pub const ALVR_OXR_BATTERY_GAUGE_SCALE: i32 = 10_000;
+
+/// Map a tracking-system `device_id` (hashed path from `alvr_common`) to the
+/// `ALVR_OXR_DEVICE_KIND_*` discriminant used in the bridge ABI. Returns
+/// [`ALVR_OXR_DEVICE_KIND_OTHER`] for IDs the bridge doesn't expose.
+fn device_kind_for(device_id: u64) -> i32 {
+    if device_id == *HEAD_ID {
+        ALVR_OXR_DEVICE_KIND_HMD
+    } else if device_id == *HAND_LEFT_ID {
+        ALVR_OXR_DEVICE_KIND_LEFT_CONTROLLER
+    } else if device_id == *HAND_RIGHT_ID {
+        ALVR_OXR_DEVICE_KIND_RIGHT_CONTROLLER
+    } else {
+        ALVR_OXR_DEVICE_KIND_OTHER
+    }
+}
+
+/// Pack a `BatteryInfo` into the `[i32; 4]` payload of an `AlvrOxrEvent::Battery`:
+///   data[0] = device-kind discriminant (see `ALVR_OXR_DEVICE_KIND_*`)
+///   data[1] = gauge in basis points (0..=`ALVR_OXR_BATTERY_GAUGE_SCALE`)
+///   data[2] = plugged flag (0 or 1)
+///   data[3] = reserved (always 0)
+/// Returns `None` for devices not exposed by the bridge — the drain thread
+/// should drop the event in that case rather than emitting `Other`.
+fn encode_battery(info: &BatteryInfo) -> Option<[i32; 4]> {
+    let kind = device_kind_for(info.device_id);
+    if kind == ALVR_OXR_DEVICE_KIND_OTHER {
+        return None;
+    }
+    let gauge = (info.gauge_value.clamp(0.0, 1.0) * ALVR_OXR_BATTERY_GAUGE_SCALE as f32) as i32;
+    Some([kind, gauge, info.is_plugged as i32, 0])
+}
+
 /// Per-view static parameters: the eye-to-head pose offset and the
 /// per-view field of view, both in OpenXR conventions (radians for FOV,
 /// right-handed +Y up -Z forward for the pose). `fov_radians` is
@@ -685,6 +748,7 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
 pub enum AlvrOxrEventType {
     None = 0,
     StateChange = 1,
+    Battery = 2,
     ConnectionLost = 4,
     RefreshRateChange = 5,
 }
