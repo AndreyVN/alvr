@@ -42,7 +42,7 @@
 set -euo pipefail
 
 # ---- CONFIGURE ME ---------------------------------------------------------
-FORK_URL="https://gitlab.freedesktop.org/<your-org>/monado.git"
+FORK_URL="https://github.com/<your-org>/monado.git"
 FORK_BRANCH="alvr"
 # ---------------------------------------------------------------------------
 
@@ -56,7 +56,7 @@ if [[ ! -d openxr ]]; then
   exit 1
 fi
 
-if git submodule status openxr >/dev/null 2>&1; then
+if [[ -n "$(git submodule status openxr 2>/dev/null)" ]]; then
   echo "openxr is already a submodule. Aborting."
   exit 1
 fi
@@ -69,28 +69,40 @@ if ! git diff --quiet -- docs/monado-notes/ openxr-migration.md 2>/dev/null; the
   [[ "$resp" =~ ^[Yy]$ ]] || exit 1
 fi
 
-# Step 2 — back up the snapshot.
-echo "[1/4] Backing up openxr/ -> openxr.snapshot.bak/"
-mv openxr openxr.snapshot.bak
+# Step 2 — drop any tracked files under openxr/ from the index. This happens
+# when Phase 2 work committed files like openxr/src/xrt/drivers/alvr/* inside
+# the vendored snapshot. `git submodule add` refuses if any index entry exists
+# at the target path. --cached keeps the working tree intact so the next step
+# can back it up.
+if [[ -n "$(git ls-files -- openxr)" ]] || [[ -n "$(git ls-tree HEAD -- openxr 2>/dev/null)" ]]; then
+  echo "[1/5] git rm -rf --cached openxr (removing previously-tracked files from index)"
+  git rm -rf --cached openxr >/dev/null
+fi
 
-# Step 3 — add as submodule.
-echo "[2/4] git submodule add -b $FORK_BRANCH $FORK_URL openxr"
+# Step 3 — back up the snapshot.
+if [[ -d openxr ]]; then
+  echo "[2/5] Backing up openxr/ -> openxr.snapshot.bak/"
+  mv openxr openxr.snapshot.bak
+fi
+
+# Step 4 — add as submodule.
+echo "[3/5] git submodule add -b $FORK_BRANCH $FORK_URL openxr"
 git submodule add -b "$FORK_BRANCH" "$FORK_URL" openxr
 git submodule update --init --recursive openxr
 
-# Step 4 — diff. Anything in the backup that's not in the submodule needs
+# Step 5 — diff. Anything in the backup that's not in the submodule needs
 # investigation: typically means a Phase 2 / Phase 3 file did not get pushed
 # to the fork's alvr branch.
-echo "[3/4] Diffing live submodule against the backup. Look for ADDITIONS in"
+echo "[4/5] Diffing live submodule against the backup. Look for ADDITIONS in"
 echo "      the backup (lines starting with 'Only in openxr.snapshot.bak/...')."
 echo "      Output goes to openxr-submodule-diff.log"
 diff -rq openxr openxr.snapshot.bak > openxr-submodule-diff.log 2>&1 || true
 echo "      First 30 lines:"
 head -30 openxr-submodule-diff.log || true
 
-# Step 5 — uncomment the [submodule "openxr"] block in .gitmodules so future
+# Step 6 — uncomment the [submodule "openxr"] block in .gitmodules so future
 # clones get the submodule by default.
-echo "[4/4] Edit .gitmodules manually if there's a commented-out [submodule \"openxr\"]"
+echo "[5/5] Edit .gitmodules manually if there's a commented-out [submodule \"openxr\"]"
 echo "      placeholder block. Uncomment it and verify it matches the live entry"
 echo "      git submodule add just wrote."
 
