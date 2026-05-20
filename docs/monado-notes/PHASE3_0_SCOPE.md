@@ -133,19 +133,22 @@ Final scope (smaller than originally drafted, because `FrameRender.h` `#include`
 
 ### Slice 2 — Windows interface extraction (3–4 days)
 
-The hard one. Pure refactor — no new behavior.
+The hard one. Pure refactor — no new behavior. Broken into sub-slices so each is reviewable and compile-testable:
 
-1. Define `IEncoderBackend` interface in `cpp/encoder/EncoderBackend.h`.
-2. Define `D3d11EncoderBackend` typed adapter wrapping existing `VideoEncoder*`. Move `VideoEncoder*` files to `cpp/encoder/win32_d3d11/`.
-3. Hoist backend selection (the AMF/NVENC/VPL/SW try-fallthrough in `CEncoder::Initialize`) to `cpp/encoder/EncoderSelector.cpp`. Keep ordering identical.
-4. Hoist IDR scheduling (`alvr_server/IDRScheduler.{h,cpp}`) and dynamic-params plumbing into the shared layer.
-5. `CEncoder.cpp` and `OvrDirectModeComponent.cpp` continue to use `D3d11EncoderBackend` via the new interface.
-6. **Verification step is the big one.** Run a controlled A/B against `master`:
-   - Same headset, same SteamVR app, same Settings.video.
-   - Capture 60s of encoded bitstream both ways via `dump_video_to_file`-style probe.
-   - Diff byte-for-byte. **Identical** is the bar.
+**Sub-slice 2.1** — relocate `VideoEncoder*`, `NvEncoder*`, `NvEncoderD3D11*`, `NvCodecUtils.h` from `cpp/platform/win32/` to `cpp/encoder/win32_d3d11/` (15 files). Update `build.rs` so the new dir is on the source walk + include path on Windows, and `cpp/platform/win32/` stays on the include path so the moved files keep resolving `"shared/d3drender.h"` (a genuinely cross-cutting D3D11 utility — relocating it cleanly is left as a follow-up to keep 2.1 purely extractive). **LANDED 2026-05-20.** Verified: `cargo build -p alvr_server_openvr` cleanly re-links all moved files; `cargo check -p alvr_server_openxr` unchanged.
 
-**Exit:** Side-by-side bitstream comparison shows zero diff. CI green. `cargo xtask build-streamer` produces a driver that loads cleanly into SteamVR.
+**Sub-slice 2.2** — define `IEncoderBackend` interface in `cpp/encoder/EncoderBackend.h`. Define `D3d11EncoderBackend` typed adapter wrapping existing `VideoEncoder*`. `CEncoder.{h,cpp}` owns a `D3d11EncoderBackend` instead of a `VideoEncoder` directly. One layer of indirection. Compile + bitstream identical.
+
+**Sub-slice 2.3** — hoist backend selection (AMF/NVENC/VPL/SW try-fallthrough in `CEncoder::Initialize`) into `D3d11EncoderBackend::Create()`. Keep ordering and fallthrough conditions byte-identical.
+
+**Sub-slice 2.4** — hoist `IDRScheduler` and `FfiDynamicEncoderParams` handling out of `CEncoder` into the shared `IEncoderBackend` lifecycle. `CEncoder` shrinks to "drive thread + own backend".
+
+**Verification gate (after each sub-slice).** Run a controlled A/B against `master`:
+- Same headset, same SteamVR app, same Settings.video.
+- Capture 60s of encoded bitstream both ways via `dump_video_to_file`-style probe.
+- Diff byte-for-byte. **Identical** is the bar.
+
+**Exit:** Side-by-side bitstream comparison shows zero diff after Sub-slice 2.4. CI green. `cargo xtask build-streamer` produces a driver that loads cleanly into SteamVR.
 
 ### Slice 3 — Windows OpenXR backend (NEW, 3 days, optional within Phase 3.0)
 

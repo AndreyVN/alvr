@@ -32,14 +32,17 @@ fn main() {
         _ => panic!(),
     };
 
-    // Per-OS subdirs under cpp/encoder/. Phase 3.0 (encoder refactor) Slice 1
-    // lifted the runtime-agnostic Linux encoder files (EncodePipeline*,
-    // Renderer, ffmpeg_helper, FormatConverter) out of cpp/platform/linux/ so
-    // alvr_server_openxr can share them. The common walker below filters
-    // "encoder" out the same way it filters "platform" so Windows builds
-    // never try to compile Linux files.
+    // Per-OS subdirs under cpp/encoder/. Phase 3.0 (encoder refactor) lifted
+    // the encoder backends out of cpp/platform/<os>/ so alvr_server_openxr
+    // can share them. The common walker below filters "encoder" out the same
+    // way it filters "platform" so Windows builds never try to compile Linux
+    // files and vice versa.
+    //
+    // - Linux (Slice 1):  cpp/encoder/linux/        ← EncodePipeline*, Renderer, ...
+    // - Windows (Slice 2.1): cpp/encoder/win32_d3d11/ ← VideoEncoder*, NvEncoder*, ...
     let encoder_subpath: Option<&str> = match platform_name.as_str() {
         "linux" => Some("cpp/encoder/linux"),
+        "windows" => Some("cpp/encoder/win32_d3d11"),
         _ => None,
     };
 
@@ -84,12 +87,24 @@ fn main() {
         .include(alvr_filesystem::workspace_dir().join("openvr/headers"))
         .include("cpp");
 
-    // After Slice 1, the remaining Linux encoder consumers (CEncoder.cpp,
-    // FrameRender.h in cpp/platform/linux/) still reference moved headers
-    // via sibling-style `#include "X.h"`. Putting cpp/encoder/linux on the
-    // search path resolves them without having to rewrite every include.
+    // After Slice 1/2.1, the remaining encoder consumers in cpp/platform/<os>/
+    // (CEncoder.cpp + FrameRender.h on Linux; CEncoder.{h,cpp} +
+    // OvrDirectModeComponent on Windows) still reference moved headers via
+    // sibling-style `#include "X.h"`. Putting cpp/encoder/<os-subdir>/ on
+    // the search path resolves them without having to rewrite every include.
     if let Some(enc) = encoder_subpath {
         build.include(enc);
+    }
+    // Symmetrically, the moved Win32 encoder files still reference
+    // `shared/d3drender.h`, which originally resolved via "same directory as
+    // the including file" (cpp/platform/win32/shared/d3drender.h). Adding
+    // cpp/platform/win32 to the include path keeps that resolution working
+    // without rewriting the include. d3drender is genuinely cross-cutting
+    // (used by CEncoder, FrameRender, OvrDirectModeComponent, and every
+    // VideoEncoder*), so a future cleanup may relocate it to a true shared
+    // location — left as a follow-up to keep Slice 2.1 purely extractive.
+    if platform_name == "windows" {
+        build.include(platform_subpath);
     }
 
     if platform_name == "windows" {
