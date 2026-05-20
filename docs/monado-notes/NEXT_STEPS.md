@@ -123,7 +123,7 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
    Unregister refuses to clear when the currently-registered value doesn't match this profile's manifest — won't stomp on a different vendor's runtime.
    The action is **system-modifying for the current user**; the launcher GUI doesn't surface it yet (deliberate — a CLI-only path keeps the side-effect explicit until a UI for it is in place).
 3. ✅ **4.3 (LANDED 2026-05-21)**: Mutual exclusion implemented on both sides. SteamVR side already had the warn-out in `dashboard/src/steamvr_launcher/mod.rs::launch_steamvr` (refuses when `RuntimeMode::Openxr`). OpenXR side now mirrors it: `cargo xtask register-openxr-runtime` refuses with `error:` if `vrserver` is alive. Both runtimes claim the same headset connection from the client; letting them race produces a stream that goes nowhere useful.
-4. Smoke tests beyond `hello_xr` — one OpenXR SDK sample and one production game that the OpenVR path also supports.
+4. ✅ **4.4 (LANDED 2026-05-21)** — smoke-test plan in [`SMOKE_TESTS.md`](SMOKE_TESTS.md). Concrete gates (build clean / ABI contract / hello_xr / Battery event / OpenVR regression / NVENC streaming / production game) with commands, expected behavior, and a verification log to append to as gates pass. Doc only — actual execution waits on a verification host (Vulkan SDK + NVENC SDK 12.1+ + a real headset).
 
 ## Phase 5 — telemetry / dashboard polish (2–3 days)
 
