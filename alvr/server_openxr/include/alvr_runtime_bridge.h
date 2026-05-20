@@ -118,6 +118,23 @@ typedef struct AlvrOxrPose {
 } AlvrOxrPose;
 
 /**
+ * Per-view static parameters: the eye-to-head pose offset and the
+ * per-view field of view, both in OpenXR conventions (radians for FOV,
+ * right-handed +Y up -Z forward for the pose). `fov_radians` is
+ * `[left, right, up, down]` to match [`AlvrOxrLayer::fov_radians`].
+ *
+ * These come from the client's reported view configuration and arrive
+ * on `ServerCoreEvent::LocalViewParams`. The bridge caches them in a
+ * global so [`alvr_oxr_get_view_params`] can return them synchronously
+ * — Monado's `xrLocateViews` equivalent calls into us once per frame
+ * and shouldn't block on the connection thread.
+ */
+typedef struct AlvrOxrViewParams {
+  struct AlvrOxrPose pose;
+  float fov_radians[4];
+} AlvrOxrViewParams;
+
+/**
  * Per-frame controller state passed back over the bridge. Buttons and
  * analogue values mirror the OpenXR Touch profile layout.
  */
@@ -221,6 +238,18 @@ AlvrOxrResult alvr_oxr_get_controller_info(AlvrOxrSide side, char *out_serial, u
  * `out_pose` must be a writable `AlvrOxrPose`.
  */
 AlvrOxrResult alvr_oxr_get_head_pose(int64_t at_timestamp_ns, struct AlvrOxrPose *out_pose);
+
+/**
+ * Read the cached view parameters for `side` (Left = view 0, Right = view 1).
+ * Returns Ok with the latest cached params; before the client has reported
+ * its view configuration the returned values reflect `ViewParams::DUMMY`
+ * (identity pose + ±1 rad fov) so Monado doesn't trip on uninitialised
+ * memory.
+ *
+ * # Safety
+ * `out_params` must be a writable `AlvrOxrViewParams`.
+ */
+AlvrOxrResult alvr_oxr_get_view_params(AlvrOxrSide side, struct AlvrOxrViewParams *out_params);
 
 /**
  * Query the controller state at `at_timestamp_ns`.

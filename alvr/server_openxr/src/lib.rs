@@ -6,7 +6,7 @@
 //! `openxr/src/xrt/drivers/alvr/` loads this cdylib and calls into the
 //! functions declared here.
 //!
-//! ## Current status (Phase 3.1.4 of openxr-migration.md)
+//! ## Current status (Phase 3.1.5 of openxr-migration.md)
 //!
 //! Live:
 //!   - [`alvr_oxr_init`] / [`alvr_oxr_shutdown`] — construct/drop a real
@@ -16,6 +16,9 @@
 //!     state also returns trigger / squeeze / thumbstick / button
 //!     bitfield from a cache the drain thread maintains on
 //!     `ServerCoreEvent::Buttons`.
+//!   - [`alvr_oxr_get_view_params`] — per-eye pose + FOV from the
+//!     `LOCAL_VIEW_PARAMS` cache the drain thread maintains on
+//!     `ServerCoreEvent::LocalViewParams`.
 //!   - [`alvr_oxr_set_haptic`] — forwards to `context.send_haptics`.
 //!   - [`alvr_oxr_get_hmd_info`] / [`alvr_oxr_get_controller_info`] —
 //!     write stable bridge-side serials (`ALVR_HMD`, `ALVR_Controller_*`).
@@ -490,6 +493,57 @@ pub const ALVR_OXR_BUTTON_TRIGGER_CLICK: u32 = 1 << 12;
 pub const ALVR_OXR_BUTTON_TRIGGER_TOUCH: u32 = 1 << 13;
 pub const ALVR_OXR_BUTTON_SQUEEZE_CLICK: u32 = 1 << 14;
 pub const ALVR_OXR_BUTTON_THUMBREST_TOUCH: u32 = 1 << 15;
+
+/// Per-view static parameters: the eye-to-head pose offset and the
+/// per-view field of view, both in OpenXR conventions (radians for FOV,
+/// right-handed +Y up -Z forward for the pose). `fov_radians` is
+/// `[left, right, up, down]` to match [`AlvrOxrLayer::fov_radians`].
+///
+/// These come from the client's reported view configuration and arrive
+/// on `ServerCoreEvent::LocalViewParams`. The bridge caches them in a
+/// global so [`alvr_oxr_get_view_params`] can return them synchronously
+/// — Monado's `xrLocateViews` equivalent calls into us once per frame
+/// and shouldn't block on the connection thread.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AlvrOxrViewParams {
+    pub pose: AlvrOxrPose,
+    pub fov_radians: [f32; 4],
+}
+
+/// Read the cached view parameters for `side` (Left = view 0, Right = view 1).
+/// Returns Ok with the latest cached params; before the client has reported
+/// its view configuration the returned values reflect `ViewParams::DUMMY`
+/// (identity pose + ±1 rad fov) so Monado doesn't trip on uninitialised
+/// memory.
+///
+/// # Safety
+/// `out_params` must be a writable `AlvrOxrViewParams`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_get_view_params(
+    side: AlvrOxrSide,
+    out_params: *mut AlvrOxrViewParams,
+) -> AlvrOxrResult {
+    if out_params.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+    let params = LOCAL_VIEW_PARAMS.read()[side as usize];
+    unsafe {
+        *out_params = AlvrOxrViewParams {
+            pose: AlvrOxrPose {
+                position: params.pose.position.to_array(),
+                orientation: params.pose.orientation.to_array(),
+            },
+            fov_radians: [
+                params.fov.left,
+                params.fov.right,
+                params.fov.up,
+                params.fov.down,
+            ],
+        };
+    }
+    AlvrOxrResult::Ok
+}
 
 /// Per-frame controller state passed back over the bridge. Buttons and
 /// analogue values mirror the OpenXR Touch profile layout.
