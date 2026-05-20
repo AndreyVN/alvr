@@ -150,16 +150,22 @@ The hard one. Pure refactor — no new behavior. Broken into sub-slices so each 
 
 **Exit:** Side-by-side bitstream comparison shows zero diff after Sub-slice 2.3. CI green. `cargo xtask build-streamer` produces a driver that loads cleanly into SteamVR. Sub-slice 2.4 deferred per note above.
 
-### Slice 3 — Windows OpenXR backend (NEW, 3 days, optional within Phase 3.0)
+### Slice 3 — Windows OpenXR backend (NEW)
 
-This is the deliverable that Phase 3.1 actually needs.
+Three sub-slices. Originally estimated 3 days total in one shot, but the verifiability profile is very different from Slice 1/2 (refactors) — Slice 3 is net-new code that needs a real Vulkan/NVENC/Monado stack, so the cheap-to-verify "skeleton" was carved out as its own sub-slice.
 
-1. Add `VkEncoderBackend` family under `cpp/encoder/win32_vk/`. Initially supports NVENC only (it has the cleanest Vulkan-input story via `nvenc_vulkan_swapchain` interop in newer NVENC SDK).
-2. Implement `VkEncoderBackend_NVENC::Submit(VkImage, sync_handle, ...)`.
-3. Wire `alvr_oxr_submit_layers` in `alvr_server_openxr/src/lib.rs` to instantiate the right backend.
-4. AMF + VPL Vulkan input deferred to Phase 7 (stretch).
+**Sub-slice 3.1 — LANDED 2026-05-20**: `cpp/encoder/win32_vk/VkEncoderBackend.{h,cpp}` skeleton. Class conforms to `IEncoderBackend` (same `Shutdown` / `OnStreamStart` / `InsertIDR` as the D3D11 backend). `Submit(SubmitDesc)` takes opaque external-memory Vulkan handles + sync semaphore + timing — the `SubmitDesc` field layout mirrors `AlvrOxrLayer` from the bridge header so future wiring is a straight copy. `Create` throws `std::runtime_error`; all per-frame methods stub out. Deliberately self-contained: no `alvr_server/Logger.h` or `Utils.h` includes so this TU can compile in any future `alvr_server_openxr` `cc::Build` without dragging in the OpenVR-side logging-callback glue. Verified: `g++ -std=c++17 -Wall -Wextra` compiles clean. **Not yet integrated into any build** — design landing only.
 
-**Exit:** OpenXR mode on Windows + NVIDIA GPU streams a frame end-to-end. AMF/Intel/SW users get a friendly "not yet supported" error in OpenXR mode.
+**Sub-slice 3.2 — DEFERRED**: integrate `cpp/encoder/win32_vk/` into a new `cc::Build` in `alvr_server_openxr/build.rs` (the crate currently does cbindgen only). Needs:
+1. Vulkan SDK lookup (already at `C:\VulkanSDK\1.4.341.0\` on this dev host; needs to surface in `alvr_filesystem` deps or hard-coded in build.rs).
+2. NVENC SDK 12.1+ headers — currently bundled in `alvr/server_openvr/cpp/encoder/win32_d3d11/NvEncoder.h` etc., but the Vulkan-input API uses different entry points (`nvEncRegisterResource` with `NV_ENC_INPUT_RESOURCE_TYPE_VULKAN_IMAGE_HANDLE`); may need to upgrade or ship the SDK.
+3. C-ABI bindgen between `alvr_server_openxr/src/lib.rs` and the new static lib.
+
+**Sub-slice 3.3 — DEFERRED**: implement `VkEncoderBackend_NVENC::Submit`. External-memory import via `VK_KHR_external_memory_win32`, semaphore wait via `VK_KHR_external_semaphore_win32`, then feed to NVENC's Vulkan-image input. Wire `alvr_oxr_submit_layers` in Rust to construct the SubmitDesc and call into Submit.
+
+**Sub-slice 3.4 (Phase 7 stretch)**: AMF + VPL Vulkan input. NVENC-only is the Slice 3 ship target.
+
+**Exit (Slice 3):** OpenXR mode on Windows + NVIDIA GPU streams a frame end-to-end. AMF/Intel/SW users get a "not yet supported" error in OpenXR mode. Not achievable in 3.1 alone — 3.2/3.3 require a real Vulkan + NVENC + Monado verification environment.
 
 ## Risk register
 
