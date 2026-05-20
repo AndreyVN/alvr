@@ -141,14 +141,14 @@ The hard one. Pure refactor — no new behavior. Broken into sub-slices so each 
 
 **Sub-slice 2.3 — LANDED 2026-05-20** — hoisted `IDRScheduler` ownership from `CEncoder` into `D3d11EncoderBackend`. Added `OnStreamStart()` / `InsertIDR()` to `IEncoderBackend`; `D3d11EncoderBackend::Transmit` no longer takes an explicit `insertIDR` parameter (the backend consults its owned scheduler internally right before forwarding to the underlying `VideoEncoder`). `CEncoder::OnStreamStart()` / `InsertIDR()` collapse to single-line pass-throughs. Note: the originally-scoped "backend selection hoist" was already done in Slice 2.2 (smaller-than-planned commit boundaries). `FfiDynamicEncoderParams` handling deliberately not hoisted yet — on Windows each `VideoEncoder*` polls `GetDynamicEncoderParams()` directly in its hot path, so there is no CEncoder-level plumbing to hoist; a unification with Linux's explicit `EncodePipeline::SetParams` is deferred to a later cleanup.
 
-**Sub-slice 2.4** — final shape of `IEncoderBackend` so Linux's `EncodePipeline` and Windows's `D3d11EncoderBackend` conform to the same interface. Likely adds `SetParams(FfiDynamicEncoderParams)` and rationalises lifecycle (Initialize/Shutdown both ways) once the Linux side is wrapped too.
+**Sub-slice 2.4 — DEFERRED to Phase 3.1** — originally planned to make Linux's `EncodePipeline` conform to `IEncoderBackend`. Re-evaluated 2026-05-20: not actually required for Slice 3 (`VkEncoderBackend` only needs the current `IEncoderBackend` shape), and forcing it now would (a) require Linux-side compile verification we cannot run from a Windows host, and (b) require merging two structurally different submission patterns (Windows synchronous `Transmit` vs Linux queue-based `PushFrame`/`GetEncoded`). Re-pick this up in Phase 3.1, when `alvr_server_openxr/src/lib.rs` actually wires up the Linux backend and the merge can be informed by real consumers.
 
 **Verification gate (after each sub-slice).** Run a controlled A/B against `master`:
 - Same headset, same SteamVR app, same Settings.video.
 - Capture 60s of encoded bitstream both ways via `dump_video_to_file`-style probe.
 - Diff byte-for-byte. **Identical** is the bar.
 
-**Exit:** Side-by-side bitstream comparison shows zero diff after Sub-slice 2.4. CI green. `cargo xtask build-streamer` produces a driver that loads cleanly into SteamVR.
+**Exit:** Side-by-side bitstream comparison shows zero diff after Sub-slice 2.3. CI green. `cargo xtask build-streamer` produces a driver that loads cleanly into SteamVR. Sub-slice 2.4 deferred per note above.
 
 ### Slice 3 — Windows OpenXR backend (NEW, 3 days, optional within Phase 3.0)
 
