@@ -1,26 +1,90 @@
-//! Generates `include/alvr_runtime_bridge.h` from the `extern "C"` surface
-//! of `src/lib.rs` using cbindgen. The Monado-side ALVR driver consumes
-//! that header.
+//! Build script for `alvr_server_openxr`.
+//!
+//! Two responsibilities:
+//!   1. Compile the platform-specific encoder backend C++ that lives in
+//!      `../server_openvr/cpp/encoder/`. Today only the Windows Vulkan-input
+//!      skeleton (`win32_vk/VkEncoderBackend.cpp`) is in scope; Slice 3.3
+//!      adds the real implementation against NVENC's Vulkan-image-input
+//!      API. The Linux side reuses `cpp/encoder/linux/EncodePipeline*` via
+//!      Sub-slice 2.4, deferred.
+//!   2. (Opt-in) Regenerate `include/alvr_runtime_bridge.h` from the
+//!      `extern "C"` surface of `src/lib.rs` using cbindgen, gated by
+//!      `ALVR_REGENERATE_BRIDGE_HEADER=1` so unrelated `cargo check` runs
+//!      don't churn the header on disk.
 
 use std::{env, path::PathBuf};
 
 fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let crate_path = PathBuf::from(&crate_dir);
 
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=ALVR_REGENERATE_BRIDGE_HEADER");
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
 
-    // The bridge header is the contract between this crate and the Monado-side
-    // ALVR driver. To avoid an empty/partial cbindgen run silently clobbering
-    // a hand-maintained header (which happens during normal `cargo check`),
-    // regeneration is opt-in: set ALVR_REGENERATE_BRIDGE_HEADER=1 to refresh
-    // `include/alvr_runtime_bridge.h` from the Rust source.
+    let platform = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    // --- (1) compile encoder backend C++ -----------------------------------
+    //
+    // The shared encoder C++ lives in the alvr_server_openvr tree under
+    // cpp/encoder/. We reach into the sibling crate's path to compile the
+    // pieces alvr_server_openxr needs (currently just the win32_vk skeleton
+    // on Windows). Both crates share the same EncoderBackend.h interface.
+    let cpp_root = crate_path.join("..").join("server_openvr").join("cpp");
+    println!(
+        "cargo:rerun-if-changed={}",
+        cpp_root.join("encoder").to_string_lossy()
+    );
+
+    if platform == "windows" {
+        let vk_dir = cpp_root.join("encoder").join("win32_vk");
+        let vk_sources: Vec<PathBuf> = std::fs::read_dir(&vk_dir)
+            .expect("cpp/encoder/win32_vk not found — alvr_server_openvr tree expected as sibling")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("cpp"))
+            .collect();
+
+        let mut build = cc::Build::new();
+        build
+            .cpp(true)
+            .std("c++17")
+            .files(vk_sources)
+            .include(&cpp_root) // resolves `#include "encoder/EncoderBackend.h"`
+            .define("NOMINMAX", None);
+
+        // Vulkan SDK include path. Required even by the skeleton header
+        // (which holds Vulkan types opaque today) so that Slice 3.3 can
+        // start referencing VkImage / VkFormat without another build.rs
+        // round-trip. The SDK is the standard LunarG installer; sets
+        // VULKAN_SDK env var.
+        if let Some(sdk) = env::var_os("VULKAN_SDK") {
+            let sdk_path = PathBuf::from(sdk);
+            build.include(sdk_path.join("Include"));
+            println!(
+                "cargo:rustc-link-search=native={}",
+                sdk_path.join("Lib").to_string_lossy()
+            );
+            // Don't link vulkan-1 yet — the skeleton calls no Vulkan
+            // symbols. Slice 3.3 will add `println!("cargo:rustc-link-lib=vulkan-1")`
+            // once the real impl uses VkImage / VkSemaphore.
+        } else {
+            println!(
+                "cargo:warning=VULKAN_SDK not set; the encoder skeleton will compile but \
+                 Slice 3.3's real Vulkan-input NVENC integration will need it. \
+                 Install the LunarG Vulkan SDK and re-build."
+            );
+        }
+
+        build.compile("alvr_server_openxr_encoder");
+    }
+
+    // --- (2) cbindgen bridge-header regeneration (opt-in) ------------------
     if env::var("ALVR_REGENERATE_BRIDGE_HEADER").ok().as_deref() != Some("1") {
         return;
     }
 
-    let crate_path = PathBuf::from(&crate_dir);
     let out_header = crate_path.join("include").join("alvr_runtime_bridge.h");
 
     std::fs::create_dir_all(out_header.parent().unwrap()).ok();

@@ -26,3 +26,4 @@ alvr_session.workspace = true
 
 [build-dependencies]
 cbindgen = "0.29"
+cc = "1"

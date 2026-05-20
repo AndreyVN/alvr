@@ -476,6 +476,7 @@ dependencies = [
  "alvr_server_core",
  "alvr_session",
  "cbindgen",
+ "cc",
 ]
 
 [[package]]
