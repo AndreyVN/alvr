@@ -14,7 +14,14 @@ When a test passes, move it to a "Verified on … with … on YYYY-MM-DD" line a
 
 ## Gate A — build clean (any host)
 
-`cargo check -p alvr_server_openxr -p alvr_xtask -p alvr_dashboard` clean. `cargo xtask clippy --ci` clean. This is the gate every PR has to clear before consideration; routinely run from CI. **Status as of this branch: clean** (verified locally after each slice).
+`cargo check -p alvr_server_openxr -p alvr_xtask -p alvr_dashboard` clean. `cargo xtask clippy --ci` clean. This is the gate every PR has to clear before consideration; routinely run from CI. **Rust side as of this branch: clean** (verified locally after each slice).
+
+**Monado-side compile gate (`cargo xtask build-openxr-runtime --enable-alvr-driver`)** is the stronger version of Gate A and is currently blocked on Monado's upstream CMake dep list. Verified 2026-05-21 on the Windows refactoring host:
+- Eigen3 ≥3.3 — REQUIRED. Not in `install.txt`, not in `choco install` (lock issue on this host), not in any toolchain ALVR ships. Workaround used this session: download `https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip`, `cmake --install` it to `build/_thirdparty/eigen-install`, pass `CMAKE_PREFIX_PATH` env var to `cargo xtask build-openxr-runtime`. With this Eigen3 is found and Monado's configure step proceeds past line 93 of its root `CMakeLists.txt`.
+- `pthreads_windows` — REQUIRED (CMakeLists.txt:153). Next host gap discovered after Eigen3 was resolved; no vcpkg / choco one-shot install attempted yet. This is where the configure currently halts.
+- Optionals that emitted `Could NOT find` but did not fatal-error: HIDAPI, bluetooth, OpenHMD, OpenCV, libusb1, JPEG, realsense2, depthai, SDL2, ZLIB, cJSON, LeapV2, LeapSDK, ONNXRuntime, wil. Most are HID-driver or vision-pipeline deps the ALVR build path doesn't exercise; they only become blocking if a specific driver is gated ON.
+
+Once `pthreads_windows` (and any follow-on REQUIREDs) are resolved, the host should be able to run the full Phase 3.2 / 3.3 build verification. Until then, the compositor-side Phase 3.2 code lives at "structurally consistent with `null_compositor` reference + `drv_alvr` wiring, but not compile-verified end-to-end".
 
 ## Gate B — bridge ABI version contract
 
