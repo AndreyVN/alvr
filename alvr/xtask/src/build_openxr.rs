@@ -74,6 +74,35 @@ fn ensure_vcpkg_windows() -> Option<PathBuf> {
     let toolchain = vcpkg_root.join("scripts/buildsystems/vcpkg.cmake");
     let bootstrap_marker = vcpkg_root.join("vcpkg.exe");
 
+    // A partial / blobless clone left by earlier versions of this helper
+    // poisons vcpkg's manifest-mode workflow: vcpkg's `checkout-index`
+    // step on per-port trees triggers an on-demand promisor fetch that
+    // hangs libcurl's DNS resolver on Windows ("getaddrinfo() thread
+    // failed to start" cascade). Bail with a clear message rather than
+    // silently reusing the broken state.
+    if vcpkg_root.join(".git").exists() {
+        let sh_check = Shell::new().unwrap();
+        let vcpkg_str = vcpkg_root.to_string_lossy().into_owned();
+        let filter = cmd!(
+            sh_check,
+            "git -C {vcpkg_str} config --get remote.origin.partialclonefilter"
+        )
+        .ignore_status()
+        .read()
+        .unwrap_or_default();
+        if !filter.is_empty() {
+            eprintln!(
+                "error: existing vcpkg clone at {vcpkg_str} is a partial clone \
+                 (filter={filter}). This breaks vcpkg's per-port checkout step \
+                 on Windows. Delete the directory and rerun:\n\n\
+                 \trd /s /q {vcpkg_str}\n\n\
+                 (PowerShell's Remove-Item often fails on .git pack files held \
+                 open by Defender — use cmd's rd instead.)"
+            );
+            process::exit(1);
+        }
+    }
+
     if toolchain.exists() && bootstrap_marker.exists() {
         return Some(toolchain);
     }
@@ -86,14 +115,14 @@ fn ensure_vcpkg_windows() -> Option<PathBuf> {
         println!("Cloning microsoft/vcpkg into {}...", vcpkg_root.display());
         let url = "https://github.com/microsoft/vcpkg.git";
         let dest = vcpkg_root.to_string_lossy().into_owned();
-        // Use --filter=blob:none rather than --depth=1: vcpkg's manifest mode
-        // needs to `git show <baseline>:versions/baseline.json` for the commit
-        // Monado pins in its vcpkg.json, which a shallow clone can't satisfy.
-        // A blobless partial clone keeps the full commit graph (cheap, ~MB-sized)
-        // and pulls blobs on demand.
-        cmd!(sh, "git clone --filter=blob:none {url} {dest}")
-            .run()
-            .unwrap();
+        // Full clone. Earlier iterations tried --depth=1 (missing the manifest
+        // baseline commit) and --filter=blob:none (vcpkg's checkout-index
+        // step triggers on-demand promisor fetches that destabilise libcurl's
+        // threaded DNS resolver on this Windows host — observed reliably as
+        // `getaddrinfo() thread failed to start`). A full clone trades disk
+        // (~1 GB) for not needing network during per-port checkout, which is
+        // the only knob that makes the failure mode go away.
+        cmd!(sh, "git clone {url} {dest}").run().unwrap();
     }
 
     if !bootstrap_marker.exists() {
