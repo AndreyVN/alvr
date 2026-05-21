@@ -151,6 +151,8 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
 ## Phase 7 — stretch (1–2 weeks, optional)
 
 * Quad / cylinder / equirect / cube / passthrough layer support — rasterise into a single projection image before encoding.
+  * ✅ **Slice 1 LANDED 2026-05-21** — diagnostic only. Bridge ABI bumped to v3 with `alvr_oxr_report_layer_types(frame_id, n_quad, n_cylinder, n_equirect, n_cube, n_passthrough)`. `comp_alvr` now reports a per-frame histogram of the non-projection layers it still drops; `metrics_exporter` aggregates into an `oxr_layer_types` JSON section (per-type totals + frame counter). Reveals what kinds of overlays apps actually submit so Slice 2 (Vulkan quad rasterisation) can be prioritised by observed usage. Commit ladder: fork `ae7e32ec2` / alvr `089e9b34` (Rust ABI v3 + aggregator) / alvr `41f7db24` (submodule bump).
+  * ⏸ Slice 2: actual Vulkan rasterisation. Allocate a render target the size of the projection image; for each non-projection layer, run a textured-quad pipeline that draws the layer on top in z-order; hand the composited image to the encoder. Start with `XRT_LAYER_QUAD` (most common XR overlay shape), then add `XRT_LAYER_CYLINDER` (cylindrical-to-flat projection — shader-only diff from quad). EQUIRECT / CUBE / PASSTHROUGH are higher-order surfaces; defer until usage justifies them.
 * Hand-tracking input passthrough (`XR_EXT_hand_tracking`) — wire-compat event; requires `alvr_packets` change → client also rebuilds.
 * `XrSessionStateChanged` events plumbed end-to-end (FOCUSED, VISIBLE, READY).
 * Per-view foveation hint to Monado's distortion shader.
