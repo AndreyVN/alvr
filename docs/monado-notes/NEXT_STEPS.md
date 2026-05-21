@@ -137,8 +137,9 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
 ## Phase 5 — telemetry / dashboard polish (2–3 days)
 
 - Already wired: the `RuntimeMode` selector auto-renders via `SettingsSchema`. No additional dashboard work strictly needed.
-- Telemetry: bridge Monado-side `u_pc_*` markers (from 3.3) up through `alvr_runtime_bridge` and into `alvr_server_core::metrics_exporter`. Existing dashboards keep working unchanged.
-- Configurable runtime install path. Right now `alvr/xtask/src/build_openxr.rs` hard-codes `openxr/` as the Monado source dir. If we make it configurable, surface it as a setting.
+- ✅ **Telemetry bridge LANDED 2026-05-21**: bumped bridge ABI to v2 and added `alvr_oxr_report_pacing` (fork `14608d600`, alvr `f4b3cbf4` + `76717ec2`); wired the Rust-side aggregator (alvr `93a4ca62`). Flow:
+  `comp_alvr::layer_commit` → `alvr_oxr_report_pacing` → `ServerCoreContext::report_oxr_pacing` → `StatisticsManager::report_oxr_pacing` → `metrics_exporter::try_push(Sample::OxrPacing)`. The aggregator now emits an `oxr_pacing` JSON section with `cpu_us` and `submit_us` distributions whenever a window saw at least one frame; field is omitted otherwise so OpenVR-mode snapshots stay byte-identical. **Verification ceiling**: visible in `metrics_exporter`'s POST output only when a real client connects (StatisticsManager is None pre-connection). Confirmed locally via `cargo check -p alvr_server_core -p alvr_server_openvr -p alvr_server_openxr` + a clean `monado-service.exe` boot at ABI v2.
+- Configurable runtime install path. Right now `alvr/xtask/src/build_openxr.rs` hard-codes `openxr/` as the Monado source dir (overridable via `ALVR_MONADO_SOURCE_DIR` env var, but not yet a setting). If we make it a setting, surface it via the same `SettingsSchema` auto-render pattern as `RuntimeMode`.
 
 ## Phase 6 — coexistence + cleanup (2–3 days)
 
