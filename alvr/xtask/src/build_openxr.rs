@@ -10,7 +10,7 @@
 //! cdylib produced by `alvr/server_openxr` is built and locatable, Monado
 //! should be built with `XRT_BUILD_DRIVER_ALVR=OFF`.
 
-use crate::build::Profile;
+use crate::{build::Profile, command};
 use alvr_filesystem as afs;
 use std::{
     env,
@@ -28,6 +28,70 @@ fn openxr_source_dir() -> PathBuf {
 
 fn openxr_build_dir(profile: Profile) -> PathBuf {
     afs::build_dir().join(format!("openxr-{profile}"))
+}
+
+fn thirdparty_dir() -> PathBuf {
+    afs::build_dir().join("_thirdparty")
+}
+
+/// Monado's CMake hard-requires Eigen3 (`find_package(Eigen3 REQUIRED NO_MODULE)`)
+/// at version >= 3.3. On Linux distros this is normally `libeigen3-dev` or
+/// `eigen3-devel`; on Windows there's no choco/install.txt entry today, so we
+/// stage a local install under `build/_thirdparty/eigen-install` and inject it
+/// into `CMAKE_PREFIX_PATH` for the Monado configure step.
+///
+/// Returns the install prefix on Windows, or None on platforms where we trust
+/// the system package manager. Idempotent — second and subsequent calls
+/// short-circuit via the `Eigen3Config.cmake` marker.
+fn ensure_eigen3_windows() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+
+    let install = thirdparty_dir().join("eigen-install");
+    let marker = install.join("share/eigen3/cmake/Eigen3Config.cmake");
+    if marker.exists() {
+        return Some(install);
+    }
+
+    println!("Staging Eigen3 3.4.0 locally for Monado build...");
+
+    let thirdparty = thirdparty_dir();
+    fs::create_dir_all(&thirdparty).unwrap();
+
+    let src_dir = thirdparty.join("eigen-3.4.0");
+    if !src_dir.join("CMakeLists.txt").exists() {
+        // Eigen3 is header-only, but Monado finds it via the installed
+        // Eigen3Config.cmake — so we still go through configure + install.
+        command::download_and_extract_zip(
+            "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip",
+            &thirdparty,
+        )
+        .unwrap();
+    }
+
+    let sh = Shell::new().unwrap();
+    let cfg_build = thirdparty.join("eigen-build");
+    let src_str = src_dir.to_string_lossy().into_owned();
+    let cfg_build_str = cfg_build.to_string_lossy().into_owned();
+    let prefix_arg = format!("-DCMAKE_INSTALL_PREFIX={}", install.to_string_lossy());
+
+    cmd!(
+        sh,
+        "cmake -S {src_str} -B {cfg_build_str} {prefix_arg} -DBUILD_TESTING=OFF -DEIGEN_BUILD_DOC=OFF"
+    )
+    .run()
+    .unwrap();
+
+    cmd!(sh, "cmake --install {cfg_build_str}").run().unwrap();
+
+    assert!(
+        marker.exists(),
+        "Eigen3 install did not produce {}",
+        marker.display()
+    );
+
+    Some(install)
 }
 
 /// Returns Ok(()) if `openxr/` exists and looks like the Monado source tree;
@@ -85,13 +149,20 @@ pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
     let build_str = build.to_string_lossy().into_owned();
     let cmake_type = format!("-DCMAKE_BUILD_TYPE={cmake_build_type}");
 
+    // Stage Monado's hard-required deps that aren't in install.txt / choco today.
+    // The function is per-dep and per-platform; today only Eigen3 on Windows.
+    let mut extra_cmake_args: Vec<String> = Vec::new();
+    if let Some(prefix) = ensure_eigen3_windows() {
+        extra_cmake_args.push(format!("-DCMAKE_PREFIX_PATH={}", prefix.to_string_lossy()));
+    }
+
     println!(
         "Configuring Monado:\n  source  = {src_str}\n  build   = {build_str}\n  profile = {profile}\n  alvr_driver+compositor = {enable_alvr_driver}"
     );
 
     cmd!(
         sh,
-        "cmake -S {src_str} -B {build_str} {cmake_type} {alvr_driver_flag} {alvr_comp_flag}"
+        "cmake -S {src_str} -B {build_str} {cmake_type} {extra_cmake_args...} {alvr_driver_flag} {alvr_comp_flag}"
     )
     .run()
     .unwrap();
