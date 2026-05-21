@@ -143,7 +143,7 @@ Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `
 
 ## Phase 6 — coexistence + cleanup (2–3 days)
 
-- Launcher: surface the runtime selector in `alvr/launcher/` if needed. (Today only the dashboard exposes it.)
+- ✅ **Launcher GUI runtime selector LANDED 2026-05-21**. The launcher now reads `session_settings.extra.runtime.variant` for each installation, shows it as a `[SteamVR (OpenVR)]` / `[Monado (OpenXR) — preview]` badge next to the version, and the Edit popup exposes a ComboBox that writes back to `session.json` via `serde_json::Value` manipulation (no schema round-trip — preserves all other fields byte-for-byte). Windows-only (the launcher already gates session-file handling on `cfg!(windows)` per the existing comment). **Verification ceiling**: `cargo check`/`build`/`clippy -p alvr_launcher` all clean, launcher starts without panic on a host with no installations; in-app interaction with a real ALVR installation (read existing variant, switch it, observe re-launched dashboard pick up the change) is not exercised here.
 - CI: add a Windows job that builds with `XRT_BUILD_DRIVER_ALVR=ON XRT_FEATURE_COMP_ALVR=ON` and runs unit tests.
 - Update `CLAUDE.md` with `alvr_server_openxr` in the crate map and a note about the new runtime mode.
 - Update `ARCHITECTURE.md` with the OpenXR-runtime data flow diagram.
