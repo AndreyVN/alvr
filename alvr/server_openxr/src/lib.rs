@@ -304,7 +304,13 @@ fn event_loop(
 /// different bridge surface than the driver's compiled header expected
 /// (typically: somebody rebuilt one half without bumping the submodule
 /// pointer for the other half).
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 1;
+///
+/// History:
+/// - v1: initial surface (Phase 3.1 / 3.2).
+/// - v2: added [`alvr_oxr_report_pacing`] so the Monado-side compositor can
+///   forward per-frame `u_pc_*` timing data into `alvr_server_core`'s
+///   metrics exporter (Phase 5 telemetry bridge).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 2;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -766,6 +772,41 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
 ) -> AlvrOxrResult {
     let _ = (frame_id, layer_count, layers, sync_handle);
     AlvrOxrResult::NotImplemented
+}
+
+/// Report per-frame compositor pacing timestamps for telemetry.
+///
+/// Called by the Monado-side `comp_alvr` after the `layer_commit` pacing
+/// markers fire (matches `u_pc_mark_point` semantics):
+/// - `begin_ns` — start of compositor work for this frame
+///   (`U_TIMING_POINT_BEGIN`).
+/// - `submit_begin_ns` — moment work is handed to the GPU/encoder, i.e.
+///   just before [`alvr_oxr_submit_layers`] (`U_TIMING_POINT_SUBMIT_BEGIN`).
+/// - `submit_end_ns` — moment the handoff completed
+///   (`U_TIMING_POINT_SUBMIT_END`).
+///
+/// All timestamps are in nanoseconds from the same monotonic clock used by
+/// `u_pacing` (`os_monotonic_get_ns()`). The bridge intentionally accepts
+/// raw timestamps rather than pre-computed deltas so the Rust side can build
+/// any window/aggregation shape it likes.
+///
+/// Today the implementation is a no-op stub — added in ABI v2 so the
+/// Monado-side call site can land alongside the contract; the metrics-
+/// exporter aggregator wiring lands as a follow-up Rust-only change.
+/// Returns `Ok` even in the stub state so the compositor doesn't log a
+/// failure every frame.
+///
+/// # Safety
+/// Always safe to call. Takes only `Copy` POD values.
+#[unsafe(no_mangle)]
+pub extern "C" fn alvr_oxr_report_pacing(
+    frame_id: i64,
+    begin_ns: i64,
+    submit_begin_ns: i64,
+    submit_end_ns: i64,
+) -> AlvrOxrResult {
+    let _ = (frame_id, begin_ns, submit_begin_ns, submit_end_ns);
+    AlvrOxrResult::Ok
 }
 
 /// Session-event type discriminant. Mirrors `enum xrt_session_event_type`

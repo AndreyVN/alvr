@@ -28,8 +28,14 @@
  * different bridge surface than the driver's compiled header expected
  * (typically: somebody rebuilt one half without bumping the submodule
  * pointer for the other half).
+ *
+ * History:
+ * - v1: initial surface (Phase 3.1 / 3.2).
+ * - v2: added [`alvr_oxr_report_pacing`] so the Monado-side compositor can
+ *   forward per-frame `u_pc_*` timing data into `alvr_server_core`'s
+ *   metrics exporter (Phase 5 telemetry bridge).
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 1
+#define ALVR_OXR_BRIDGE_ABI_VERSION 2
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -324,6 +330,37 @@ AlvrOxrResult alvr_oxr_submit_layers(int64_t frame_id,
                                      uint32_t layer_count,
                                      const struct AlvrOxrLayer *layers,
                                      uint64_t sync_handle);
+
+/**
+ * Report per-frame compositor pacing timestamps for telemetry.
+ *
+ * Called by the Monado-side `comp_alvr` after the `layer_commit` pacing
+ * markers fire (matches `u_pc_mark_point` semantics):
+ * - `begin_ns` — start of compositor work for this frame
+ *   (`U_TIMING_POINT_BEGIN`).
+ * - `submit_begin_ns` — moment work is handed to the GPU/encoder, i.e.
+ *   just before [`alvr_oxr_submit_layers`] (`U_TIMING_POINT_SUBMIT_BEGIN`).
+ * - `submit_end_ns` — moment the handoff completed
+ *   (`U_TIMING_POINT_SUBMIT_END`).
+ *
+ * All timestamps are in nanoseconds from the same monotonic clock used by
+ * `u_pacing` (`os_monotonic_get_ns()`). The bridge intentionally accepts
+ * raw timestamps rather than pre-computed deltas so the Rust side can build
+ * any window/aggregation shape it likes.
+ *
+ * Today the implementation is a no-op stub — added in ABI v2 so the
+ * Monado-side call site can land alongside the contract; the metrics-
+ * exporter aggregator wiring lands as a follow-up Rust-only change.
+ * Returns `Ok` even in the stub state so the compositor doesn't log a
+ * failure every frame.
+ *
+ * # Safety
+ * Always safe to call. Takes only `Copy` POD values.
+ */
+AlvrOxrResult alvr_oxr_report_pacing(int64_t frame_id,
+                                     int64_t begin_ns,
+                                     int64_t submit_begin_ns,
+                                     int64_t submit_end_ns);
 
 /**
  * Poll one session event from the bridge. Returns
