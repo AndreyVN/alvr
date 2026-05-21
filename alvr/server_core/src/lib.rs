@@ -530,6 +530,24 @@ impl ServerCoreContext {
         }
     }
 
+    /// Forward an OpenXR-mode per-frame layer-type histogram into the metrics
+    /// exporter. Called from the bridge's `alvr_oxr_report_layer_types`
+    /// (ABI v3) — see that function for the count semantics.
+    pub fn report_oxr_layer_types(
+        &self,
+        quad: u32,
+        cylinder: u32,
+        equirect: u32,
+        cube: u32,
+        passthrough: u32,
+    ) {
+        dbg_server_core!("report_oxr_layer_types");
+
+        if let Some(stats) = self.connection_context.statistics_manager.read().as_ref() {
+            stats.report_oxr_layer_types(quad, cylinder, equirect, cube, passthrough);
+        }
+    }
+
     pub fn restart(self) {
         dbg_server_core!("restart");
 

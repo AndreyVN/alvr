@@ -310,7 +310,11 @@ fn event_loop(
 /// - v2: added [`alvr_oxr_report_pacing`] so the Monado-side compositor can
 ///   forward per-frame `u_pc_*` timing data into `alvr_server_core`'s
 ///   metrics exporter (Phase 5 telemetry bridge).
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 2;
+/// - v3: added [`alvr_oxr_report_layer_types`] so the compositor can report
+///   per-frame counts of submitted non-projection layer types (quad /
+///   cylinder / equirect / cube / passthrough) that the runtime currently
+///   drops (Phase 7 Slice 1; diagnostic before quad rasterisation lands).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 3;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -810,6 +814,40 @@ pub extern "C" fn alvr_oxr_report_pacing(
     let _ = frame_id;
     if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
         ctx.report_oxr_pacing(begin_ns, submit_begin_ns, submit_end_ns);
+    }
+    AlvrOxrResult::Ok
+}
+
+/// Report per-frame counts of non-projection layers the compositor saw.
+///
+/// `comp_alvr` currently passes only `XRT_LAYER_PROJECTION` /
+/// `XRT_LAYER_PROJECTION_DEPTH` layers to the encoder and drops everything
+/// else. This entrypoint lets it report what was dropped so the metrics
+/// exporter can surface "what kinds of overlays do real apps actually
+/// submit" — a useful prior for Phase 7 rasterisation work (build quad
+/// support first if most apps submit quads, etc.).
+///
+/// Each `n_*` count is the number of layers of that type on this single
+/// frame. Frame-id is taken purely so future versions can correlate with
+/// the pacing sample for the same frame; the current aggregator does not
+/// retain it.
+///
+/// Always returns `Ok`. Drops silently when no client is connected.
+///
+/// # Safety
+/// Always safe to call. Takes only `Copy` POD values.
+#[unsafe(no_mangle)]
+pub extern "C" fn alvr_oxr_report_layer_types(
+    frame_id: i64,
+    n_quad: u32,
+    n_cylinder: u32,
+    n_equirect: u32,
+    n_cube: u32,
+    n_passthrough: u32,
+) -> AlvrOxrResult {
+    let _ = frame_id;
+    if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
+        ctx.report_oxr_layer_types(n_quad, n_cylinder, n_equirect, n_cube, n_passthrough);
     }
     AlvrOxrResult::Ok
 }

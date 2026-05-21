@@ -217,6 +217,32 @@ impl StatisticsManager {
         }
     }
 
+    /// Forward an OpenXR-mode per-frame layer-type histogram. ABI v3.
+    /// Sampled even on frames where every count is zero so window-level
+    /// "frames with no overlays" stays distinguishable from "no client
+    /// connected".
+    pub fn report_oxr_layer_types(
+        &self,
+        quad: u32,
+        cylinder: u32,
+        equirect: u32,
+        cube: u32,
+        passthrough: u32,
+    ) {
+        if let Some(sender) = &self.metrics_sender {
+            metrics_exporter::try_push(
+                sender,
+                Sample::OxrLayerTypes {
+                    quad,
+                    cylinder,
+                    equirect,
+                    cube,
+                    passthrough,
+                },
+            );
+        }
+    }
+
     pub fn report_throughput_stats(&mut self, stats: BitrateDirectives) {
         self.last_throughput_directives = stats.clone();
 

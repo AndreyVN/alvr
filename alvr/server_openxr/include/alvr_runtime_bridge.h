@@ -34,8 +34,12 @@
  * - v2: added [`alvr_oxr_report_pacing`] so the Monado-side compositor can
  *   forward per-frame `u_pc_*` timing data into `alvr_server_core`'s
  *   metrics exporter (Phase 5 telemetry bridge).
+ * - v3: added [`alvr_oxr_report_layer_types`] so the compositor can report
+ *   per-frame counts of submitted non-projection layer types (quad /
+ *   cylinder / equirect / cube / passthrough) that the runtime currently
+ *   drops (Phase 7 Slice 1; diagnostic before quad rasterisation lands).
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 2
+#define ALVR_OXR_BRIDGE_ABI_VERSION 3
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -348,11 +352,13 @@ AlvrOxrResult alvr_oxr_submit_layers(int64_t frame_id,
  * raw timestamps rather than pre-computed deltas so the Rust side can build
  * any window/aggregation shape it likes.
  *
- * Today the implementation is a no-op stub — added in ABI v2 so the
- * Monado-side call site can land alongside the contract; the metrics-
- * exporter aggregator wiring lands as a follow-up Rust-only change.
- * Returns `Ok` even in the stub state so the compositor doesn't log a
- * failure every frame.
+ * Forwards the sample into `alvr_server_core`'s metrics exporter via
+ * [`ServerCoreContext::report_oxr_pacing`]. The metrics aggregator
+ * derives CPU and submit durations and exports them in the standard
+ * per-window snapshot under the `oxr_pacing` field. Drops silently when
+ * no client is connected (no metrics sender wired up yet) or when the
+ * bridge context is not initialised. Always returns `Ok` so the
+ * compositor doesn't log a per-frame failure.
  *
  * # Safety
  * Always safe to call. Takes only `Copy` POD values.
@@ -361,6 +367,33 @@ AlvrOxrResult alvr_oxr_report_pacing(int64_t frame_id,
                                      int64_t begin_ns,
                                      int64_t submit_begin_ns,
                                      int64_t submit_end_ns);
+
+/**
+ * Report per-frame counts of non-projection layers the compositor saw.
+ *
+ * `comp_alvr` currently passes only `XRT_LAYER_PROJECTION` /
+ * `XRT_LAYER_PROJECTION_DEPTH` layers to the encoder and drops everything
+ * else. This entrypoint lets it report what was dropped so the metrics
+ * exporter can surface "what kinds of overlays do real apps actually
+ * submit" — a useful prior for Phase 7 rasterisation work (build quad
+ * support first if most apps submit quads, etc.).
+ *
+ * Each `n_*` count is the number of layers of that type on this single
+ * frame. Frame-id is taken purely so future versions can correlate with
+ * the pacing sample for the same frame; the current aggregator does not
+ * retain it.
+ *
+ * Always returns `Ok`. Drops silently when no client is connected.
+ *
+ * # Safety
+ * Always safe to call. Takes only `Copy` POD values.
+ */
+AlvrOxrResult alvr_oxr_report_layer_types(int64_t frame_id,
+                                          uint32_t n_quad,
+                                          uint32_t n_cylinder,
+                                          uint32_t n_equirect,
+                                          uint32_t n_cube,
+                                          uint32_t n_passthrough);
 
 /**
  * Poll one session event from the bridge. Returns

@@ -39,6 +39,18 @@ pub enum Sample {
         submit_begin_ns: i64,
         submit_end_ns: i64,
     },
+    /// OpenXR-mode per-frame histogram of non-projection layer types the
+    /// compositor saw. Today `comp_alvr` drops everything that isn't
+    /// `XRT_LAYER_PROJECTION{,_DEPTH}` — this sample surfaces "what types
+    /// of layers do real apps actually submit?" so Phase 7 quad/cylinder
+    /// rasterisation work can be prioritised by observed usage.
+    OxrLayerTypes {
+        quad: u32,
+        cylinder: u32,
+        equirect: u32,
+        cube: u32,
+        passthrough: u32,
+    },
 }
 
 pub struct ExporterConfig {
@@ -119,6 +131,17 @@ struct Aggregator {
     oxr_submit_us: Acc,
     oxr_pacing_frames: u32,
 
+    // OpenXR-mode dropped-layer histogram. Per-type counts summed over the
+    // window; `oxr_layer_types_frames` counts how many frames reported (so
+    // "average per frame" is derivable). Separate from `oxr_pacing_frames`
+    // because the two samples can in principle arrive at different rates.
+    oxr_layer_quad_total: u64,
+    oxr_layer_cylinder_total: u64,
+    oxr_layer_equirect_total: u64,
+    oxr_layer_cube_total: u64,
+    oxr_layer_passthrough_total: u64,
+    oxr_layer_types_frames: u32,
+
     // Last-value state (carried across windows).
     last_battery_hmd_pct: Option<u32>,
     last_battery_hmd_plugged: bool,
@@ -193,6 +216,20 @@ impl Aggregator {
                 self.oxr_cpu_us.push(cpu_us.max(0.0));
                 self.oxr_submit_us.push(submit_us.max(0.0));
                 self.oxr_pacing_frames += 1;
+            }
+            Sample::OxrLayerTypes {
+                quad,
+                cylinder,
+                equirect,
+                cube,
+                passthrough,
+            } => {
+                self.oxr_layer_quad_total += quad as u64;
+                self.oxr_layer_cylinder_total += cylinder as u64;
+                self.oxr_layer_equirect_total += equirect as u64;
+                self.oxr_layer_cube_total += cube as u64;
+                self.oxr_layer_passthrough_total += passthrough as u64;
+                self.oxr_layer_types_frames += 1;
             }
         }
     }
@@ -289,6 +326,21 @@ impl Aggregator {
             })
         });
 
+        // OpenXR per-frame layer-type histogram. Phase 7 Slice 1 diagnostic:
+        // tells us what kinds of non-projection layers (currently dropped by
+        // comp_alvr) real apps submit, so the upcoming Vulkan rasterisation
+        // work can be prioritised. Omitted when no OXR-mode frames reported.
+        let oxr_layer_types = (self.oxr_layer_types_frames > 0).then(|| {
+            json!({
+                "frames": self.oxr_layer_types_frames,
+                "quad_total": self.oxr_layer_quad_total,
+                "cylinder_total": self.oxr_layer_cylinder_total,
+                "equirect_total": self.oxr_layer_equirect_total,
+                "cube_total": self.oxr_layer_cube_total,
+                "passthrough_total": self.oxr_layer_passthrough_total,
+            })
+        });
+
         let snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "host": host,
@@ -303,6 +355,7 @@ impl Aggregator {
             "client_telemetry": client_telemetry,
             "bitrate_directives": self.last_bitrate_directives,
             "oxr_pacing": oxr_pacing,
+            "oxr_layer_types": oxr_layer_types,
             "exporter": { "failed_posts": self.failed_posts },
         });
 
@@ -326,6 +379,12 @@ impl Aggregator {
         self.oxr_cpu_us = Acc::default();
         self.oxr_submit_us = Acc::default();
         self.oxr_pacing_frames = 0;
+        self.oxr_layer_quad_total = 0;
+        self.oxr_layer_cylinder_total = 0;
+        self.oxr_layer_equirect_total = 0;
+        self.oxr_layer_cube_total = 0;
+        self.oxr_layer_passthrough_total = 0;
+        self.oxr_layer_types_frames = 0;
         self.window_start_packets = self.video_packets_total;
         self.window_start_bytes = self.video_bytes_total;
 
