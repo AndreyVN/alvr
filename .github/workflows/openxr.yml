@@ -26,9 +26,16 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
+      # The `openxr/` submodule is a private fork (AndreyVN/monado @ alvr
+      # branch) that the default GITHUB_TOKEN can't reach. Repo settings
+      # must define a `MONADO_PAT` Actions secret containing a PAT with
+      # at least `Contents: read` on AndreyVN/monado (fine-grained PAT)
+      # or the classic `repo` scope. Without it the submodule clone 404s
+      # and every subsequent step is skipped.
       - uses: actions/checkout@v6
         with:
           submodules: true
+          token: ${{ secrets.MONADO_PAT }}
 
       - uses: dtolnay/rust-toolchain@stable
 
