@@ -297,7 +297,72 @@ pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
 
     println!("Monado build finished. Artifacts in {build_str}");
 
+    deploy_bridge_cdylib(&build, profile);
     publish_active_runtime_manifest(&build);
+}
+
+/// Copy the alvr_server_openxr cdylib next to monado-service.exe so the loader
+/// resolves it at process start. Monado's CMake doesn't auto-deploy the cdylib
+/// to the service target dir (it's an IMPORTED library, not built by CMake) —
+/// without this step monado-service.exe exits with STATUS_DLL_NOT_FOUND on
+/// startup, which is exactly the behaviour observed during the Gate B smoke
+/// test before the manual copy.
+///
+/// Windows-only for now (.dll layout). On Linux the .so would normally live on
+/// the linker's rpath via the same `target_link_directories` hint; revisit if
+/// that ever breaks.
+fn deploy_bridge_cdylib(build_dir: &Path, profile: Profile) {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+
+    let dll_name = "alvr_server_openxr.dll";
+    let cargo_profile_dir = match profile {
+        Profile::Debug => "debug",
+        Profile::Release | Profile::Distribution => "release",
+    };
+    let src = afs::target_dir().join(cargo_profile_dir).join(dll_name);
+    if !src.exists() {
+        eprintln!(
+            "warning: {} not found — build the bridge first via `cargo build -p alvr_server_openxr{}`. \
+             monado-service.exe will exit with STATUS_DLL_NOT_FOUND until this is resolved.",
+            src.display(),
+            if matches!(profile, Profile::Debug) { "" } else { " --release" }
+        );
+        return;
+    }
+
+    // Multi-config generators (Visual Studio, Xcode) put the exe under a per-
+    // config subdir of the service target dir; single-config puts it directly.
+    let service_dir_root = build_dir.join("src/xrt/targets/service");
+    let candidates = ["Debug", "Release", "RelWithDebInfo", "MinSizeRel"]
+        .iter()
+        .map(|cfg| service_dir_root.join(cfg))
+        .chain(std::iter::once(service_dir_root.clone()))
+        .filter(|p| p.join("monado-service.exe").exists());
+
+    let mut deployed = 0;
+    for dst_dir in candidates {
+        let dst = dst_dir.join(dll_name);
+        match fs::copy(&src, &dst) {
+            Ok(_) => {
+                println!("Deployed {} -> {}", src.display(), dst.display());
+                deployed += 1;
+            }
+            Err(err) => eprintln!(
+                "warning: failed to copy {} -> {}: {err}",
+                src.display(),
+                dst.display()
+            ),
+        }
+    }
+
+    if deployed == 0 {
+        eprintln!(
+            "warning: no monado-service.exe found under {} — cdylib deploy skipped.",
+            service_dir_root.display()
+        );
+    }
 }
 
 /// Stable filename for the runtime manifest. The launcher (Phase 4.2) will
