@@ -9,12 +9,19 @@ use std::{
     env,
     fs::{self, File},
     io::{Cursor, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{Receiver, Sender},
 };
 
 const APK_NAME: &str = "client.apk";
+
+/// Serde variant names for `alvr_session::RuntimeMode`. Stable across the
+/// schema — bumping these requires a session migration. Kept as bare consts
+/// rather than re-exported from `alvr_session` so the launcher does not need
+/// to depend on the (heavy) settings-schema crate just for two strings.
+pub const RUNTIME_MODE_STEAMVR: &str = "Steamvr";
+pub const RUNTIME_MODE_OPENXR: &str = "Openxr";
 
 pub fn installations_dir() -> PathBuf {
     data_dir().join("installations")
@@ -322,6 +329,60 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// Locate the session.json belonging to an installation, or `None` if the
+/// installation tree isn't shaped like a streamer install (e.g. macOS or a
+/// stripped-down deploy).
+fn session_path_for(installation_dir: &Path) -> Option<PathBuf> {
+    alvr_filesystem::filesystem_layout_from_openvr_driver_root_dir(installation_dir)
+        .map(|layout| layout.session())
+}
+
+/// Read `session_settings.extra.runtime.variant` from an installation's
+/// session.json. Returns `None` when the file is missing, malformed, or the
+/// field doesn't exist (e.g. a version that pre-dates `RuntimeMode`).
+pub fn read_runtime_mode(installation_dir: &Path) -> Option<String> {
+    let path = session_path_for(installation_dir)?;
+    let bytes = fs::read(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("session_settings")?
+        .get("extra")?
+        .get("runtime")?
+        .get("variant")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Set `session_settings.extra.runtime.variant` in-place in an installation's
+/// session.json. Reads → mutates → writes the same file. The schema's other
+/// fields are preserved byte-for-byte (we never round-trip through the typed
+/// `SessionConfig` here, only through `serde_json::Value`).
+///
+/// Caller is responsible for passing a value the schema accepts — today that's
+/// `"Steamvr"` or `"Openxr"` (see the `RUNTIME_MODE_*` consts).
+pub fn write_runtime_mode(installation_dir: &Path, variant: &str) -> Result<()> {
+    let path = session_path_for(installation_dir)
+        .with_context(|| format!("No session layout for {}", installation_dir.display()))?;
+    let bytes = fs::read(&path)
+        .with_context(|| format!("Failed to read session.json at {}", path.display()))?;
+    let mut json: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("Failed to parse session.json at {}", path.display()))?;
+
+    let runtime = json
+        .get_mut("session_settings")
+        .and_then(|v| v.get_mut("extra"))
+        .and_then(|v| v.get_mut("runtime"))
+        .with_context(|| "session.json has no session_settings.extra.runtime field")?;
+    runtime
+        .as_object_mut()
+        .with_context(|| "runtime field is not an object")?
+        .insert("variant".to_owned(), serde_json::Value::String(variant.to_owned()));
+
+    let serialized = serde_json::to_vec_pretty(&json)?;
+    fs::write(&path, serialized)
+        .with_context(|| format!("Failed to write session.json at {}", path.display()))?;
+    Ok(())
+}
+
 pub fn get_installations() -> Vec<InstallationInfo> {
     match fs::read_dir(installations_dir()) {
         Ok(entries) => entries
@@ -337,21 +398,30 @@ pub fn get_installations() -> Vec<InstallationInfo> {
                         }
                     })
                     .map(|entry| {
-                        let has_session_json = if cfg!(windows) {
-                            alvr_filesystem::filesystem_layout_from_openvr_driver_root_dir(
-                                &entry.path(),
-                            )
-                            .map(|layout| layout.session().exists())
-                            .unwrap_or(false)
+                        let installation_dir = entry.path();
+                        let (has_session_json, runtime_mode) = if cfg!(windows) {
+                            let session_exists =
+                                alvr_filesystem::filesystem_layout_from_openvr_driver_root_dir(
+                                    &installation_dir,
+                                )
+                                .map(|layout| layout.session().exists())
+                                .unwrap_or(false);
+                            let mode = if session_exists {
+                                read_runtime_mode(&installation_dir)
+                            } else {
+                                None
+                            };
+                            (session_exists, mode)
                         } else {
                             // On linux, the launcher does not need to manage the session files
-                            false
+                            (false, None)
                         };
 
                         InstallationInfo {
                             version: entry.file_name().to_string_lossy().into(),
-                            is_apk_downloaded: entry.path().join(APK_NAME).exists(),
+                            is_apk_downloaded: installation_dir.join(APK_NAME).exists(),
                             has_session_json,
+                            runtime_mode,
                         }
                     })
             })

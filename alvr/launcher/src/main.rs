@@ -42,6 +42,11 @@ pub struct InstallationInfo {
     version: String,
     is_apk_downloaded: bool,
     has_session_json: bool, // Only relevant on Windows
+    // Stored as the raw serde variant name from the schema ("Steamvr" / "Openxr").
+    // None when session.json is missing or doesn't have the field (e.g. older versions
+    // pre-dating the RuntimeMode option). Windows only — Linux launcher doesn't
+    // manage session files.
+    runtime_mode: Option<String>,
 }
 
 fn main() {
