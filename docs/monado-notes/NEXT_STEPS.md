@@ -104,9 +104,19 @@ Reference impl: `alvr/server_openvr/src/lib.rs`. Notable deviations from OpenVR 
 
 **Verification ceiling** for all three sub-slices: `cargo xtask build-openxr-runtime --enable-alvr-driver` on this Windows host fails at Monado's CMake configure for upstream Eigen3 dep (not installed locally, not mentioned in `install.txt`, no vcpkg). The compositor-side code is structurally consistent with the `null_compositor` reference + the existing `drv_alvr` build wiring, so end-to-end compile gate stays open until Eigen3 is installed or a different verification host is used.
 
-### 3.3 — Frame pacing markers
+### 3.3 — Frame pacing markers — LANDED 2026-05-21
 
-In `comp_alvr.c`, call `u_pc_mark_point(POINT_SUBMIT_END, ...)` at the right point so Monado's compositor pacer learns ALVR's actual present cadence. See `auxiliary/util/u_pacing.h` for the interface and `compositor/main/comp_compositor.c` for the existing usage.
+`comp_alvr.c::layer_commit` previously stacked `BEGIN`, `SUBMIT_BEGIN`, and `SUBMIT_END` at the end of the function (same as `null_compositor`, which does no real work). With `alvr_oxr_submit_layers` doing real work in between — and the Vulkan-input NVENC body landing as Slice 3.3 — the pacer was learning nothing about ALVR's submission cost. Fork commit `4cce895cd` re-positions the markers to bookend the bridge call, matching `compositor/main/comp_target_swapchain.c` around its present:
+
+| Marker | Position |
+| --- | --- |
+| `U_TIMING_POINT_BEGIN` | start of `layer_commit`, after `frame_id` is read |
+| `U_TIMING_POINT_SUBMIT_BEGIN` | immediately before the layer pack loop closes / right before `alvr_oxr_submit_layers` |
+| `U_TIMING_POINT_SUBMIT_END` | immediately after the bridge call returns |
+
+Markers run unconditionally even on no-layer frames so the per-frame state machine stays consistent. Verification ceiling: `comp_alvr_create_system_compositor` now runs in-process (`Using builder alvr: ALVR (streamed)` + `ALVR compositor ready` in the boot log); the actual pacer learning behaviour is observable once a client connects and frames flow (hardware-gated, Slice 3.3+).
+
+**Latent comp_alvr-not-selected bug fixed in the same session** (fork commit `56466ce47`). `XRT_FEATURE_COMP_ALVR` was set as a CMake option and the comp_alvr target was being built + linked into `target_instance`, but the `#ifdef XRT_FEATURE_COMP_ALVR` guard in `targets/common/target_instance.c` was never true at compile time because the feature wasn't listed in `xrt_config_build.h.cmake_in`. Result: `target_instance` silently fell through to `comp_main_create_system_compositor`, and `comp_alvr_create_system_compositor` was unreachable despite a clean build and clean boot. This is the same class of "static link success doesn't prove dynamic behaviour" pattern that surfaced earlier this session (latent-bug list below). For future Monado-side touches, **always grep the boot log for the specific factory function name, not just for the builder/driver name**.
 
 ### 3.4 — End-to-end smoke
 
