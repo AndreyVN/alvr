@@ -1,0 +1,52 @@
+name: OpenXR runtime (Monado)
+
+# Runs the Monado build with the ALVR driver + compositor enabled. Separate
+# from rust.yml because it's slower (vcpkg manifest install on cold cache is
+# 15-45 min) and only meaningful for the openxr branch. Gated on push events
+# initially — once the vcpkg cache is proven warm we can extend to PRs.
+
+on:
+  push:
+    branches: [openxr, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # vcpkg's installed/ tree is what the per-port builds produce; caching
+      # it across runs keeps the build under 5 min once warm. The cache key
+      # is the hash of Monado's vcpkg.json + builtin-baseline — change either
+      # and we rebuild from scratch.
+      - name: Cache vcpkg installs
+        uses: actions/cache@v4
+        with:
+          path: build/_thirdparty/vcpkg/installed
+          key: vcpkg-windows-${{ hashFiles('openxr/vcpkg.json') }}
+
+      - name: Prepare ALVR deps
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo xtask prepare-deps --platform windows
+
+      # The Monado-side ALVR driver + compositor link against this cdylib;
+      # build it first so the .dll.lib import lib exists for the IMPORTED
+      # target in drivers/alvr/CMakeLists.txt and compositor/alvr/CMakeLists.txt.
+      - name: Build alvr_server_openxr cdylib
+        run: cargo build -p alvr_server_openxr
+
+      - name: Build OpenXR runtime
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo xtask build-openxr-runtime --enable-alvr-driver
