@@ -59,3 +59,13 @@ jobs:
         env:
           RUST_BACKTRACE: 1
         run: cargo xtask build-openxr-runtime --enable-alvr-driver
+
+      # Runs Monado's own CTest suite (25 binaries, ~3759 assertions). Each
+      # test was registered with `--success --allow-running-no-tests` in
+      # openxr/tests/CMakeLists.txt, so the GPU-only `[.][needgpu]` cases
+      # (D3D11/12 + Vulkan compositor clients) report "No tests ran" and
+      # exit 0 on the GPU-less Actions runner instead of failing. Real-GPU
+      # coverage of those cases lives on the 192.168.10.101 dev host.
+      - name: Run Monado test suite
+        working-directory: build/openxr-debug
+        run: ctest -C Debug --output-on-failure
