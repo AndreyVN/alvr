@@ -22,7 +22,14 @@ use std::{
 use sysinfo::System;
 use xshell::{Shell, cmd};
 
+/// Where to find Monado source. Defaults to the vendored submodule at
+/// `<workspace>/openxr/`. Override with `ALVR_MONADO_SOURCE_DIR` to point at a
+/// sibling clone (e.g., a local fork that hasn't been pushed + submodule-bumped
+/// yet) without churning the alvr-repo submodule pointer for every iteration.
 fn openxr_source_dir() -> PathBuf {
+    if let Some(custom) = env::var_os("ALVR_MONADO_SOURCE_DIR").filter(|s| !s.is_empty()) {
+        return PathBuf::from(custom);
+    }
     afs::workspace_dir().join("openxr")
 }
 
