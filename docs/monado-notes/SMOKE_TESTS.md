@@ -16,13 +16,12 @@ When a test passes, move it to a "Verified on … with … on YYYY-MM-DD" line a
 
 `cargo check -p alvr_server_openxr -p alvr_xtask -p alvr_dashboard` clean. `cargo xtask clippy --ci` clean. This is the gate every PR has to clear before consideration; routinely run from CI. **Rust side as of this branch: clean** (verified locally after each slice).
 
-**Monado-side compile gate (`cargo xtask build-openxr-runtime --enable-alvr-driver`)** is the stronger version of Gate A and is currently blocked on Monado's upstream CMake dep list. Verified 2026-05-21 on the Windows refactoring host:
-- **vcpkg path (default)**: `ensure_vcpkg_windows()` in `build_openxr.rs` clones `microsoft/vcpkg` (blobless partial clone, ~25 MB) into `build/_thirdparty/vcpkg`, bootstraps it, and threads `-DCMAKE_TOOLCHAIN_FILE=...\vcpkg.cmake` into Monado's CMake invocation. Monado's `vcpkg.json` then declares the full dep set (`pthreads`, `wil`, `cjson`, `eigen3`, `glslang`, `vulkan`, plus `libusb`, `hidapi`, `sdl2` from the default features). Closes the entire dep cascade in one shot when it works. Wired up `b83fc78c`.
-- **Verification on this host**: vcpkg engages correctly through the manifest baseline step but per-port `git fetch` calls fail with `getaddrinfo() thread failed to start` under parallel checkout — environmental DNS flakiness, not in the wiring. Retry on a host with stable outbound network, or set `GIT_CONFIG_PARAMETERS='fetch.parallel=1'` to serialize git's parallel fetches.
+**Monado-side compile gate (`cargo xtask build-openxr-runtime --enable-alvr-driver`)** is the stronger version of Gate A. **Verified 2026-05-21 on the Windows refactoring host** — see the Verification log below. The path:
+- **vcpkg path (default)**: `ensure_vcpkg_windows()` in `build_openxr.rs` clones `microsoft/vcpkg` (full clone) into `build/_thirdparty/vcpkg`, bootstraps it, and threads `-DCMAKE_TOOLCHAIN_FILE=...\vcpkg.cmake` into Monado's CMake invocation. Monado's `vcpkg.json` then declares the full dep set (`pthreads`, `wil`, `cjson`, `eigen3`, `glslang`, `vulkan`, plus `libusb`, `hidapi`, `sdl2` from the default features). One-shot dep closure on first run.
+- **First-run cost**: vcpkg clone (~1 GB git tree, ~3 min) + bootstrap (~1 min) + per-port build (~15–30 min depending on cores). Subsequent runs reuse the installed ports.
+- **Stale partial-clone defense** (`2646cfe1`): early code paths used `--filter=blob:none` which trips vcpkg's `checkout-index` step under Windows DNS-resolver pressure. `ensure_vcpkg_windows()` now refuses to reuse such a clone and prints the `rd /s /q` remediation command.
 - **Per-dep fallback** (`ALVR_OPENXR_SKIP_VCPKG=1`): the older `ensure_eigen3_windows()` path (`d78e35ab`) stays available as a last resort. Closes Eigen3 only; subsequent REQUIREDs (`pthreads_windows` / PThreads4W next) would need their own `ensure_*_windows()` helpers mirroring the Eigen3 shape.
-- **Optionals** Monado lists but doesn't fatal-error on: HIDAPI, bluetooth, OpenHMD, OpenCV, libusb1, JPEG, realsense2, depthai, SDL2, ZLIB, cJSON, LeapV2, LeapSDK, ONNXRuntime, wil. Mostly HID-driver / vision-pipeline deps the ALVR build path doesn't exercise.
-
-Until `getaddrinfo` flakiness clears (or a different verification host is used), the compositor-side Phase 3.2 code lives at "structurally consistent with `null_compositor` reference + `drv_alvr` wiring, vcpkg integration wired but unproven end-to-end".
+- **Optionals** Monado lists but doesn't fatal-error on: bluetooth, OpenHMD, OpenCV, JPEG, realsense2, depthai, ZLIB, LeapV2, LeapSDK, ONNXRuntime. Mostly HID-driver / vision-pipeline deps the ALVR build path doesn't exercise.
 
 ## Gate B — bridge ABI version contract
 
@@ -130,4 +129,4 @@ After: `cargo xtask unregister-openxr-runtime --release` and `cargo xtask regist
 
 ## Verification log
 
-(Append "Verified on … with … on YYYY-MM-DD" lines as gates pass. Empty today — no verification host run yet on this branch.)
+- **Gate A (Monado-side compile)** — Verified on Windows 11 Pro 26200 (MSVC 14.44.35207, CMake 4.3.2, Vulkan SDK 1.4.341.0, vcpkg auto-clone) on 2026-05-21. Tip commits at verification: alvr `a70396e8`, openxr submodule `897ff32d4`. `cargo xtask build-openxr-runtime --enable-alvr-driver` ran to completion: vcpkg installed the full Monado dep set from `vcpkg.json` (pthreads, wil, cjson, eigen3, glslang, vulkan-loader, libusb, hidapi, sdl2), Monado configured + built all targets including `comp_alvr.lib` and `drv_alvr.lib`, `monado-service.exe` linked against the `alvr_server_openxr.dll` bridge cdylib via the IMPORTED-target wiring, and `active_runtime_alvr.json` published under `build/openxr-debug/`. Gates B–G still doc-only (require an active client + a real headset).
