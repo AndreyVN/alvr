@@ -341,7 +341,7 @@ impl Aggregator {
             })
         });
 
-        let snapshot = json!({
+        let mut snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "host": host,
             "window_ms": window.as_millis() as u64,
@@ -358,6 +358,18 @@ impl Aggregator {
             "oxr_layer_types": oxr_layer_types,
             "exporter": { "failed_posts": self.failed_posts },
         });
+        // Truly omit the OpenXR-mode-only fields when their windows saw no
+        // frames — `serde_json::json!` of an Option::None expands to `null`,
+        // which would leave new keys present (just null-valued) in every
+        // OpenVR-mode snapshot. Strip those keys back out so OpenVR-mode
+        // export output is byte-stable against the pre-Phase-5 baseline.
+        if let Some(obj) = snapshot.as_object_mut() {
+            for key in ["oxr_pacing", "oxr_layer_types"] {
+                if obj.get(key).is_some_and(Value::is_null) {
+                    obj.remove(key);
+                }
+            }
+        }
 
         // Reset per-window accumulators; keep last-value state.
         self.total_pipeline = Acc::default();
@@ -479,5 +491,168 @@ fn exporter_loop(receiver: Receiver<Sample>, config: ExporterConfig) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one_second() -> Duration {
+        Duration::from_secs(1)
+    }
+
+    fn pacing(begin_ns: i64, submit_begin_ns: i64, submit_end_ns: i64) -> Sample {
+        Sample::OxrPacing {
+            begin_ns,
+            submit_begin_ns,
+            submit_end_ns,
+        }
+    }
+
+    fn layer_types(quad: u32, cylinder: u32, equirect: u32, cube: u32, passthrough: u32) -> Sample {
+        Sample::OxrLayerTypes {
+            quad,
+            cylinder,
+            equirect,
+            cube,
+            passthrough,
+        }
+    }
+
+    #[test]
+    fn empty_window_omits_openxr_sections() {
+        // Pre-Phase-5 OpenVR-mode snapshots had no oxr_pacing / oxr_layer_types
+        // keys. The byte-stability promise in 93a4ca62 / 089e9b34 holds only if
+        // they're omitted (not present-as-null) when no OXR-mode samples ran.
+        let mut agg = Aggregator::default();
+        let snapshot = agg.flush(one_second(), "test-host");
+        let obj = snapshot.as_object().unwrap();
+        assert!(!obj.contains_key("oxr_pacing"));
+        assert!(!obj.contains_key("oxr_layer_types"));
+    }
+
+    #[test]
+    fn single_oxr_pacing_sample_populates_section() {
+        let mut agg = Aggregator::default();
+        // CPU 800us, submit 200us.
+        agg.push(pacing(1_000_000, 1_800_000, 2_000_000));
+        let snapshot = agg.flush(one_second(), "test-host");
+        let pacing_section = snapshot["oxr_pacing"].as_object().unwrap();
+        assert_eq!(pacing_section["frames"], 1);
+        assert_eq!(pacing_section["cpu_us"]["min"], 800.0);
+        assert_eq!(pacing_section["cpu_us"]["max"], 800.0);
+        assert_eq!(pacing_section["cpu_us"]["avg"], 800.0);
+        assert_eq!(pacing_section["cpu_us"]["n"], 1);
+        assert_eq!(pacing_section["submit_us"]["min"], 200.0);
+        assert_eq!(pacing_section["submit_us"]["max"], 200.0);
+    }
+
+    #[test]
+    fn multiple_oxr_pacing_samples_aggregate_to_min_max_avg() {
+        let mut agg = Aggregator::default();
+        // CPU durations: 100us, 200us, 300us. Avg 200us.
+        agg.push(pacing(0, 100_000, 150_000));
+        agg.push(pacing(0, 200_000, 350_000));
+        agg.push(pacing(0, 300_000, 600_000));
+        let snapshot = agg.flush(one_second(), "test-host");
+        let cpu = &snapshot["oxr_pacing"]["cpu_us"];
+        assert_eq!(cpu["min"], 100.0);
+        assert_eq!(cpu["max"], 300.0);
+        assert_eq!(cpu["avg"], 200.0);
+        assert_eq!(cpu["n"], 3);
+        // Submit durations: 50us, 150us, 300us.
+        let submit = &snapshot["oxr_pacing"]["submit_us"];
+        assert_eq!(submit["min"], 50.0);
+        assert_eq!(submit["max"], 300.0);
+        assert_eq!(snapshot["oxr_pacing"]["frames"], 3);
+    }
+
+    #[test]
+    fn oxr_pacing_clamps_negative_durations() {
+        // Clock skew defence: if submit_begin somehow precedes begin, the
+        // sub-microsecond cast would produce a negative f32. Aggregator clamps
+        // to 0 so the min/avg don't pollute later windows.
+        let mut agg = Aggregator::default();
+        agg.push(pacing(2_000_000, 1_000_000, 3_000_000));
+        let snapshot = agg.flush(one_second(), "test-host");
+        assert_eq!(snapshot["oxr_pacing"]["cpu_us"]["min"], 0.0);
+        assert_eq!(snapshot["oxr_pacing"]["cpu_us"]["max"], 0.0);
+    }
+
+    #[test]
+    fn oxr_layer_types_accumulates_per_type_totals() {
+        let mut agg = Aggregator::default();
+        agg.push(layer_types(2, 0, 0, 0, 0));
+        agg.push(layer_types(1, 3, 0, 0, 0));
+        agg.push(layer_types(0, 0, 2, 1, 4));
+        let snapshot = agg.flush(one_second(), "test-host");
+        let section = snapshot["oxr_layer_types"].as_object().unwrap();
+        assert_eq!(section["frames"], 3);
+        assert_eq!(section["quad_total"], 3);
+        assert_eq!(section["cylinder_total"], 3);
+        assert_eq!(section["equirect_total"], 2);
+        assert_eq!(section["cube_total"], 1);
+        assert_eq!(section["passthrough_total"], 4);
+    }
+
+    #[test]
+    fn flush_resets_oxr_accumulators() {
+        let mut agg = Aggregator::default();
+        agg.push(pacing(0, 100_000, 200_000));
+        agg.push(layer_types(1, 0, 0, 0, 0));
+        let first = agg.flush(one_second(), "test-host");
+        assert!(first.as_object().unwrap().contains_key("oxr_pacing"));
+        assert!(first.as_object().unwrap().contains_key("oxr_layer_types"));
+
+        // Second window saw no samples — both sections must be absent (this is
+        // the byte-stability promise: only windows with real data show the keys).
+        let second = agg.flush(one_second(), "test-host");
+        let obj = second.as_object().unwrap();
+        assert!(!obj.contains_key("oxr_pacing"));
+        assert!(!obj.contains_key("oxr_layer_types"));
+    }
+
+    #[test]
+    fn oxr_pacing_and_layer_types_coexist() {
+        let mut agg = Aggregator::default();
+        agg.push(pacing(0, 100_000, 200_000));
+        agg.push(layer_types(5, 0, 0, 0, 0));
+        let snapshot = agg.flush(one_second(), "test-host");
+        let obj = snapshot.as_object().unwrap();
+        assert!(obj.contains_key("oxr_pacing"));
+        assert!(obj.contains_key("oxr_layer_types"));
+        assert_eq!(snapshot["oxr_pacing"]["frames"], 1);
+        assert_eq!(snapshot["oxr_layer_types"]["quad_total"], 5);
+    }
+
+    #[test]
+    fn battery_carries_across_windows_until_replaced() {
+        // Existing pre-Phase-5 behaviour we don't want to regress: a Battery
+        // sample populates the snapshot for every subsequent window until a
+        // newer Battery arrives.
+        let mut agg = Aggregator::default();
+        agg.push(Sample::Battery {
+            slot: BatterySlot::Hmd,
+            pct: 73,
+            plugged: false,
+        });
+
+        let first = agg.flush(one_second(), "test-host");
+        assert_eq!(first["battery"]["hmd_pct"], 73);
+
+        // No new sample; the latest-value should still be 73.
+        let second = agg.flush(one_second(), "test-host");
+        assert_eq!(second["battery"]["hmd_pct"], 73);
+
+        // New sample replaces the carry-over.
+        agg.push(Sample::Battery {
+            slot: BatterySlot::Hmd,
+            pct: 50,
+            plugged: true,
+        });
+        let third = agg.flush(one_second(), "test-host");
+        assert_eq!(third["battery"]["hmd_pct"], 50);
+        assert_eq!(third["battery"]["hmd_plugged"], true);
     }
 }
