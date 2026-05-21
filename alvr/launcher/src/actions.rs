@@ -454,3 +454,163 @@ pub fn delete_installation(version: &str) -> Result<()> {
 
     Ok(())
 }
+
+// session.json read/write helpers are Windows-only (Linux launcher doesn't
+// manage session files), so the tests live behind the same gate. They exercise
+// the file-level round-trip + byte-preservation guarantee that the launcher
+// UI depends on. No tempfile dev-dep — we use std::env::temp_dir() with a
+// unique per-process+counter suffix so parallel `cargo test` invocations
+// don't collide.
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_tempdir(name: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "alvr-launcher-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            id
+        ));
+        // Start clean in case a previous failed run leaked a dir at this path.
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fixture_session_json(runtime_variant: Option<&str>) -> serde_json::Value {
+        let runtime = match runtime_variant {
+            Some(v) => json!({ "variant": v }),
+            None => json!({}),
+        };
+        json!({
+            "server_version": "21.0.0-dev13",
+            "openvr_config": {
+                "eye_resolution_width": 800,
+                "extra_field_a": 42,
+            },
+            "client_connections": {},
+            "session_settings": {
+                "extra": {
+                    "runtime": runtime,
+                    "other_extra_field": "preserve_me",
+                },
+                "video": { "preserve_me_too": true },
+            },
+        })
+    }
+
+    fn write_fixture(dir: &Path, value: &serde_json::Value) {
+        fs::write(dir.join("session.json"), serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn read_runtime_mode_missing_file() {
+        let dir = unique_tempdir("read_missing");
+        assert_eq!(read_runtime_mode(&dir), None);
+    }
+
+    #[test]
+    fn read_runtime_mode_malformed_json() {
+        let dir = unique_tempdir("read_malformed");
+        fs::write(dir.join("session.json"), b"not actually json {{ }}").unwrap();
+        assert_eq!(read_runtime_mode(&dir), None);
+    }
+
+    #[test]
+    fn read_runtime_mode_field_absent() {
+        let dir = unique_tempdir("read_no_field");
+        write_fixture(&dir, &fixture_session_json(None));
+        // The fixture has `runtime` as an empty object — no variant inside.
+        assert_eq!(read_runtime_mode(&dir), None);
+    }
+
+    #[test]
+    fn read_runtime_mode_steamvr() {
+        let dir = unique_tempdir("read_steamvr");
+        write_fixture(&dir, &fixture_session_json(Some(RUNTIME_MODE_STEAMVR)));
+        assert_eq!(
+            read_runtime_mode(&dir).as_deref(),
+            Some(RUNTIME_MODE_STEAMVR)
+        );
+    }
+
+    #[test]
+    fn read_runtime_mode_openxr() {
+        let dir = unique_tempdir("read_openxr");
+        write_fixture(&dir, &fixture_session_json(Some(RUNTIME_MODE_OPENXR)));
+        assert_eq!(read_runtime_mode(&dir).as_deref(), Some(RUNTIME_MODE_OPENXR));
+    }
+
+    #[test]
+    fn write_runtime_mode_roundtrips_both_variants() {
+        let dir = unique_tempdir("write_roundtrip");
+        write_fixture(&dir, &fixture_session_json(Some(RUNTIME_MODE_STEAMVR)));
+
+        write_runtime_mode(&dir, RUNTIME_MODE_OPENXR).unwrap();
+        assert_eq!(read_runtime_mode(&dir).as_deref(), Some(RUNTIME_MODE_OPENXR));
+
+        write_runtime_mode(&dir, RUNTIME_MODE_STEAMVR).unwrap();
+        assert_eq!(
+            read_runtime_mode(&dir).as_deref(),
+            Some(RUNTIME_MODE_STEAMVR)
+        );
+    }
+
+    #[test]
+    fn write_runtime_mode_preserves_other_fields() {
+        let dir = unique_tempdir("write_preserve");
+        let original = fixture_session_json(Some(RUNTIME_MODE_STEAMVR));
+        write_fixture(&dir, &original);
+
+        write_runtime_mode(&dir, RUNTIME_MODE_OPENXR).unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("session.json")).unwrap()).unwrap();
+
+        // Every field outside session_settings.extra.runtime.variant must be
+        // bit-identical to what we wrote — that's the launcher's promise.
+        assert_eq!(after["server_version"], original["server_version"]);
+        assert_eq!(after["openvr_config"], original["openvr_config"]);
+        assert_eq!(after["client_connections"], original["client_connections"]);
+        assert_eq!(
+            after["session_settings"]["video"],
+            original["session_settings"]["video"]
+        );
+        assert_eq!(
+            after["session_settings"]["extra"]["other_extra_field"],
+            original["session_settings"]["extra"]["other_extra_field"]
+        );
+        // And the targeted field actually moved.
+        assert_eq!(
+            after["session_settings"]["extra"]["runtime"]["variant"],
+            json!(RUNTIME_MODE_OPENXR)
+        );
+    }
+
+    #[test]
+    fn write_runtime_mode_errors_when_runtime_missing() {
+        // If session.json doesn't even have a `runtime` object, refuse to
+        // synthesise one — the caller should bring the session up to date via
+        // the dashboard instead. The UI gates the ComboBox on read_runtime_mode
+        // returning Some, so in practice this error path isn't hit; the test
+        // pins the contract.
+        let dir = unique_tempdir("write_no_runtime");
+        let mut malformed = fixture_session_json(None);
+        // Remove the empty `runtime` object entirely so the get_mut("runtime")
+        // chain returns None.
+        malformed["session_settings"]["extra"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime");
+        write_fixture(&dir, &malformed);
+
+        let res = write_runtime_mode(&dir, RUNTIME_MODE_OPENXR);
+        assert!(res.is_err(), "expected error when runtime field absent");
+    }
+}
