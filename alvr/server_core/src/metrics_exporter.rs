@@ -30,6 +30,15 @@ pub enum Sample {
     },
     Bitrate(BitrateDirectives),
     ClientTelemetry(ClientTelemetry),
+    /// OpenXR-mode compositor pacing sample: raw `os_monotonic_get_ns()`
+    /// timestamps from `comp_alvr`'s `layer_commit`. The aggregator derives
+    /// CPU and submit durations from these — same monotonic clock, no
+    /// resampling needed. See `alvr_oxr_report_pacing` in `alvr_server_openxr`.
+    OxrPacing {
+        begin_ns: i64,
+        submit_begin_ns: i64,
+        submit_end_ns: i64,
+    },
 }
 
 pub struct ExporterConfig {
@@ -102,6 +111,14 @@ struct Aggregator {
     dropped_samples: u64,
     failed_posts: u64,
 
+    // OpenXR-mode pacing: per-frame durations derived from raw u_pacing timestamps,
+    // stored in microseconds for display. `oxr_pacing_frames` counts samples
+    // independently of `frames` so the two modes don't interfere when both are
+    // populated (only one will be in practice).
+    oxr_cpu_us: Acc,
+    oxr_submit_us: Acc,
+    oxr_pacing_frames: u32,
+
     // Last-value state (carried across windows).
     last_battery_hmd_pct: Option<u32>,
     last_battery_hmd_plugged: bool,
@@ -165,6 +182,17 @@ impl Aggregator {
             }
             Sample::ClientTelemetry(telemetry) => {
                 self.last_client_telemetry = Some(telemetry);
+            }
+            Sample::OxrPacing {
+                begin_ns,
+                submit_begin_ns,
+                submit_end_ns,
+            } => {
+                let cpu_us = ((submit_begin_ns - begin_ns) as f32) / 1000.0;
+                let submit_us = ((submit_end_ns - submit_begin_ns) as f32) / 1000.0;
+                self.oxr_cpu_us.push(cpu_us.max(0.0));
+                self.oxr_submit_us.push(submit_us.max(0.0));
+                self.oxr_pacing_frames += 1;
             }
         }
     }
@@ -250,6 +278,17 @@ impl Aggregator {
             })
         });
 
+        // OpenXR compositor pacing — only present when comp_alvr is forwarding
+        // pacing samples (i.e. the OpenXR-mode runtime is active and at least
+        // one frame ran this window).
+        let oxr_pacing = (self.oxr_pacing_frames > 0).then(|| {
+            json!({
+                "frames": self.oxr_pacing_frames,
+                "cpu_us": self.oxr_cpu_us.to_json(),
+                "submit_us": self.oxr_submit_us.to_json(),
+            })
+        });
+
         let snapshot = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "host": host,
@@ -263,6 +302,7 @@ impl Aggregator {
             "battery": battery,
             "client_telemetry": client_telemetry,
             "bitrate_directives": self.last_bitrate_directives,
+            "oxr_pacing": oxr_pacing,
             "exporter": { "failed_posts": self.failed_posts },
         });
 
@@ -283,6 +323,9 @@ impl Aggregator {
         self.frames = 0;
         self.dropped_samples = 0;
         self.failed_posts = 0;
+        self.oxr_cpu_us = Acc::default();
+        self.oxr_submit_us = Acc::default();
+        self.oxr_pacing_frames = 0;
         self.window_start_packets = self.video_packets_total;
         self.window_start_bytes = self.video_bytes_total;
 

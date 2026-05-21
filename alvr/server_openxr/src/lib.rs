@@ -790,11 +790,13 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
 /// raw timestamps rather than pre-computed deltas so the Rust side can build
 /// any window/aggregation shape it likes.
 ///
-/// Today the implementation is a no-op stub — added in ABI v2 so the
-/// Monado-side call site can land alongside the contract; the metrics-
-/// exporter aggregator wiring lands as a follow-up Rust-only change.
-/// Returns `Ok` even in the stub state so the compositor doesn't log a
-/// failure every frame.
+/// Forwards the sample into `alvr_server_core`'s metrics exporter via
+/// [`ServerCoreContext::report_oxr_pacing`]. The metrics aggregator
+/// derives CPU and submit durations and exports them in the standard
+/// per-window snapshot under the `oxr_pacing` field. Drops silently when
+/// no client is connected (no metrics sender wired up yet) or when the
+/// bridge context is not initialised. Always returns `Ok` so the
+/// compositor doesn't log a per-frame failure.
 ///
 /// # Safety
 /// Always safe to call. Takes only `Copy` POD values.
@@ -805,7 +807,10 @@ pub extern "C" fn alvr_oxr_report_pacing(
     submit_begin_ns: i64,
     submit_end_ns: i64,
 ) -> AlvrOxrResult {
-    let _ = (frame_id, begin_ns, submit_begin_ns, submit_end_ns);
+    let _ = frame_id;
+    if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
+        ctx.report_oxr_pacing(begin_ns, submit_begin_ns, submit_end_ns);
+    }
     AlvrOxrResult::Ok
 }
 

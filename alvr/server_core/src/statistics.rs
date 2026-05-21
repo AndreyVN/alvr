@@ -200,6 +200,23 @@ impl StatisticsManager {
         }
     }
 
+    /// Forward an OpenXR-mode compositor pacing sample. Called once per frame
+    /// from `comp_alvr::layer_commit` via the bridge ABI v2 entrypoint
+    /// `alvr_oxr_report_pacing`. Drops silently if no client is connected
+    /// (no metrics sender).
+    pub fn report_oxr_pacing(&self, begin_ns: i64, submit_begin_ns: i64, submit_end_ns: i64) {
+        if let Some(sender) = &self.metrics_sender {
+            metrics_exporter::try_push(
+                sender,
+                Sample::OxrPacing {
+                    begin_ns,
+                    submit_begin_ns,
+                    submit_end_ns,
+                },
+            );
+        }
+    }
+
     pub fn report_throughput_stats(&mut self, stats: BitrateDirectives) {
         self.last_throughput_directives = stats.clone();
 

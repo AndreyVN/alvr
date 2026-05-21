@@ -517,6 +517,19 @@ impl ServerCoreContext {
             .map(|stats| stats.duration_until_next_vsync())
     }
 
+    /// Forward an OpenXR-mode compositor pacing sample into the metrics
+    /// exporter. Called once per frame from the bridge's
+    /// `alvr_oxr_report_pacing` (ABI v2). Read-lock only — `StatisticsManager`'s
+    /// own method here is `&self` because metrics-channel push doesn't touch
+    /// any mutable per-frame state.
+    pub fn report_oxr_pacing(&self, begin_ns: i64, submit_begin_ns: i64, submit_end_ns: i64) {
+        dbg_server_core!("report_oxr_pacing");
+
+        if let Some(stats) = self.connection_context.statistics_manager.read().as_ref() {
+            stats.report_oxr_pacing(begin_ns, submit_begin_ns, submit_end_ns);
+        }
+    }
+
     pub fn restart(self) {
         dbg_server_core!("restart");
 
