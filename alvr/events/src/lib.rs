@@ -76,11 +76,46 @@ pub struct AdbEvent {
     pub download_progress: f32,
 }
 
+/// OpenXR-mode compositor pacing aggregate over the last reporting window.
+/// `frames` is the number of `alvr_oxr_report_pacing` calls that landed in the
+/// window; `*_us_*` are min/max/avg of the per-frame CPU and submit durations
+/// derived from raw `u_pacing` timestamps. None for either axis means no
+/// samples for that axis (only possible if `frames > 0` and the pacing
+/// section is wholly disabled, which today is not the case — kept Option
+/// shaped to mirror the exporter JSON).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct OxrPacingSummary {
+    pub frames: u32,
+    pub cpu_us_min: f32,
+    pub cpu_us_max: f32,
+    pub cpu_us_avg: f32,
+    pub submit_us_min: f32,
+    pub submit_us_max: f32,
+    pub submit_us_avg: f32,
+}
+
+/// OpenXR-mode dropped-layer histogram aggregate over the last reporting
+/// window. Mirrors the exporter `oxr_layer_types` JSON section: `frames`
+/// counts how many frames reported, and each `*_total` is the running sum of
+/// that layer type across those frames.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct OxrLayerTypesSummary {
+    pub frames: u32,
+    pub quad_total: u64,
+    pub cylinder_total: u64,
+    pub equirect_total: u64,
+    pub cube_total: u64,
+    pub passthrough_total: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "id", content = "data")]
 pub enum EventType {
     Log(LogEntry),
-    DebugGroup { group: String, message: String },
+    DebugGroup {
+        group: String,
+        message: String,
+    },
     Session(Box<SessionConfig>),
     StatisticsSummary(StatisticsSummary),
     GraphStatistics(GraphStatistics),
@@ -90,7 +125,18 @@ pub enum EventType {
     DriversList(Vec<PathBuf>),
     ServerRequestsSelfRestart,
     Adb(AdbEvent),
-    NewVersionFound { version: String, message: String },
+    NewVersionFound {
+        version: String,
+        message: String,
+    },
+    /// Per-window aggregate of OpenXR-mode compositor telemetry. Emitted by
+    /// `StatisticsManager` on the same 500 ms cadence as `StatisticsSummary`,
+    /// only when at least one `oxr_pacing` or `oxr_layer_types` sample landed
+    /// in the window. Either field may be `None` independently.
+    OxrFrameSummary {
+        pacing: Option<OxrPacingSummary>,
+        layer_types: Option<OxrLayerTypesSummary>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -119,6 +165,7 @@ impl Event {
             EventType::ServerRequestsSelfRestart => "RESTART".to_string(),
             EventType::Adb(_) => "ADB".to_string(),
             EventType::NewVersionFound { .. } => "NEW VER".to_string(),
+            EventType::OxrFrameSummary { .. } => "OXR STATS".to_string(),
         }
     }
 
@@ -135,6 +182,7 @@ impl Event {
             EventType::ServerRequestsSelfRestart => "Request for server restart".into(),
             EventType::Adb(adb) => serde_json::to_string(adb).unwrap(),
             EventType::NewVersionFound { version, .. } => version.clone(),
+            EventType::OxrFrameSummary { .. } => "".into(),
         }
     }
 }

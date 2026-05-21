@@ -1,6 +1,9 @@
 use crate::metrics_exporter::{self, BatterySlot, Sample};
-use alvr_common::{HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, SlidingWindowAverage};
-use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
+use alvr_common::{HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, SlidingWindowAverage, parking_lot::Mutex};
+use alvr_events::{
+    BitrateDirectives, EventType, GraphStatistics, OxrLayerTypesSummary, OxrPacingSummary,
+    StatisticsSummary,
+};
 use alvr_packets::{ClientStatistics, ClientTelemetry};
 use flume::Sender;
 use std::{
@@ -42,6 +45,96 @@ struct BatteryData {
     is_plugged: bool,
 }
 
+/// Per-window accumulator for OpenXR-mode bridge telemetry. Mirrors the math
+/// in `metrics_exporter::Aggregator` for the same two `Sample` variants, but
+/// kept locally so `StatisticsManager` can emit a dashboard event on the same
+/// 500 ms cadence as `StatisticsSummary` without re-reading the exporter
+/// queue. Reset by `drain_oxr_summaries` on every emit.
+#[derive(Default)]
+struct OxrLocalAcc {
+    pacing_frames: u32,
+    cpu_us_sum: f64,
+    cpu_us_min: f32,
+    cpu_us_max: f32,
+    submit_us_sum: f64,
+    submit_us_min: f32,
+    submit_us_max: f32,
+
+    layer_types_frames: u32,
+    quad_total: u64,
+    cylinder_total: u64,
+    equirect_total: u64,
+    cube_total: u64,
+    passthrough_total: u64,
+}
+
+impl OxrLocalAcc {
+    fn push_pacing(&mut self, begin_ns: i64, submit_begin_ns: i64, submit_end_ns: i64) {
+        let cpu_us = (((submit_begin_ns - begin_ns) as f32) / 1000.0).max(0.0);
+        let submit_us = (((submit_end_ns - submit_begin_ns) as f32) / 1000.0).max(0.0);
+        if self.pacing_frames == 0 {
+            self.cpu_us_min = cpu_us;
+            self.cpu_us_max = cpu_us;
+            self.submit_us_min = submit_us;
+            self.submit_us_max = submit_us;
+        } else {
+            if cpu_us < self.cpu_us_min {
+                self.cpu_us_min = cpu_us;
+            }
+            if cpu_us > self.cpu_us_max {
+                self.cpu_us_max = cpu_us;
+            }
+            if submit_us < self.submit_us_min {
+                self.submit_us_min = submit_us;
+            }
+            if submit_us > self.submit_us_max {
+                self.submit_us_max = submit_us;
+            }
+        }
+        self.cpu_us_sum += cpu_us as f64;
+        self.submit_us_sum += submit_us as f64;
+        self.pacing_frames += 1;
+    }
+
+    fn push_layer_types(
+        &mut self,
+        quad: u32,
+        cylinder: u32,
+        equirect: u32,
+        cube: u32,
+        passthrough: u32,
+    ) {
+        self.quad_total += quad as u64;
+        self.cylinder_total += cylinder as u64;
+        self.equirect_total += equirect as u64;
+        self.cube_total += cube as u64;
+        self.passthrough_total += passthrough as u64;
+        self.layer_types_frames += 1;
+    }
+
+    fn drain(&mut self) -> (Option<OxrPacingSummary>, Option<OxrLayerTypesSummary>) {
+        let pacing = (self.pacing_frames > 0).then(|| OxrPacingSummary {
+            frames: self.pacing_frames,
+            cpu_us_min: self.cpu_us_min,
+            cpu_us_max: self.cpu_us_max,
+            cpu_us_avg: (self.cpu_us_sum / self.pacing_frames as f64) as f32,
+            submit_us_min: self.submit_us_min,
+            submit_us_max: self.submit_us_max,
+            submit_us_avg: (self.submit_us_sum / self.pacing_frames as f64) as f32,
+        });
+        let layer_types = (self.layer_types_frames > 0).then_some(OxrLayerTypesSummary {
+            frames: self.layer_types_frames,
+            quad_total: self.quad_total,
+            cylinder_total: self.cylinder_total,
+            equirect_total: self.equirect_total,
+            cube_total: self.cube_total,
+            passthrough_total: self.passthrough_total,
+        });
+        *self = Self::default();
+        (pacing, layer_types)
+    }
+}
+
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>,
     max_history_size: usize,
@@ -59,6 +152,7 @@ pub struct StatisticsManager {
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
     metrics_sender: Option<Sender<Sample>>,
+    oxr_local_acc: Mutex<OxrLocalAcc>,
 }
 
 impl StatisticsManager {
@@ -91,6 +185,7 @@ impl StatisticsManager {
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
             metrics_sender,
+            oxr_local_acc: Mutex::new(OxrLocalAcc::default()),
         }
     }
 
@@ -202,8 +297,9 @@ impl StatisticsManager {
 
     /// Forward an OpenXR-mode compositor pacing sample. Called once per frame
     /// from `comp_alvr::layer_commit` via the bridge ABI v2 entrypoint
-    /// `alvr_oxr_report_pacing`. Drops silently if no client is connected
-    /// (no metrics sender).
+    /// `alvr_oxr_report_pacing`. Pushes into the metrics-export channel (if
+    /// configured) and into the local accumulator that feeds the dashboard's
+    /// per-window `OxrFrameSummary` event.
     pub fn report_oxr_pacing(&self, begin_ns: i64, submit_begin_ns: i64, submit_end_ns: i64) {
         if let Some(sender) = &self.metrics_sender {
             metrics_exporter::try_push(
@@ -215,6 +311,9 @@ impl StatisticsManager {
                 },
             );
         }
+        self.oxr_local_acc
+            .lock()
+            .push_pacing(begin_ns, submit_begin_ns, submit_end_ns);
     }
 
     /// Forward an OpenXR-mode per-frame layer-type histogram. ABI v3.
@@ -241,6 +340,9 @@ impl StatisticsManager {
                 },
             );
         }
+        self.oxr_local_acc
+            .lock()
+            .push_layer_types(quad, cylinder, equirect, cube, passthrough);
     }
 
     pub fn report_throughput_stats(&mut self, stats: BitrateDirectives) {
@@ -333,6 +435,14 @@ impl StatisticsManager {
 
                 self.video_packets_partial_sum = 0;
                 self.video_bytes_partial_sum = 0;
+
+                let (pacing, layer_types) = self.oxr_local_acc.lock().drain();
+                if pacing.is_some() || layer_types.is_some() {
+                    alvr_events::send_event(EventType::OxrFrameSummary {
+                        pacing,
+                        layer_types,
+                    });
+                }
             }
 
             let packet_bits = frame.video_packet_bytes as f32 * 8.0;
@@ -403,5 +513,97 @@ impl StatisticsManager {
         }
 
         (self.last_vsync_time + self.frame_interval).saturating_duration_since(now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oxr_local_acc_drain_empty_returns_none() {
+        let mut acc = OxrLocalAcc::default();
+        let (pacing, layer_types) = acc.drain();
+        assert!(pacing.is_none());
+        assert!(layer_types.is_none());
+    }
+
+    #[test]
+    fn oxr_local_acc_pacing_min_avg_max() {
+        let mut acc = OxrLocalAcc::default();
+        // CPU 100us, 200us, 300us. Submit 50us, 150us, 300us.
+        acc.push_pacing(0, 100_000, 150_000);
+        acc.push_pacing(0, 200_000, 350_000);
+        acc.push_pacing(0, 300_000, 600_000);
+        let (pacing, _) = acc.drain();
+        let p = pacing.expect("pacing summary present");
+        assert_eq!(p.frames, 3);
+        assert_eq!(p.cpu_us_min, 100.0);
+        assert_eq!(p.cpu_us_max, 300.0);
+        assert_eq!(p.cpu_us_avg, 200.0);
+        assert_eq!(p.submit_us_min, 50.0);
+        assert_eq!(p.submit_us_max, 300.0);
+    }
+
+    #[test]
+    fn oxr_local_acc_pacing_clamps_negative_durations() {
+        // Same clock-skew defence as `metrics_exporter::Aggregator`: negative
+        // derived durations clamp to 0 so they don't poison the window's min.
+        let mut acc = OxrLocalAcc::default();
+        acc.push_pacing(2_000_000, 1_000_000, 3_000_000);
+        let (pacing, _) = acc.drain();
+        let p = pacing.expect("pacing summary present");
+        assert_eq!(p.cpu_us_min, 0.0);
+        assert_eq!(p.cpu_us_max, 0.0);
+    }
+
+    #[test]
+    fn oxr_local_acc_layer_types_totals_and_frames() {
+        let mut acc = OxrLocalAcc::default();
+        acc.push_layer_types(2, 0, 0, 0, 0);
+        acc.push_layer_types(1, 3, 0, 0, 0);
+        acc.push_layer_types(0, 0, 2, 1, 4);
+        let (_, layer_types) = acc.drain();
+        let lt = layer_types.expect("layer_types summary present");
+        assert_eq!(lt.frames, 3);
+        assert_eq!(lt.quad_total, 3);
+        assert_eq!(lt.cylinder_total, 3);
+        assert_eq!(lt.equirect_total, 2);
+        assert_eq!(lt.cube_total, 1);
+        assert_eq!(lt.passthrough_total, 4);
+    }
+
+    #[test]
+    fn oxr_local_acc_drain_resets_state() {
+        let mut acc = OxrLocalAcc::default();
+        acc.push_pacing(0, 100_000, 200_000);
+        acc.push_layer_types(5, 0, 0, 0, 0);
+        let (p1, lt1) = acc.drain();
+        assert!(p1.is_some());
+        assert!(lt1.is_some());
+
+        // After drain the accumulator is fully reset — the second drain sees
+        // nothing and emits no summary on either axis. This is what gives the
+        // dashboard event its byte-stability promise (no event when no
+        // samples landed in the window).
+        let (p2, lt2) = acc.drain();
+        assert!(p2.is_none());
+        assert!(lt2.is_none());
+    }
+
+    #[test]
+    fn oxr_local_acc_pacing_and_layer_types_drain_independently() {
+        let mut acc = OxrLocalAcc::default();
+        acc.push_pacing(0, 100_000, 200_000);
+        // No layer-types sample this window.
+        let (pacing, layer_types) = acc.drain();
+        assert!(pacing.is_some());
+        assert!(layer_types.is_none());
+
+        // Inverse: layer-types only, no pacing.
+        acc.push_layer_types(1, 0, 0, 0, 0);
+        let (pacing, layer_types) = acc.drain();
+        assert!(pacing.is_none());
+        assert!(layer_types.is_some());
     }
 }
