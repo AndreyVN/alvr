@@ -41,6 +41,83 @@ fn thirdparty_dir() -> PathBuf {
     afs::build_dir().join("_thirdparty")
 }
 
+/// Per `openxr/doc/winbuild.md`, vcpkg in manifest mode is Monado's officially
+/// supported Windows build path: Monado's `vcpkg.json` declares the full dep
+/// list (`pthreads`, `wil`, `cjson`, `eigen3`, `glslang`, `vulkan`, plus the
+/// `usb`/`gui` features → `libusb`, `hidapi`, `sdl2`), and a single CMake
+/// configure with `-DCMAKE_TOOLCHAIN_FILE=...\vcpkg.cmake` builds + installs
+/// them on first run.
+///
+/// We mirror that path here: clone microsoft/vcpkg into
+/// `build/_thirdparty/vcpkg` on first call, bootstrap it, and return the
+/// toolchain file path. Idempotent — second and subsequent calls short-circuit
+/// via the bootstrapped `vcpkg.exe` marker.
+///
+/// Returns None on non-Windows (system pkg manager owns the deps there) and
+/// when `ALVR_OPENXR_SKIP_VCPKG=1` is set in the env (escape hatch for users
+/// who manage Monado deps themselves or want to avoid the ~1GB vcpkg tree).
+///
+/// First-run cost: vcpkg clone (~150 MB) + bootstrap (~30s) + per-dep build
+/// on the next CMake configure (~15–45 min for the full Monado dep set,
+/// cached after that).
+fn ensure_vcpkg_windows() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    if env::var_os("ALVR_OPENXR_SKIP_VCPKG")
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        return None;
+    }
+
+    let vcpkg_root = thirdparty_dir().join("vcpkg");
+    let toolchain = vcpkg_root.join("scripts/buildsystems/vcpkg.cmake");
+    let bootstrap_marker = vcpkg_root.join("vcpkg.exe");
+
+    if toolchain.exists() && bootstrap_marker.exists() {
+        return Some(toolchain);
+    }
+
+    let thirdparty = thirdparty_dir();
+    fs::create_dir_all(&thirdparty).unwrap();
+    let sh = Shell::new().unwrap();
+
+    if !vcpkg_root.join(".git").exists() {
+        println!("Cloning microsoft/vcpkg into {}...", vcpkg_root.display());
+        let url = "https://github.com/microsoft/vcpkg.git";
+        let dest = vcpkg_root.to_string_lossy().into_owned();
+        // Use --filter=blob:none rather than --depth=1: vcpkg's manifest mode
+        // needs to `git show <baseline>:versions/baseline.json` for the commit
+        // Monado pins in its vcpkg.json, which a shallow clone can't satisfy.
+        // A blobless partial clone keeps the full commit graph (cheap, ~MB-sized)
+        // and pulls blobs on demand.
+        cmd!(sh, "git clone --filter=blob:none {url} {dest}")
+            .run()
+            .unwrap();
+    }
+
+    if !bootstrap_marker.exists() {
+        println!("Bootstrapping vcpkg...");
+        // Use the .bat's absolute path — cmd's PATH lookup doesn't include cwd
+        // by default on this Windows host (`NoDefaultCurrentDirectoryInExePath`
+        // policy), so a bare `bootstrap-vcpkg.bat` resolves to nothing.
+        let bootstrap = vcpkg_root.join("bootstrap-vcpkg.bat");
+        let bootstrap_str = bootstrap.to_string_lossy().into_owned();
+        // -disableMetrics keeps vcpkg's telemetry quiet without prompting.
+        cmd!(sh, "cmd /c {bootstrap_str} -disableMetrics")
+            .run()
+            .unwrap();
+    }
+
+    assert!(
+        toolchain.exists(),
+        "vcpkg bootstrap did not produce {}",
+        toolchain.display()
+    );
+
+    Some(toolchain)
+}
+
 /// Monado's CMake hard-requires Eigen3 (`find_package(Eigen3 REQUIRED NO_MODULE)`)
 /// at version >= 3.3. On Linux distros this is normally `libeigen3-dev` or
 /// `eigen3-devel`; on Windows there's no choco/install.txt entry today, so we
@@ -50,6 +127,10 @@ fn thirdparty_dir() -> PathBuf {
 /// Returns the install prefix on Windows, or None on platforms where we trust
 /// the system package manager. Idempotent — second and subsequent calls
 /// short-circuit via the `Eigen3Config.cmake` marker.
+///
+/// Note: when vcpkg is used (the default Windows path), Eigen3 also comes from
+/// the vcpkg manifest, so this helper's install is redundant. It stays as a
+/// fallback for `ALVR_OPENXR_SKIP_VCPKG=1` users.
 fn ensure_eigen3_windows() -> Option<PathBuf> {
     if !cfg!(target_os = "windows") {
         return None;
@@ -157,9 +238,16 @@ pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
     let cmake_type = format!("-DCMAKE_BUILD_TYPE={cmake_build_type}");
 
     // Stage Monado's hard-required deps that aren't in install.txt / choco today.
-    // The function is per-dep and per-platform; today only Eigen3 on Windows.
+    // Default Windows path: vcpkg in manifest mode reads Monado's vcpkg.json and
+    // builds the whole dep set. Fallback (ALVR_OPENXR_SKIP_VCPKG=1): per-dep
+    // ensure_*() helpers stage individual REQUIREDs locally.
     let mut extra_cmake_args: Vec<String> = Vec::new();
-    if let Some(prefix) = ensure_eigen3_windows() {
+    if let Some(toolchain) = ensure_vcpkg_windows() {
+        extra_cmake_args.push(format!(
+            "-DCMAKE_TOOLCHAIN_FILE={}",
+            toolchain.to_string_lossy()
+        ));
+    } else if let Some(prefix) = ensure_eigen3_windows() {
         extra_cmake_args.push(format!("-DCMAKE_PREFIX_PATH={}", prefix.to_string_lossy()));
     }
 
