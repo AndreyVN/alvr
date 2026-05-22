@@ -1,6 +1,6 @@
 # Hand-tracking passthrough — scoping (2026-05-22)
 
-Status: design only. No code yet. Authored while the Monado fork-hosting blocker stands, so the slice it unblocks is itself blocked on the same fix.
+Status: **Slices 1 + 3 LANDED 2026-05-22** (alvr-side ABI v4 + `ServerCoreContext::get_hand_skeleton` wire-up — see [`NEXT_STEPS.md`](NEXT_STEPS.md) Phase 7 hand-tracking bullet). Only Slice 2 outstanding: the Monado-side `xrt_device::get_hand_tracking` that consumes the bridge call. That slice needs the fork push.
 
 ## What "passthrough" means here
 
@@ -77,7 +77,7 @@ Implementation notes for `alvr_server_openxr/src/lib.rs`:
 - Maps `[Pose; 26]` -> `AlvrOxrPose; 26` 1:1 (same coordinate convention; both OpenXR-spec).
 - `is_tracked=false` is the cheap path: no copy, no allocation. Frames where the client isn't running hand tracking should pay nothing extra.
 
-Bump `ALVR_OXR_BRIDGE_ABI_VERSION` 3 -> 4. Update the `History:` block in the header and `ALVR_OXR_BRIDGE_ABI_EXPECTED` on the Monado side. (See [[openxr-mode-integration]] for the bump protocol.)
+Bump `ALVR_OXR_BRIDGE_ABI_VERSION` 3 -> 4. Update the `History:` block in the header. **There is no separate `ALVR_OXR_BRIDGE_ABI_EXPECTED` constant on the Monado side** — `openxr/src/xrt/drivers/alvr/CMakeLists.txt` `target_include_directories` PRIVATE-includes the alvr-side `alvr_runtime_bridge.h` directly, so the macro is single-source-of-truth and the runtime mismatch check at `alvr_hub.c:189` compares the loaded cdylib's version against the same compile-time macro. (Earlier drafts of this doc and the per-view foveation scoping doc both said there was a separate `_EXPECTED` to bump; that was wrong.) See [[openxr-mode-integration]] for the bump protocol.
 
 ## Session-schema additions
 
@@ -104,7 +104,7 @@ Pieces the next slice will need (after the hosting blocker clears):
 
 - [ ] `alvr_packets::TrackingData` unchanged on the wire. Confirmed by a bincode round-trip test using a serialized fixture from the current master build.
 - [ ] `alvr_session::HandSkeletonConfig` unchanged or extended additively (no migration needed in option 1).
-- [ ] `ALVR_OXR_BRIDGE_ABI_VERSION` bumped 3 -> 4 with both halves of the wire (Rust const + Monado-side `_EXPECTED`).
+- [ ] `ALVR_OXR_BRIDGE_ABI_VERSION` bumped 3 -> 4 (single-source-of-truth via the alvr-side cbindgen header; no separate Monado-side constant).
 - [ ] cbindgen header regenerated via `ALVR_REGENERATE_BRIDGE_HEADER=1 cargo build -p alvr_server_openxr`.
 - [ ] `cargo xtask clippy --ci` clean.
 - [ ] CTest suite on the openxr submodule clean (`build/openxr-debug` `ctest -C Debug --output-on-failure`, currently 25/25 on host 101 — see [[reference-remote-test-host]]).

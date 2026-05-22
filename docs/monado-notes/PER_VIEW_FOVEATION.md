@@ -1,6 +1,6 @@
 # Per-view foveation — scoping (2026-05-22)
 
-Status: design only. Sister doc to [`HAND_TRACKING_PASSTHROUGH.md`](HAND_TRACKING_PASSTHROUGH.md). Both pin down concrete next slices for Phase 7 stretch work while the Monado fork-hosting blocker stands.
+Status: **Slice 1 LANDED 2026-05-22** (alvr-side ABI v5 bridge surface — see [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet). Slices 2–6 outstanding; Slices 2, 3, 5 are pure alvr-side and unblocked. Sister doc: [`HAND_TRACKING_PASSTHROUGH.md`](HAND_TRACKING_PASSTHROUGH.md) (Slices 1 + 3 landed alvr-side; Slice 2 on Monado side blocked behind fork-hosting).
 
 ## What "per-view foveation" means here
 
@@ -92,7 +92,7 @@ Implementation notes for `alvr_server_openxr/src/lib.rs`:
 - `alvr_oxr_get_foveation` takes the read lock and copies. No allocations on the hot path.
 - The drain thread learns about new foveation via a new `ServerCoreEvent::PerViewFoveation` (sibling of the existing `LocalViewParams` event).
 
-Bump `ALVR_OXR_BRIDGE_ABI_VERSION` 3 → 5 in one go (4 is reserved for hand-tracking passthrough; both v4 and v5 may land in either order — but they're independent bumps either way, never a hybrid v4-with-foveation). Update `History:` block and `ALVR_OXR_BRIDGE_ABI_EXPECTED` on the Monado side.
+Bump `ALVR_OXR_BRIDGE_ABI_VERSION` 3 → 5 in one go (v4 landed 2026-05-22 for hand-tracking passthrough Slice 1; this slice bumps 4 → 5). Update the `History:` block in the alvr-side header. There is no separate `_EXPECTED` constant to bump on the Monado side — the openxr submodule includes the alvr-side `alvr_runtime_bridge.h` directly via `target_include_directories`, so the macro is single-source-of-truth (see [`HAND_TRACKING_PASSTHROUGH.md`](HAND_TRACKING_PASSTHROUGH.md) for the correction).
 
 ## Session-schema additions
 
@@ -124,7 +124,7 @@ A migration in `alvr_session` is not needed — both items are additive. Add an 
 - [ ] `alvr_packets::TrackingData` unchanged on the wire (confirmed by bincode round-trip fixture).
 - [ ] `alvr_packets::RealTimeConfig` extended additively with `per_view_foveation: Option<[FoveationView; 2]>` at the *end* of the struct (bincode 2 standard config — trailing optional is forward-compatible only inside an additive bump on both halves).
 - [ ] `alvr_session::FoveatedEncodingConfig` additively gains the new `Switch<PerViewFoveationConfig>` field. No migration entry.
-- [ ] `ALVR_OXR_BRIDGE_ABI_VERSION` bumped 3 → 5 with both halves of the wire (Rust const + Monado-side `_EXPECTED`).
+- [ ] `ALVR_OXR_BRIDGE_ABI_VERSION` bumped 4 → 5 (single-source-of-truth via the alvr-side cbindgen header; no separate Monado-side constant).
 - [ ] cbindgen header regenerated via `ALVR_REGENERATE_BRIDGE_HEADER=1 cargo build -p alvr_server_openxr`.
 - [ ] `cargo xtask clippy --ci` clean.
 - [ ] Monado CTest clean (25/25 on host 101 — see [[reference-remote-test-host]]).
