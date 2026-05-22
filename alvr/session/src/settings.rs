@@ -489,6 +489,38 @@ pub struct FoveatedEncodingConfig {
     #[schema(gui(slider(min = 1.0, max = 10.0, step = 1.0)))]
     #[schema(flag = "steamvr-restart")]
     pub edge_ratio_y: f32,
+
+    #[schema(strings(
+        display_name = "Per-view (eye-tracked) foveation",
+        help = r"When enabled, the OpenXR-mode encoder receives a per-eye foveation centre derived from the headset's eye tracker. SteamVR mode ignores this knob. Requires the headset to expose eye tracking via OpenXR (Quest Pro, Pico Neo 3 Pro Eye, etc.)."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub per_view_eye_tracked: Switch<PerViewFoveationConfig>,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[schema(collapsible)]
+pub struct PerViewFoveationConfig {
+    #[schema(strings(
+        display_name = "Update rate",
+        help = "How often the server samples the headset's gaze and re-publishes a per-view foveation centre. Low rates (5–10 Hz) match real saccade cadence; per-frame is overkill for a centre that's already low-pass-filtered."
+    ))]
+    #[schema(gui(slider(min = 1.0, max = 60.0, step = 1.0)), suffix = " Hz")]
+    pub update_rate_hz: f32,
+
+    #[schema(strings(
+        display_name = "Maximum offset",
+        help = "How far each view's centre may track from straight-ahead, as a fraction of the view's width/height. 0.25 ≈ ±25% — most natural saccades stay well within."
+    ))]
+    #[schema(gui(slider(min = 0.0, max = 0.5, step = 0.01)))]
+    pub max_offset_normalized: f32,
+
+    #[schema(strings(
+        display_name = "Confidence floor",
+        help = "Eye-tracker confidence below which the centre falls back to the static config values. 0.5 = require ≥50% confidence to honour the eye-tracked centre."
+    ))]
+    #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.05)))]
+    pub confidence_floor: f32,
 }
 
 #[repr(C)]
@@ -2010,6 +2042,15 @@ pub fn session_settings_default() -> SettingsDefault {
                     center_shift_y: 0.1,
                     edge_ratio_x: 4.,
                     edge_ratio_y: 5.,
+                    per_view_eye_tracked: SwitchDefault {
+                        enabled: false,
+                        content: PerViewFoveationConfigDefault {
+                            gui_collapsed: true,
+                            update_rate_hz: 10.0,
+                            max_offset_normalized: 0.25,
+                            confidence_floor: 0.5,
+                        },
+                    },
                 },
             },
             clientside_foveation: SwitchDefault {
