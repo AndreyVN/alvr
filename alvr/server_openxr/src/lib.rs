@@ -56,7 +56,7 @@ use alvr_common::{
     warn,
 };
 use alvr_packets::{BatteryInfo, ButtonValue, Haptics};
-use alvr_server_core::{HandType, ServerCoreContext, ServerCoreEvent};
+use alvr_server_core::{HandType, PerViewFoveationView, ServerCoreContext, ServerCoreEvent};
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
@@ -243,6 +243,15 @@ fn event_loop(
                 }
                 ServerCoreEvent::LocalViewParams(params) => {
                     *LOCAL_VIEW_PARAMS.write() = params;
+                }
+                ServerCoreEvent::PerViewFoveation(views) => {
+                    // Translate server_core's per-axis view into the bridge
+                    // cache shape (which adds the `is_present` flag for the
+                    // encoder's "encode at full resolution" fast path).
+                    *FOVEATION.write() = [
+                        per_view_to_bridge(&views[0]),
+                        per_view_to_bridge(&views[1]),
+                    ];
                 }
                 ServerCoreEvent::Buttons(entries) => {
                     // Route each entry by device_id from BUTTON_INFO.
@@ -873,6 +882,19 @@ const DEFAULT_FOVEATION_VIEW: AlvrOxrFoveationView = AlvrOxrFoveationView {
 /// (it survives connect/disconnect cycles cleanly) and the encoder hot-path
 /// shouldn't pay the cost of a SERVER_CORE_CONTEXT read just to ask for it.
 static FOVEATION: RwLock<[AlvrOxrFoveationView; 2]> = RwLock::new([DEFAULT_FOVEATION_VIEW; 2]);
+
+/// Build a bridge-shape [`AlvrOxrFoveationView`] from server_core's
+/// [`PerViewFoveationView`]. The producing side has no notion of "absent" —
+/// any event delivered means we have valid params for this view, so
+/// `is_present = true`.
+fn per_view_to_bridge(view: &PerViewFoveationView) -> AlvrOxrFoveationView {
+    AlvrOxrFoveationView {
+        is_present: true,
+        center_size: view.center_size,
+        center_shift: view.center_shift,
+        edge_ratio: view.edge_ratio,
+    }
+}
 
 /// Read the latest cached per-view foveation params. Drives the encoder side
 /// inside [`alvr_oxr_submit_layers`]. Returns `Ok` with `is_present = false`

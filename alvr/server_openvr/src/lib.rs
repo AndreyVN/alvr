@@ -300,6 +300,11 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                 ServerCoreEvent::ProximityState(headset_is_worn) => unsafe {
                     SetProximityState(headset_is_worn)
                 },
+                // Per-view foveation is OpenXR-mode-only; SteamVR's FFR
+                // pipeline is uniform per-eye and ignores the hint. Drop the
+                // event silently — if a SteamVR-mode parity port is ever
+                // built it would land here.
+                ServerCoreEvent::PerViewFoveation(_) => {}
             }
         }
 

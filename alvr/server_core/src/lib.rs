@@ -72,6 +72,19 @@ pub fn initialize_environment(layout: afs::Layout) {
     SESSION_MANAGER.write().session_mut();
 }
 
+/// Per-view foveation parameters carried over [`ServerCoreEvent::PerViewFoveation`].
+/// Matches the per-axis shape of `alvr_session::FoveatedEncodingConfig` — both
+/// the eye-tracking-driven worker (Slice 5) and a future wire-side
+/// `RealTimeConfig.per_view_foveation` (Slice 4) converge on this shape.
+/// SteamVR mode ignores the event; the OpenXR-mode drain thread translates
+/// it into `alvr_oxr_set_foveation`.
+#[derive(Debug, Clone, Copy)]
+pub struct PerViewFoveationView {
+    pub center_size: [f32; 2],
+    pub center_shift: [f32; 2],
+    pub edge_ratio: [f32; 2],
+}
+
 pub enum ServerCoreEvent {
     SetOpenvrProperty {
         device_id: u64,
@@ -82,6 +95,7 @@ pub enum ServerCoreEvent {
     Battery(BatteryInfo),
     PlayspaceSync(Vec2),
     LocalViewParams([ViewParams; 2]), // In relation to head
+    PerViewFoveation([PerViewFoveationView; 2]), // Phase 7 per-view foveation
     Tracking {
         poll_timestamp: Duration,
     },
