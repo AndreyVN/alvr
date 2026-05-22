@@ -115,6 +115,14 @@ pub struct ConnectionContext {
     statistics_manager: RwLock<Option<StatisticsManager>>,
     bitrate_manager: Mutex<BitrateManager>,
     tracking_manager: RwLock<TrackingManager>,
+    /// Latest per-side view parameters the client reported via
+    /// [`ClientControlPacket::LocalViewParams`]. Mirrors what
+    /// `alvr_server_openxr`'s `LOCAL_VIEW_PARAMS` already caches on the bridge
+    /// side — kept here too so server_core-internal consumers (e.g. the
+    /// per-view foveation emitter in `tracking_loop`) don't need a round-trip
+    /// through `ServerCoreEvent`. Defaults to `[ViewParams::DUMMY; 2]` until
+    /// the client sends its real view config.
+    local_view_params: RwLock<[ViewParams; 2]>,
     decoder_config: Mutex<Option<DecoderInitializationConfig>>,
     video_mirror_sender: Mutex<Option<broadcast::Sender<Vec<u8>>>>,
     video_recording_file: Mutex<Option<File>>,
@@ -227,6 +235,7 @@ impl ServerCoreContext {
             tracking_manager: RwLock::new(TrackingManager::new(
                 initial_settings.connection.statistics_history_size,
             )),
+            local_view_params: RwLock::new([ViewParams::DUMMY; 2]),
             decoder_config: Mutex::new(None),
             video_mirror_sender: Mutex::new(None),
             video_recording_file: Mutex::new(None),

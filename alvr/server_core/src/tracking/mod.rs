@@ -471,7 +471,9 @@ pub fn tracking_loop(
             }
 
             // Per-view foveation producer: gated on the (nested) session
-            // switch, rate-limited inside the emitter. Sends straight to the
+            // switch, rate-limited inside the emitter. View params come from
+            // the local cache the connection control thread updates on
+            // ClientControlPacket::LocalViewParams. Sends straight to the
             // OpenXR-mode drain thread (which forwards to the bridge cache);
             // SteamVR mode drops the event in its own handler.
             if let Switch::Enabled(static_config) =
@@ -481,6 +483,7 @@ pub fn tracking_loop(
                     &tracking.face,
                     static_config,
                     per_view_config,
+                    &ctx.local_view_params.read(),
                     Instant::now(),
                 )
             {

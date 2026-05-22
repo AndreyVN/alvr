@@ -13,7 +13,10 @@
 //! upstream of `gaze_to_center_shift`.
 
 use crate::PerViewFoveationView;
-use alvr_common::glam::{Quat, Vec3};
+use alvr_common::{
+    ViewParams,
+    glam::{Quat, Vec3},
+};
 use alvr_packets::FaceData;
 use alvr_session::{FoveatedEncodingConfig, PerViewFoveationConfig};
 use std::time::{Duration, Instant};
@@ -22,14 +25,17 @@ use std::time::{Duration, Instant};
 /// the scoping doc's recommendation and natural saccade granularity.
 const DEFAULT_DEAD_BAND_RAD: f32 = 0.035;
 
-/// Placeholder half-FOV used by [`PerViewFoveationEmitter`] until the
-/// negotiated client view config is plumbed into the producer.  ~57° (1.0 rad)
-/// is a reasonable middle ground for current PCVR headsets (Quest 3 ≈ 53°,
-/// Vive Pro 2 ≈ 60°). Over-estimating compresses the centre offset; the
-/// `max_offset_normalized` clamp keeps the output bounded regardless.
-// TODO: thread real per-view FOV from the negotiated `LocalViewParams` event
-// into the emitter so eye-tracked centres land in the right image-space spot.
-const PLACEHOLDER_HALF_FOV_RAD: f32 = 1.0;
+/// Extract a symmetric half-FOV (radians) from a `ViewParams` with potentially
+/// asymmetric `Fov { left, right, up, down }`. Uses the larger of each axis's
+/// two magnitudes so the gaze can reach the full extent of the view on either
+/// side without saturating prematurely. Returns `[half_fov_x, half_fov_y]`.
+fn symmetric_half_fov(params: &ViewParams) -> [f32; 2] {
+    let fov = params.fov;
+    [
+        fov.left.abs().max(fov.right.abs()),
+        fov.up.abs().max(fov.down.abs()),
+    ]
+}
 
 /// Convert a head-space gaze quaternion into image-space foveation
 /// `[center_shift_x, center_shift_y]` for a single view.
@@ -130,6 +136,10 @@ impl PerViewFoveationEmitter {
     ///
     /// View ordering: index 0 = left, index 1 = right (matches
     /// `LocalViewParams` and the bridge's `AlvrOxrFoveationView` cache).
+    /// `view_params` carries the client's negotiated per-view FOV so the
+    /// gaze → normalised-offset projection uses the right denominator per
+    /// side; pass `[ViewParams::DUMMY; 2]` before the client has reported its
+    /// view config (the DUMMY values produce a sensible ±1 rad half-FOV).
     ///
     /// Gaze source preference matches `face::FaceTrackingSink::send_tracking`:
     /// per-eye `eyes_social` when both sides are present, otherwise the
@@ -139,6 +149,7 @@ impl PerViewFoveationEmitter {
         face: &FaceData,
         static_config: &FoveatedEncodingConfig,
         per_view_config: &PerViewFoveationConfig,
+        view_params: &[ViewParams; 2],
         now: Instant,
     ) -> Option<[PerViewFoveationView; 2]> {
         let min_interval = Duration::from_secs_f32(
@@ -167,12 +178,17 @@ impl PerViewFoveationEmitter {
             edge_ratio: [static_config.edge_ratio_x, static_config.edge_ratio_y],
         };
 
-        let view_for = |gaze: Quat| PerViewFoveationView {
+        let half_fovs = [
+            symmetric_half_fov(&view_params[0]),
+            symmetric_half_fov(&view_params[1]),
+        ];
+
+        let view_for = |gaze: Quat, half_fov: [f32; 2]| PerViewFoveationView {
             center_size: static_view.center_size,
             center_shift: gaze_to_center_shift(
                 gaze,
-                PLACEHOLDER_HALF_FOV_RAD,
-                PLACEHOLDER_HALF_FOV_RAD,
+                half_fov[0],
+                half_fov[1],
                 DEFAULT_DEAD_BAND_RAD,
                 per_view_config.max_offset_normalized,
             ),
@@ -180,8 +196,12 @@ impl PerViewFoveationEmitter {
         };
 
         let views = [
-            gazes[0].map(view_for).unwrap_or(static_view),
-            gazes[1].map(view_for).unwrap_or(static_view),
+            gazes[0]
+                .map(|g| view_for(g, half_fovs[0]))
+                .unwrap_or(static_view),
+            gazes[1]
+                .map(|g| view_for(g, half_fovs[1]))
+                .unwrap_or(static_view),
         ];
 
         self.last_emit = Some(now);
@@ -343,7 +363,13 @@ mod tests {
             face_expressions: None,
         };
         let out =
-            emitter.maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now());
+            emitter.maybe_compute(
+                &face,
+                &default_static_config(),
+                &per_view_cfg(10.0),
+                &[ViewParams::DUMMY; 2],
+                Instant::now(),
+            );
         assert!(out.is_none(), "no gaze → no event");
     }
 
@@ -352,7 +378,13 @@ mod tests {
         let mut emitter = PerViewFoveationEmitter::new();
         let face = face_with_combined(gaze_quat(0.2, 0.0));
         let views = emitter
-            .maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now())
+            .maybe_compute(
+                &face,
+                &default_static_config(),
+                &per_view_cfg(10.0),
+                &[ViewParams::DUMMY; 2],
+                Instant::now(),
+            )
             .expect("combined gaze → event");
         // Both views share the same gaze → identical center_shift.
         assert_eq!(views[0].center_shift, views[1].center_shift);
@@ -366,7 +398,13 @@ mod tests {
         // gaze, e.g. focusing on something close).
         let face = face_with_social(gaze_quat(-0.1, 0.0), gaze_quat(0.1, 0.0));
         let views = emitter
-            .maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now())
+            .maybe_compute(
+                &face,
+                &default_static_config(),
+                &per_view_cfg(10.0),
+                &[ViewParams::DUMMY; 2],
+                Instant::now(),
+            )
             .expect("social gaze → event");
         assert!(
             views[0].center_shift[0] < 0.0 && views[1].center_shift[0] > 0.0,
@@ -384,7 +422,13 @@ mod tests {
 
         assert!(
             emitter
-                .maybe_compute(&face, &default_static_config(), &cfg, t0)
+                .maybe_compute(
+                    &face,
+                    &default_static_config(),
+                    &cfg,
+                    &[ViewParams::DUMMY; 2],
+                    t0,
+                )
                 .is_some(),
             "first call should emit"
         );
@@ -395,6 +439,7 @@ mod tests {
                     &face,
                     &default_static_config(),
                     &cfg,
+                    &[ViewParams::DUMMY; 2],
                     t0 + Duration::from_millis(50),
                 )
                 .is_none(),
@@ -407,6 +452,7 @@ mod tests {
                     &face,
                     &default_static_config(),
                     &cfg,
+                    &[ViewParams::DUMMY; 2],
                     t0 + Duration::from_millis(150),
                 )
                 .is_some(),
@@ -415,11 +461,59 @@ mod tests {
     }
 
     #[test]
+    fn emitter_honours_per_side_half_fov() {
+        // A view with a *smaller* half-FOV maps the same gaze yaw to a
+        // *larger* normalised offset — that's the whole point of plumbing
+        // real FOV. Pre-clamp at max_offset=1.0 so we can read the
+        // proportionality directly.
+        let mut emitter = PerViewFoveationEmitter::new();
+        let face = face_with_social(gaze_quat(0.3, 0.0), gaze_quat(0.3, 0.0));
+        let mut narrow = ViewParams::DUMMY;
+        narrow.fov = alvr_common::Fov {
+            left: -0.5,
+            right: 0.5,
+            up: 0.5,
+            down: -0.5,
+        };
+        let mut wide = ViewParams::DUMMY;
+        wide.fov = alvr_common::Fov {
+            left: -1.5,
+            right: 1.5,
+            up: 1.5,
+            down: -1.5,
+        };
+        let views = emitter
+            .maybe_compute(
+                &face,
+                &default_static_config(),
+                &PerViewFoveationConfig {
+                    update_rate_hz: 10.0,
+                    max_offset_normalized: 1.0,
+                    confidence_floor: 0.5,
+                },
+                &[narrow, wide],
+                Instant::now(),
+            )
+            .expect("event");
+        assert!(
+            views[0].center_shift[0] > views[1].center_shift[0],
+            "narrower view (half_fov=0.5) → larger normalised offset than wider view (half_fov=1.5); got {:?}",
+            views.map(|v| v.center_shift[0]),
+        );
+    }
+
+    #[test]
     fn emitter_propagates_static_center_size_and_edge_ratio() {
         let mut emitter = PerViewFoveationEmitter::new();
         let face = face_with_combined(Quat::IDENTITY);
         let views = emitter
-            .maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now())
+            .maybe_compute(
+                &face,
+                &default_static_config(),
+                &per_view_cfg(10.0),
+                &[ViewParams::DUMMY; 2],
+                Instant::now(),
+            )
             .expect("event with identity gaze");
         let cfg = default_static_config();
         // Identity gaze → zero center_shift, but center_size and edge_ratio
