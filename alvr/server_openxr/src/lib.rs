@@ -793,9 +793,13 @@ pub const ALVR_OXR_HAND_JOINT_COUNT: u32 = 26;
 /// `out_joints` untouched when the client reports `hand_skeletons[side] = None`
 /// for the resolved frame.
 ///
-/// Sources the skeleton from `ServerCoreContext::get_hand_skeleton`, which in
-/// turn reads the latest `TrackingData.hand_skeletons[side]` sample at-or-
-/// before `at_timestamp_ns` from the tracking manager. Joint order matches the
+/// Sources the skeleton from `ServerCoreContext::get_hand_skeleton`, which
+/// **ignores `at_timestamp_ns`** and returns the most recently received
+/// `TrackingData.hand_skeletons[side]` sample. Quest hand samples are
+/// timestamped in the client's predicted-display clock domain and there is no
+/// client↔server time sync, so timestamp-based matching cannot align with the
+/// PC-runtime clock that OpenXR callers query in. Staleness is bounded by the
+/// Quest's send cadence (~10–16 ms). Joint order matches the
 /// `XR_HAND_JOINT_*_EXT` enum 1:1 — the bridge does no reordering, so the
 /// Monado-side `xrt_device::get_hand_tracking` can hand them straight to the
 /// state tracker. Returns `NotInitialised` when the bridge isn't initialised;
