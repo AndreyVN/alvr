@@ -393,6 +393,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "alvr_oxr_hand_smoke"
+version = "21.0.0-dev13"
+dependencies = [
+ "openxr",
+]
+
+[[package]]
 name = "alvr_packets"
 version = "21.0.0-dev13"
 dependencies = [
