@@ -1,6 +1,6 @@
 # Hand-tracking passthrough — scoping (2026-05-22)
 
-Status: **All three slices LANDED 2026-05-22.** Slice 1 + 3 (alvr-side ABI v4 + `ServerCoreContext::get_hand_skeleton` wire-up) shipped first; Slice 2 (Monado-side `xrt_device::get_hand_tracking` consuming the bridge call) shipped same day after confirming the fork can be iterated locally without the push gate. End-to-end behavioural verification (an OpenXR app on the PC actually receiving the joint set via `xrLocateHandJointsEXT`) is hardware-gated alongside Gates C–G in [`NEXT_STEPS.md`](NEXT_STEPS.md). The recommended landing-order section at the bottom is preserved as a reference, but every step in it is now done.
+Status: **All three slices LANDED 2026-05-22. Gate C cleared same day** — end-to-end hand-tracking verified on a Quest 3 via a purpose-built headless OpenXR smoke test (`alvr/oxr_hand_smoke`): 488/488 frames with both wrists fully tracked (`location_flags = 0xf`), real motion captured. Slice 1 + 3 (alvr-side ABI v4 + `ServerCoreContext::get_hand_skeleton` wire-up) shipped first; Slice 2 (Monado-side `xrt_device::get_hand_tracking` consuming the bridge call) shipped same day; two follow-up fixes were needed before Gate C went green (see "Gate C bring-up" below). The recommended landing-order section at the bottom is preserved as a reference, but every step in it is now done.
 
 ## What "passthrough" means here
 
@@ -111,7 +111,20 @@ What actually shipped on the fork side:
 
 ## Verification ceiling (where this proves out)
 
-Gate A/B equivalents stay achievable on this dev box (just compile + boot `monado-service.exe`, grep for the hand-tracker devices in the device list). Gate C — a real client driving `XR_EXT_hand_tracking` through the runtime — needs host 101 + a real headset. That is the same headset-blocked ceiling already on Gates C–G in `NEXT_STEPS.md`; no new verification debt.
+Gate A/B equivalents stay achievable on this dev box (just compile + boot `monado-service.exe`, grep for the hand-tracker devices in the device list). **Gate C cleared 2026-05-22** — see the bring-up section below.
+
+## Gate C bring-up — what the hardware run actually surfaced
+
+End-to-end XR_EXT_hand_tracking sat behind two latent bugs that didn't show up at Gates A/B because they don't fire until a real PC OpenXR client actually attempts to locate hand-joints. The `alvr/oxr_hand_smoke` crate (`cargo build -p alvr_oxr_hand_smoke --release`) exercises the path headlessly: XR_MND_headless session, XR_EXT_hand_tracking enabled, drains session events through FOCUSED, calls xrLocateHandJointsEXT at ~60 Hz for 8s.
+
+Both fixes landed alongside the verification:
+
+- **alvr-side: `ServerCoreContext::get_hand_skeleton` exact-timestamp match returns None forever.** Quest hand samples carry the client's predicted-display timestamp (Quest OpenXR XrTime, e.g. ~7000s of uptime), but the PC-runtime caller (Monado-monotonic, from `xrLocateHandJointsEXT(time)`) queries in a different clock domain. There is no client/server clock sync (`alvr/client_openxr/src/stream.rs:645` comment "no time sync step is performed"). `get_hand_skeleton` now ignores `_sample_timestamp` and returns the most recent sample; staleness is bounded by the Quest's ~10–16 ms send cadence. Throttled `info!` in `report_hand_skeleton` makes future investigations one log grep away (`grep -c report_hand_skeleton session_log.txt`).
+- **Monado-fork-side: `alvr_create_devices` left the space overseer empty.** Called `u_space_overseer_create(broadcast)` without the standard follow-up `u_space_overseer_legacy_setup(uso, xdevs, xdev_count, head, &T_stage_local, ...)`. The empty overseer meant every `xrt_space_overseer_locate_device` IPC call hit `find_xdev_space_read_locked == NULL`, the server tore down the client pipe with `ReadFile: 109 ERROR_BROKEN_PIPE`, and the OpenXR app saw `XRT_ERROR_IPC_FAILURE` on every `xrLocateSpace` / `xrLocateHandJointsEXT`. Symptom on the client: `Supported reference spaces: [LOCAL]` instead of `[VIEW, LOCAL, STAGE]`. Mirroring the standard setup from `u_builders.c` (1.6 m local-floor offset) wires all xdevs into the space graph and unblocks every locate call.
+
+Both fixes are tested by the same smoke-test invocation. On a green run: `Runtime: Monado(XRT) by Collabora et al ... v25.1.0`, system `"Monado: ALVR Streamed HMD"`, reference spaces `[VIEW, LOCAL, STAGE]`, hand trackers (L+R) created, `Summary: frames=N L valid=N (100%) R valid=N (100%)`, IPC failure count = 0.
+
+Launch quirks: `monado-service.exe` and the OpenXR client must both run **non-elevated** (the OpenXR loader silently ignores `XR_RUNTIME_JSON` when the process is elevated, and the IPC pipe ACL blocks non-admin connections to an admin-owned monado-service). `ALVR_ROOT` must point at a user-writable path (default `C:/ProgramData/alvr_openxr_root` panics `alvr_server_core::logging_backend` if admin-owned). See [[openxr-mode-quirks-windows]] for the four-trap launch checklist.
 
 ## Recommended landing order (when the hosting blocker clears)
 
