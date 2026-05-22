@@ -1,6 +1,6 @@
 # Hand-tracking passthrough — scoping (2026-05-22)
 
-Status: **Slices 1 + 3 LANDED 2026-05-22** (alvr-side ABI v4 + `ServerCoreContext::get_hand_skeleton` wire-up — see [`NEXT_STEPS.md`](NEXT_STEPS.md) Phase 7 hand-tracking bullet). Only Slice 2 outstanding: the Monado-side `xrt_device::get_hand_tracking` that consumes the bridge call. That slice needs the fork push.
+Status: **All three slices LANDED 2026-05-22.** Slice 1 + 3 (alvr-side ABI v4 + `ServerCoreContext::get_hand_skeleton` wire-up) shipped first; Slice 2 (Monado-side `xrt_device::get_hand_tracking` consuming the bridge call) shipped same day after confirming the fork can be iterated locally without the push gate. End-to-end behavioural verification (an OpenXR app on the PC actually receiving the joint set via `xrLocateHandJointsEXT`) is hardware-gated alongside Gates C–G in [`NEXT_STEPS.md`](NEXT_STEPS.md). The recommended landing-order section at the bottom is preserved as a reference, but every step in it is now done.
 
 ## What "passthrough" means here
 
@@ -93,12 +93,12 @@ Option 1 unless we hit a real reason for asymmetry. Add a migration entry in `al
 
 The OpenXR-mode driver advertises `XR_EXT_hand_tracking` unconditionally and just answers "untracked" when the switch is off — same pattern as how Monado's other drivers behave when the user disables tracking at the OS level.
 
-## Monado-side wiring (out of this scope, named here for the follow-up)
+## Monado-side wiring (as landed in Slice 2)
 
-Pieces the next slice will need (after the hosting blocker clears):
-1. New `xrt_device` flagged `XRT_DEVICE_TYPE_HAND_TRACKER` for each side (or extend the existing `ALVR Streamed Controller (L/R)` devices to also implement `get_hand_tracking`; cleaner to keep them separate so an OS-level controller-only profile doesn't pay the hand-tracking cost).
-2. `get_hand_tracking` impl that calls `alvr_oxr_get_hand_skeleton`, fills the radius/flags table, and writes `xrt_hand_joint_set`.
-3. `target_builder_alvr.c` enables the hand-tracker devices when the bridge advertises capability — likely a new `alvr_oxr_capabilities` bitfield entry (cheaper than a per-feature bridge call; lets us add foveation / eye tracking the same way later).
+What actually shipped on the fork side:
+1. New per-side `alvr_hand` xrt_device in `openxr/src/xrt/drivers/alvr/alvr_hand.c`, flagged `XRT_DEVICE_HAND_TRACKER` / `XRT_DEVICE_TYPE_HAND_TRACKER`, advertising a single `XRT_INPUT_HT_UNOBSTRUCTED_{LEFT,RIGHT}` input and `supported.hand_tracking = true`. Kept separate from `alvr_controller` per the original recommendation, so a touch-profile-only consumer doesn't pay the per-frame joint copy.
+2. `alvr_hand_get_hand_tracking` calls `alvr_oxr_get_hand_skeleton`, copies the 26 joint poses 1:1 into `xrt_hand_joint_set::values.hand_joint_set_default[]`, stamps `XRT_SPACE_RELATION_{ORIENTATION,POSITION}_{VALID,TRACKED}_BIT` on every joint, applies the static per-joint radius table via `u_hand_joints_apply_joint_width`, sets `hand_pose` to the wrist relation, and sets `is_active = true`. When the bridge reports untracked the function zeroes `out_value` and returns Ok (the state tracker gates on `is_active`).
+3. `alvr_hub.c::alvr_create_devices` wires the two devices into `xsysd->xdevs[]` and points `xsysd->static_roles.hand_tracking.unobstructed.{left,right}` at them. No `alvr_oxr_capabilities` bitfield was added — the device is always present; `is_active = false` is the cheap path when the client has hand-tracking off. If a later session needs per-feature gating (eye tracking, etc.) the bitfield can be added then.
 
 ## Wire-compat checklist (for the actual landing slice)
 
