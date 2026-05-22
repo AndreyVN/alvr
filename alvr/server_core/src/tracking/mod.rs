@@ -9,6 +9,7 @@ pub use vmc::*;
 use crate::{
     ConnectionContext, SESSION_MANAGER, ServerCoreEvent,
     connection::STREAMING_RECV_TIMEOUT,
+    foveation::PerViewFoveationEmitter,
     hand_gestures::{self, HAND_GESTURE_BUTTON_SET, HandGestureManager},
     input_mapping::ButtonMappingManager,
 };
@@ -31,7 +32,7 @@ use std::{
     collections::{HashMap, VecDeque},
     f32::consts::{FRAC_PI_2, FRAC_PI_4, PI},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const DEG_TO_RAD: f32 = PI / 180.0;
@@ -384,6 +385,8 @@ pub fn tracking_loop(
         .into_option()
         .and_then(|config| VMCSink::new(config).ok());
 
+    let mut per_view_foveation_emitter = PerViewFoveationEmitter::new();
+
     while is_streaming() {
         let data = match tracking_receiver.recv(STREAMING_RECV_TIMEOUT) {
             Ok(tracking) => tracking,
@@ -465,6 +468,25 @@ pub fn tracking_loop(
 
             if let Some(sink) = &mut face_tracking_sink {
                 sink.send_tracking(&tracking.face);
+            }
+
+            // Per-view foveation producer: gated on the (nested) session
+            // switch, rate-limited inside the emitter. Sends straight to the
+            // OpenXR-mode drain thread (which forwards to the bridge cache);
+            // SteamVR mode drops the event in its own handler.
+            if let Switch::Enabled(static_config) =
+                &session_manager_lock.settings().video.foveated_encoding
+                && let Switch::Enabled(per_view_config) = &static_config.per_view_eye_tracked
+                && let Some(views) = per_view_foveation_emitter.maybe_compute(
+                    &tracking.face,
+                    static_config,
+                    per_view_config,
+                    Instant::now(),
+                )
+            {
+                ctx.events_sender
+                    .send(ServerCoreEvent::PerViewFoveation(views))
+                    .ok();
             }
 
             if session_manager_lock.settings().extra.logging.log_tracking {

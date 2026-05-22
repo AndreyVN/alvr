@@ -12,7 +12,24 @@
 //! microjitter should drive a low-pass filter (one-Euro, Kalman, EMA, etc.)
 //! upstream of `gaze_to_center_shift`.
 
+use crate::PerViewFoveationView;
 use alvr_common::glam::{Quat, Vec3};
+use alvr_packets::FaceData;
+use alvr_session::{FoveatedEncodingConfig, PerViewFoveationConfig};
+use std::time::{Duration, Instant};
+
+/// Dead band on raw gaze angles before the normalisation step. ~2° matches
+/// the scoping doc's recommendation and natural saccade granularity.
+const DEFAULT_DEAD_BAND_RAD: f32 = 0.035;
+
+/// Placeholder half-FOV used by [`PerViewFoveationEmitter`] until the
+/// negotiated client view config is plumbed into the producer.  ~57° (1.0 rad)
+/// is a reasonable middle ground for current PCVR headsets (Quest 3 ≈ 53°,
+/// Vive Pro 2 ≈ 60°). Over-estimating compresses the centre offset; the
+/// `max_offset_normalized` clamp keeps the output bounded regardless.
+// TODO: thread real per-view FOV from the negotiated `LocalViewParams` event
+// into the emitter so eye-tracked centres land in the right image-space spot.
+const PLACEHOLDER_HALF_FOV_RAD: f32 = 1.0;
 
 /// Convert a head-space gaze quaternion into image-space foveation
 /// `[center_shift_x, center_shift_y]` for a single view.
@@ -82,10 +99,101 @@ fn apply_dead_band(value: f32, threshold: f32) -> f32 {
     if value.abs() < threshold { 0.0 } else { value }
 }
 
+/// Rate-limited producer of [`crate::ServerCoreEvent::PerViewFoveation`].
+/// Lives inside the tracking loop and consumes raw `FaceData.eyes_*` samples,
+/// applies [`gaze_to_center_shift`], and decides whether enough time has
+/// elapsed since the last emit to publish another update.
+///
+/// State here is intentionally minimal — just the last-emit timestamp. The
+/// emitter does not do any time-series smoothing of the gaze itself; the
+/// `gaze_to_center_shift` dead band suppresses micro-jitter, and any further
+/// filtering (one-Euro, EMA, etc.) is a follow-up if real eye-tracking data
+/// turns out to be too jittery in practice.
+pub struct PerViewFoveationEmitter {
+    last_emit: Option<Instant>,
+}
+
+impl Default for PerViewFoveationEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PerViewFoveationEmitter {
+    pub fn new() -> Self {
+        Self { last_emit: None }
+    }
+
+    /// Decide whether an emit is warranted this tick. Returns `Some(views)`
+    /// when the rate-limit window has elapsed *and* the client supplied a
+    /// gaze sample for the resolved frame; `None` otherwise.
+    ///
+    /// View ordering: index 0 = left, index 1 = right (matches
+    /// `LocalViewParams` and the bridge's `AlvrOxrFoveationView` cache).
+    ///
+    /// Gaze source preference matches `face::FaceTrackingSink::send_tracking`:
+    /// per-eye `eyes_social` when both sides are present, otherwise the
+    /// shared `eyes_combined` quaternion applied to both views.
+    pub fn maybe_compute(
+        &mut self,
+        face: &FaceData,
+        static_config: &FoveatedEncodingConfig,
+        per_view_config: &PerViewFoveationConfig,
+        now: Instant,
+    ) -> Option<[PerViewFoveationView; 2]> {
+        let min_interval = Duration::from_secs_f32(
+            // Guard against a degenerate / hostile rate config; 0.1 Hz is the
+            // floor (one update every 10s — generous enough that an angry
+            // session.json still spits out updates rather than going silent).
+            1.0 / per_view_config.update_rate_hz.max(0.1),
+        );
+        if let Some(last) = self.last_emit
+            && now.duration_since(last) < min_interval
+        {
+            return None;
+        }
+
+        let gazes: [Option<Quat>; 2] = if let [Some(left), Some(right)] = face.eyes_social {
+            [Some(left), Some(right)]
+        } else if let Some(combined) = face.eyes_combined {
+            [Some(combined), Some(combined)]
+        } else {
+            return None;
+        };
+
+        let static_view = PerViewFoveationView {
+            center_size: [static_config.center_size_x, static_config.center_size_y],
+            center_shift: [static_config.center_shift_x, static_config.center_shift_y],
+            edge_ratio: [static_config.edge_ratio_x, static_config.edge_ratio_y],
+        };
+
+        let view_for = |gaze: Quat| PerViewFoveationView {
+            center_size: static_view.center_size,
+            center_shift: gaze_to_center_shift(
+                gaze,
+                PLACEHOLDER_HALF_FOV_RAD,
+                PLACEHOLDER_HALF_FOV_RAD,
+                DEFAULT_DEAD_BAND_RAD,
+                per_view_config.max_offset_normalized,
+            ),
+            edge_ratio: static_view.edge_ratio,
+        };
+
+        let views = [
+            gazes[0].map(view_for).unwrap_or(static_view),
+            gazes[1].map(view_for).unwrap_or(static_view),
+        ];
+
+        self.last_emit = Some(now);
+        Some(views)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alvr_common::glam::EulerRot;
+    use alvr_session::settings_schema::Switch;
 
     const HALF_FOV: f32 = 0.9; // ~51° — typical headset half-FOV, matches FB Touch
     const DEAD_BAND: f32 = 0.035; // ~2°
@@ -185,5 +293,141 @@ mod tests {
         let q = gaze_quat(-0.3, 0.0);
         let shift = gaze_to_center_shift(q, HALF_FOV, HALF_FOV, DEAD_BAND, MAX_OFFSET);
         assert!(shift[0] < 0.0, "left gaze → negative center_shift_x");
+    }
+
+    // ----- PerViewFoveationEmitter tests ---------------------------------
+
+    fn default_static_config() -> FoveatedEncodingConfig {
+        FoveatedEncodingConfig {
+            force_enable: false,
+            center_size_x: 0.45,
+            center_size_y: 0.4,
+            center_shift_x: 0.4,
+            center_shift_y: 0.1,
+            edge_ratio_x: 4.0,
+            edge_ratio_y: 5.0,
+            per_view_eye_tracked: Switch::Disabled,
+        }
+    }
+
+    fn per_view_cfg(update_rate_hz: f32) -> PerViewFoveationConfig {
+        PerViewFoveationConfig {
+            update_rate_hz,
+            max_offset_normalized: 0.25,
+            confidence_floor: 0.5,
+        }
+    }
+
+    fn face_with_combined(q: Quat) -> FaceData {
+        FaceData {
+            eyes_combined: Some(q),
+            eyes_social: [None, None],
+            face_expressions: None,
+        }
+    }
+
+    fn face_with_social(left: Quat, right: Quat) -> FaceData {
+        FaceData {
+            eyes_combined: None,
+            eyes_social: [Some(left), Some(right)],
+            face_expressions: None,
+        }
+    }
+
+    #[test]
+    fn emitter_skips_when_no_gaze() {
+        let mut emitter = PerViewFoveationEmitter::new();
+        let face = FaceData {
+            eyes_combined: None,
+            eyes_social: [None, None],
+            face_expressions: None,
+        };
+        let out =
+            emitter.maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now());
+        assert!(out.is_none(), "no gaze → no event");
+    }
+
+    #[test]
+    fn emitter_uses_combined_when_social_absent() {
+        let mut emitter = PerViewFoveationEmitter::new();
+        let face = face_with_combined(gaze_quat(0.2, 0.0));
+        let views = emitter
+            .maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now())
+            .expect("combined gaze → event");
+        // Both views share the same gaze → identical center_shift.
+        assert_eq!(views[0].center_shift, views[1].center_shift);
+        assert!(views[0].center_shift[0] > 0.0, "right gaze → positive shift");
+    }
+
+    #[test]
+    fn emitter_prefers_social_when_both_present() {
+        let mut emitter = PerViewFoveationEmitter::new();
+        // Left eye looks slightly left, right eye slightly right (divergent
+        // gaze, e.g. focusing on something close).
+        let face = face_with_social(gaze_quat(-0.1, 0.0), gaze_quat(0.1, 0.0));
+        let views = emitter
+            .maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now())
+            .expect("social gaze → event");
+        assert!(
+            views[0].center_shift[0] < 0.0 && views[1].center_shift[0] > 0.0,
+            "per-view shifts must diverge with eyes_social: got {:?}",
+            views.map(|v| v.center_shift)
+        );
+    }
+
+    #[test]
+    fn emitter_rate_limits() {
+        let mut emitter = PerViewFoveationEmitter::new();
+        let face = face_with_combined(gaze_quat(0.2, 0.0));
+        let cfg = per_view_cfg(10.0); // 100 ms interval
+        let t0 = Instant::now();
+
+        assert!(
+            emitter
+                .maybe_compute(&face, &default_static_config(), &cfg, t0)
+                .is_some(),
+            "first call should emit"
+        );
+        // 50 ms later — inside the rate-limit window.
+        assert!(
+            emitter
+                .maybe_compute(
+                    &face,
+                    &default_static_config(),
+                    &cfg,
+                    t0 + Duration::from_millis(50),
+                )
+                .is_none(),
+            "second call within window must be suppressed"
+        );
+        // 150 ms later — past the 100 ms window.
+        assert!(
+            emitter
+                .maybe_compute(
+                    &face,
+                    &default_static_config(),
+                    &cfg,
+                    t0 + Duration::from_millis(150),
+                )
+                .is_some(),
+            "third call past window emits again"
+        );
+    }
+
+    #[test]
+    fn emitter_propagates_static_center_size_and_edge_ratio() {
+        let mut emitter = PerViewFoveationEmitter::new();
+        let face = face_with_combined(Quat::IDENTITY);
+        let views = emitter
+            .maybe_compute(&face, &default_static_config(), &per_view_cfg(10.0), Instant::now())
+            .expect("event with identity gaze");
+        let cfg = default_static_config();
+        // Identity gaze → zero center_shift, but center_size and edge_ratio
+        // must be passed through from the static config unchanged.
+        for view in &views {
+            assert_eq!(view.center_size, [cfg.center_size_x, cfg.center_size_y]);
+            assert_eq!(view.edge_ratio, [cfg.edge_ratio_x, cfg.edge_ratio_y]);
+            assert!(view.center_shift[0].abs() < 1e-6 && view.center_shift[1].abs() < 1e-6);
+        }
     }
 }
