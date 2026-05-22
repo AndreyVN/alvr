@@ -94,6 +94,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Using reference space: {:?}", space_type);
     let stage = session.create_reference_space(space_type, xr::Posef::IDENTITY)?;
 
+    // Probe xrLocateViews — useful for cross-checking against UE5 / D3D12-binding
+    // OpenXR clients that fail at this call. Headless session has no graphics
+    // binding, so we're testing Monado's view-location path in isolation.
+    println!("Probing xrLocateViews (PRIMARY_STEREO)...");
+    let probe_now = instance.now()?;
+    match session.locate_views(
+        xr::ViewConfigurationType::PRIMARY_STEREO,
+        probe_now,
+        &stage,
+    ) {
+        Ok((flags, views)) => {
+            println!(
+                "  locate_views OK: flags=0x{:x} view_count={}",
+                flags.into_raw(),
+                views.len()
+            );
+            for (i, v) in views.iter().enumerate() {
+                let p = v.pose.position;
+                let f = v.fov;
+                println!(
+                    "  view[{i}] pos=({:+.3},{:+.3},{:+.3}) fov={{l={:+.3} r={:+.3} u={:+.3} d={:+.3}}}",
+                    p.x, p.y, p.z, f.angle_left, f.angle_right, f.angle_up, f.angle_down
+                );
+            }
+        }
+        Err(e) => {
+            println!("  locate_views ERR: {e:?}");
+        }
+    }
+
     println!("Sampling 25 joints/hand for 8s (printing every ~0.5s)...");
     let start = Instant::now();
     let mut frame = 0u32;
