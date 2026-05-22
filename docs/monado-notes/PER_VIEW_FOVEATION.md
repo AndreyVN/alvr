@@ -1,6 +1,6 @@
 # Per-view foveation — scoping (2026-05-22)
 
-Status: **Slice 1 LANDED 2026-05-22** (alvr-side ABI v5 bridge surface — see [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet). Slices 2–6 outstanding; Slices 2, 3, 5 are pure alvr-side and unblocked. Sister doc: [`HAND_TRACKING_PASSTHROUGH.md`](HAND_TRACKING_PASSTHROUGH.md) (Slices 1 + 3 landed alvr-side; Slice 2 on Monado side blocked behind fork-hosting).
+Status: **Slices 1 + 2 + 3 + 5 LANDED 2026-05-22** — alvr-side end-to-end except the producer wiring (`connection.rs` worker that reads `eyes_*` and emits the event) and the encoder body (Slice 6, hardware-blocked). Slice 4 (`RealTimeConfig.per_view_foveation`) deferred — only relevant if foveation needs to ship from a remote producer. See [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet for commits.
 
 ## What "per-view foveation" means here
 
