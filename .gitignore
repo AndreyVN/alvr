@@ -77,3 +77,35 @@ cmake-build-debug/
 # Credentials — never commit
 metrics/.env
 .env
+
+# Local build / install logs written by xtask wrappers, choco runs, vs build tools,
+# winget chains, sdkmanager, prepare-deps etc. Dot-prefixed so they sort to the
+# top in `ls -a` and stay out of the way; never useful to other clones.
+.build-*.log
+.cargo-apk-install.log
+.check.log
+.choco-batch.log
+.choco-runner.ps1
+.dashboard-test.log
+# Catch the accidentally-mangled twin (broken shell quoting on D:\projects\alvr...)
+*dashboard-test.log
+.monado-smoke-hand.log
+.monado-smoke-hand.log.out
+.prepare-deps-*.log
+.sdkmgr.log
+.vs-atl-add.log
+.vs-atl-add.ps1
+.vsbuildtools-install.log
+.winget-chain.log
+
+# Console transcripts from interactive sessions
+20[0-9][0-9]-[01][0-9]-[0-3][0-9]-*-local-command-*.txt
+
+# Python bytecode (metrics ingest server)
+__pycache__/
+*.pyc
+
+# Per-machine Claude Code state. .claude/agents and .claude/commands ARE tracked
+# (project-wide tooling); the lock file and local settings overlay are not.
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
