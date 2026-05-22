@@ -1,6 +1,6 @@
 # Per-view foveation — scoping (2026-05-22)
 
-Status: **Slices 1 + 2 + 3 + 5 + producer wiring LANDED 2026-05-22** — eye-tracking → bridge cache is end-to-end on the alvr side. Tracking loop emits `ServerCoreEvent::PerViewFoveation` at the configured `update_rate_hz` whenever `per_view_eye_tracked.enabled = true` and eye-tracking data is available. Remaining: Slice 6 (encoder body in `alvr_oxr_submit_layers`, hardware-blocked) + real per-view FOV plumb (currently a 1.0 rad placeholder) + Slice 4 (RealTimeConfig wire-compat, deferred until a remote producer needs it). See [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet for commits.
+Status: **Slices 1 + 2 + 3 + 5 + producer wiring + real per-view FOV plumb LANDED 2026-05-22** — eye-tracking → bridge cache is fully end-to-end on the alvr side, using the client's negotiated per-view FOV. Remaining: Slice 6 (encoder body in `alvr_oxr_submit_layers`, hardware-blocked) + Slice 4 (RealTimeConfig wire-compat, deferred until a remote producer needs it). See [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet for commits.
 
 ## What "per-view foveation" means here
 
