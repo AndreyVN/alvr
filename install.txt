@@ -1,0 +1,208 @@
+ALVR build environment — installation record
+============================================
+
+Host:      Windows 11 Pro (10.0.26200)
+Date:      2026-05-13
+User:      worker
+Repo:      D:\projects\alvr  (branch master)
+
+This file records every piece of software/toolchain installed to make
+`cargo xtask build-streamer [--release]` and `cargo xtask build-client
+[--release]` work end-to-end on this machine. Versions are pinned to what
+was actually installed; substitute newer equivalents at your own risk.
+
+
+1. Compilers and SDKs
+---------------------
+
+Visual Studio 2022 Build Tools          17.14.37301.10
+    Install path:   C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
+    MSVC version:   14.44.35207  (cl.exe + link.exe at .\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\)
+    Workloads/components:
+        Microsoft.VisualStudio.Workload.VCTools     (Desktop development with C++)
+        Microsoft.VisualStudio.Component.Windows11SDK.22621
+        Microsoft.VisualStudio.Component.VC.ATL     (required for Intel VPL encoder: atlbase.h)
+        Microsoft.VisualStudio.Component.VC.ATLMFC
+        + recommended components (CMake, MSBuild, AddressSanitizer, etc.)
+    Install method: winget install Microsoft.VisualStudio.2022.BuildTools
+                    then modify via downloaded vs_BuildTools.exe (aka.ms/vs/17/release/vs_buildtools.exe)
+                    to add ATL/ATLMFC components.
+
+Windows 11 SDK                          10.0.26100.0
+    Install path:   C:\Program Files (x86)\Windows Kits\10
+    Installed by:   VS Build Tools (component Windows11SDK.22621 pulled latest)
+
+Microsoft OpenJDK                       17.0.19.10-hotspot
+    JAVA_HOME:      C:\Program Files\Microsoft\jdk-17.0.19.10-hotspot
+    Install method: winget install Microsoft.OpenJDK.17
+    Required by:    cargo-apk (APK signing via keytool/jarsigner)
+
+Android NDK                             r26b
+    Path:           C:\Android\android-ndk-r26b
+    Install method: direct download from
+                    https://dl.google.com/android/repository/android-ndk-r26b-windows.zip
+                    extracted to C:\Android\
+    Pinned by:      ALVR CI (rust.yml uses ndk-version: r26b)
+    Required by:    cargo apk build for aarch64-linux-android
+
+Android SDK (command-line tools)        latest (build 11076708)
+    Path:           C:\Android\cmdline-tools\latest
+    Install method: direct download from
+                    https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip
+                    extracted to C:\Android\cmdline-tools\, then renamed inner cmdline-tools\ to latest\
+    Components installed via sdkmanager (licenses pre-accepted by writing files in C:\Android\licenses):
+        platforms;android-32        (target SDK 32 per ALVR client manifest)
+        build-tools;32.0.0          (aapt2 needed by cargo-apk)
+        platform-tools              (adb, fastboot — duplicate of winget Google.PlatformTools)
+
+Google Platform Tools (adb)             latest
+    Path:           %LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe
+    Also at:        C:\Android\platform-tools\  (from sdkmanager)
+    Install method: winget install Google.PlatformTools
+
+
+2. Chocolatey and choco packages
+--------------------------------
+
+Chocolatey                              2.7.1
+    Path:           C:\ProgramData\chocolatey
+    Install method: winget install Chocolatey.Chocolatey
+    Required by:    cargo xtask prepare-deps --platform windows (when run without --ci)
+
+The following are installed via `choco install -y` (UAC required). All consumed by
+`cargo xtask prepare-deps --platform windows` while building x264 / FFmpeg / libvpl
+into deps/windows/:
+
+llvm                                    22.1.0
+    Path:           C:\Program Files\LLVM
+    Provides:       clang.exe (used by bindgen for OpenVR / FFmpeg headers)
+
+vulkan-sdk                              1.4.341.0
+    Path:           C:\VulkanSDK\1.4.341.0
+    Provides:       Vulkan headers + validation layers (alvr_graphics, server_openvr)
+
+cmake                                   4.3.2
+    Path:           C:\Program Files\CMake
+    Provides:       cmake.exe (libvpl + FFmpeg builds)
+
+pkgconfiglite                           0.28.0
+    Path:           C:\ProgramData\chocolatey\lib\pkgconfiglite\tools
+    Provides:       pkg-config.exe (Windows port)
+    NB: requires `--allow-empty-checksums` on Chocolatey 2.x (sourceforge zip with no SHA).
+
+zip                                     3.0.0.20251001
+unzip                                   6.0.0.20250209
+    Path:           C:\ProgramData\chocolatey\bin
+    Provides:       archive utilities used by prepare-deps download/extract steps.
+
+
+3. Rust toolchain
+-----------------
+
+rustup-managed:
+    rustc 1.92.0 (ded5c06cf 2025-12-08)
+    cargo 1.92.0 (344c4567c 2025-10-21)
+    Targets installed:
+        x86_64-pc-windows-gnu          (pre-existing)
+        x86_64-pc-windows-msvc         (pre-existing, the host target)
+        aarch64-linux-android          (added: rustup target add aarch64-linux-android)
+
+cargo-installed binaries (~/.cargo/bin):
+    cargo-apk                          0.10.0
+        Install method: cargo install cargo-apk --locked
+        Provides:       `cargo apk build` driven by cargo xtask build-client
+
+
+4. Project-internal artifacts (created by prepare-deps / build)
+---------------------------------------------------------------
+
+deps/windows/
+    x264/        (Valve x264 fork, built from source)
+    ffmpeg/      (FFmpeg, GPL build with x264)
+    libvpl/      (Intel oneVPL, libvpl/alvr_build/)
+    Produced by: cargo xtask prepare-deps --platform windows --ci
+
+deps/android_openxr/
+    arm64-v8a/   (per-vendor OpenXR loader binaries: Meta, Pico, BD, YVR, Khronos)
+    Produced by: cargo xtask prepare-deps --platform android --ci
+
+build/alvr_streamer_windows/
+    ALVR Dashboard.exe                  (eframe GUI)
+    bin/win64/driver_alvr_server.dll    (SteamVR driver cdylib)
+    bin/win64/libvpl.dll
+    bin/win64/openvr_api.dll
+    driver.vrdrivermanifest
+
+build/alvr_client_android/
+    alvr_client_android.apk             (signed with build/alvr_client_android/debug.keystore)
+
+
+5. Environment variables (User scope)
+-------------------------------------
+
+JAVA_HOME            C:\Program Files\Microsoft\jdk-17.0.19.10-hotspot
+ANDROID_NDK_HOME     C:\Android\android-ndk-r26b
+ANDROID_HOME         C:\Android
+ANDROID_SDK_ROOT     C:\Android
+
+The standard Machine PATH additions (made by their respective installers) cover
+Chocolatey, LLVM, CMake, the Vulkan SDK, and the JDK. The Android SDK additions
+above must be exported manually (or PATH-prepended) for cargo-apk to find aapt2
+and adb:
+
+    $env:Path = "$env:JAVA_HOME\bin;C:\Android\platform-tools;C:\Android\build-tools\32.0.0;" + $env:Path
+
+
+6. Reproducing the build from scratch
+-------------------------------------
+
+After the toolchain above is in place (and openvr submodule initialized via
+`git submodule update --init --depth 1 openvr`):
+
+    cargo xtask prepare-deps --platform windows --ci
+    cargo xtask prepare-deps --platform android --ci
+    cargo xtask build-streamer --release
+    cargo xtask build-client   --release
+
+Deploy the client to a connected Quest / Pico / etc:
+
+    adb install -r build/alvr_client_android/alvr_client_android.apk
+    adb shell am start -n alvr.client.dev/android.app.NativeActivity
+    adb logcat -s ALVR:*
+
+Register the streamer with SteamVR (one-time):
+
+    "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" `
+        adddriver "D:\projects\alvr\build\alvr_streamer_windows"
+
+
+7. Known gotchas encountered during initial setup
+-------------------------------------------------
+
+- Build Tools without ATL: the Intel VPL encoder (cpp/platform/win32/VideoEncoderVPL.h)
+  pulls in <atlbase.h>. The default VCTools workload does NOT include ATL —
+  add Microsoft.VisualStudio.Component.VC.ATL and .ATLMFC explicitly.
+
+- vs_installer.exe vs setup.exe vs vs_BuildTools.exe (bootstrapper):
+  Only the bootstrapper (downloaded fresh from aka.ms/vs/17/release/vs_buildtools.exe)
+  honors --wait properly. vs_installer.exe and setup.exe both return immediately
+  even with --wait, regardless of whether the modify is finished.
+
+- Chocolatey 2.x rejects empty checksums by default. pkgconfiglite has no checksum
+  in its package — install with --allow-empty-checksums for that package only.
+
+- choco install crashes mid-batch after the LLVM installer's PATH broadcast (the
+  next package in the same elevated session never starts). Workaround: install
+  LLVM alone, then run a second elevated choco invocation for the rest.
+
+- sdkmanager --licenses is interactive even with stdin piping. Pre-populate
+  $ANDROID_HOME\licenses\ with the well-known hashes to bypass entirely.
+
+- cargo-apk needs ANDROID_HOME (the SDK), not just ANDROID_NDK_HOME (the NDK).
+  Easy to miss because the ALVR README's Android section only talks about the NDK.
+
+- ALVR's `.cargo/config.toml` forces `+crt-static` for x86_64-pc-windows-msvc.
+  This means even host-built proc-macros need the MSVC linker; the GNU `link.exe`
+  shipped under Git Bash's /usr/bin masks the MSVC one if your shell PATH puts
+  /usr/bin ahead of the VS install. cargo's auto-detection via vswhere works fine
+  once VS is registered, so this only bites if you try to invoke link.exe by name.

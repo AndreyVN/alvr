@@ -1,0 +1,292 @@
+================================================================================
+ALVR Metrics Exporter — Plan and Implementation Notes
+================================================================================
+
+Branch: master
+Commit: eec11163 — feat(server): push aggregated streaming stats to an external
+                   HTTP endpoint
+
+Goal
+----
+Every N seconds (default 1s), aggregate the per-frame statistics that the
+ALVR client sends to the server and POST them as JSON to a user-configured
+HTTP endpoint, suitable for ingestion by Grafana / TSDB-style backends.
+
+For "fast" per-frame quantities (latency, throughput, fps), report
+{min, max, avg, n} over the window. For slow / state-like values
+(battery, bitrate directives), report the last value seen.
+
+
+================================================================================
+1. Background — what the client already sends to the server
+================================================================================
+
+Wire packet (alvr/packets/src/lib.rs:303-312):
+
+    pub struct ClientStatistics {
+        pub target_timestamp: Duration, // identifies the frame
+        pub frame_interval: Duration,
+        pub video_decode: Duration,
+        pub video_decoder_queue: Duration,
+        pub rendering: Duration,
+        pub vsync_queue: Duration,
+        pub total_pipeline_latency: Duration,
+    }
+
+Sent once per frame on the dedicated STATISTICS stream
+(client: alvr/client_core/src/connection.rs:272 opens it,
+ server: alvr/server_core/src/connection.rs:855 subscribes).
+
+Server-side ingestion lives in alvr/server_core/src/statistics.rs. The
+StatisticsManager:report_statistics function joins the client-reported
+timings with server-side timestamps and derives:
+    network_latency = total_pipeline_latency
+                    - (game_time + server_compositor + encoder
+                       + video_decode + video_decoder_queue
+                       + rendering + vsync_queue)
+It also emits a per-frame GraphStatistics event for the dashboard, and
+every 500ms emits a coarse StatisticsSummary event.
+
+Other client→server channels (control socket, ClientControlPacket):
+    Battery, Buttons, PlayspaceSync, LocalViewParams,
+    ActiveInteractionProfile, Log, ProximityState, RequestIdr, KeepAlive
+plus dedicated TRACKING and AUDIO (mic) streams.
+
+
+================================================================================
+2. Plan
+================================================================================
+
+Architecture
+------------
+
+The streamer already produces every metric we need, every frame, inside
+StatisticsManager::report_statistics. We tap that point.
+
+    report_statistics  ──►  flume::channel  ──►  metrics_exporter_thread
+       (per-frame, hot)     (bounded, lossy)     (1Hz: aggregate → JSON → POST)
+
+A bounded channel keeps the per-frame hot path lock-free. Aggregation, JSON
+encoding, and the HTTP round-trip all happen on a dedicated std::thread
+(matches the statistics_thread pattern in ARCHITECTURE.md). If the channel
+fills (sink down, exporter blocked), drop oldest and bump a counter — never
+block the streamer.
+
+Aggregation rules
+-----------------
+
+Three categories of fields:
+
+(a) Per-frame distributions → {min, max, avg, n} over the 1s window
+    All GraphStatistics latencies (alvr/events/src/lib.rs:36):
+      total_pipeline_s, game_time_s, server_compositor_s, encoder_s,
+      network_s, decoder_s, decoder_queue_s, client_compositor_s,
+      vsync_queue_s
+    Per-frame:
+      client_fps, server_fps, throughput_bps, bitrate_bps
+
+(b) Window-rate counters → divide by elapsed window
+    video_packets_per_sec, video_mbits_per_sec
+    (already maintained as cumulative totals in StatisticsManager;
+    aggregator snapshots totals at window boundaries and computes deltas)
+
+(c) Last-value snapshots → last value at flush time
+    Cumulative video_packets_total, video_mbytes_total
+    battery_hmd, hmd_plugged
+    BitrateDirectives full struct
+
+For p95/p99 you'd need histograms; out of scope for v1 — min/max/avg/n is
+what was requested.
+
+JSON envelope
+-------------
+
+    {
+      "ts": "2026-05-13T10:23:45.123Z",
+      "tags": { "host": "desktop1", "headset": "quest3" },
+      "window_ms": 1000,
+      "frames": 87,
+      "dropped_samples": 0,
+      "latency_ms": {
+        "total_pipeline":    {"min":..., "max":..., "avg":..., "n":87},
+        "network":           {...},
+        "encoder":           {...},
+        "decoder":           {...},
+        "decoder_queue":     {...},
+        "game_time":         {...},
+        "server_compositor": {...},
+        "client_compositor": {...},
+        "vsync_queue":       {...}
+      },
+      "fps":         { "client": {...}, "server": {...} },
+      "throughput":  { "throughput_bps": {...}, "bitrate_bps": {...},
+                       "video_packets_per_sec": 1234,
+                       "video_mbits_per_sec":  78.5 },
+      "totals":      { "video_packets": ..., "video_mbytes": ... },
+      "battery":     { "hmd_pct": 87, "hmd_plugged": true },  // null if no battery
+      "bitrate_directives": { ... },
+      "exporter":    { "failed_posts": 0 }
+    }
+
+All Duration / *_s values converted to milliseconds at the JSON boundary.
+
+Tags are top-level (not nested under each metric): Grafana JSON datasource,
+Influx, and Prometheus-style ingesters all promote top-level scalar fields
+to labels/dimensions. One copy per snapshot, not per metric.
+
+Configuration (settings schema)
+-------------------------------
+
+Added to ExtraConfig in alvr/session/src/settings.rs as a
+Switch<MetricsExportConfig> (matches the Switch idiom for opt-in features
+and gives a free dashboard UI):
+
+    pub struct MetricsExportConfig {
+        pub url: String,                     // POST endpoint
+        pub interval_ms: u64,                // default 1000
+        pub timeout_ms: u64,                 // default 500
+        pub headers: Vec<(String, String)>,  // auth tokens, etc.
+        pub tags: Vec<(String, String)>,     // host=desktop1, headset=quest3
+    }
+
+Vec<(String, String)> rather than HashMap — settings-schema renders this
+as an editable dictionary list in the dashboard. Headers and tags are
+read once at exporter startup; settings change requires a reconnect.
+
+Session migration: handled automatically by the existing
+extrapolate_session_settings_from_session_settings in
+alvr/session/src/lib.rs (it walks the schema; a missing metrics_export
+field falls back to the default). No code-side migration needed.
+
+HTTP transport
+--------------
+
+ureq = "3" — already a dep of alvr_dashboard and alvr_adb. Blocking calls
+fit a dedicated thread. reqwest would have dragged in tokio for what is
+one POST per second.
+
+- Timeout strictly < interval_ms so a hung endpoint can't stall the loop.
+- On failure: increment failed_posts counter (carried into next snapshot),
+  warn-rate-limited (≤ 1 / 30s) via alvr_common::warn — never println!/eprintln!
+  per CLAUDE.md rule #2.
+- Drop the snapshot on failure; do not retry. Grafana cares about freshness,
+  not completeness.
+
+
+================================================================================
+3. Files changed
+================================================================================
+
+    alvr/session/src/settings.rs        (+61 lines)
+        - New MetricsExportConfig struct.
+        - New metrics_export field on ExtraConfig (Switch wrapper).
+        - Defaults in session_settings_default():
+              enabled: false
+              url: "http://127.0.0.1:8086/api/metrics"
+              interval_ms: 1000
+              timeout_ms: 500
+              headers: empty dict
+              tags:    empty dict
+
+    alvr/server_core/Cargo.toml         (+1 line)
+        - Added: ureq = { version = "3", features = ["json"] }
+          (flume was already a dep, so no new crossbeam needed.)
+
+    alvr/server_core/src/lib.rs         (+2 lines)
+        - Registered: mod metrics_exporter;
+        - Bootstrap StatisticsManager::new(..., None) — no exporter
+          until a client connects.
+
+    alvr/server_core/src/statistics.rs  (+39 lines)
+        - StatisticsManager now carries Option<Sender<Sample>>.
+        - report_statistics: at the bottom (after computing GraphStatistics),
+          push Sample::Frame { stats, video_packets_total, video_bytes_total }
+          via try_push (non-blocking).
+        - report_battery: push Sample::Battery for HEAD_ID.
+        - report_throughput_stats: push Sample::Bitrate.
+
+    alvr/server_core/src/connection.rs  (+24 lines)
+        - When initial_settings.extra.metrics_export is enabled:
+            * build flume::bounded(SAMPLE_CHANNEL_CAPACITY) channel
+            * spawn metrics_exporter thread
+            * pass Sender into StatisticsManager
+        - On disconnect: drop StatisticsManager (releases sender), the
+          exporter sees Disconnected and exits, then we join the handle.
+
+    alvr/server_core/src/metrics_exporter.rs  (NEW, ~290 lines)
+        - Sample enum (Frame / Battery / Bitrate)
+        - ExporterConfig (runtime config: url, interval, timeout,
+          headers, tags as HashMap)
+        - Acc — running min/max/sum/n; emits {min,max,avg,n} JSON
+        - Aggregator — owns per-window Acc fields, last-value state,
+          cumulative counters at window start; flush() returns
+          serde_json::Value and resets per-window state
+        - channel(), try_push(), spawn_exporter_thread()
+        - exporter_loop(): build ureq::Agent (timeout=config.timeout),
+          loop: drain samples until next_flush deadline, flush(),
+          POST snapshot, advance next_flush. On HTTP error: bump
+          failed_posts and rate-limit a warn (30s).
+
+    ARCHITECTURE.md  (+1 line)
+        - Added metrics_exporter row to the server-side threads table:
+          "Optional. Aggregates per-frame stats into min/max/avg over
+           a configurable window and POSTs JSON to an external HTTP
+           endpoint (Grafana / TSDB ingest). Spawned only when
+           extra.metrics_export is enabled."
+
+
+================================================================================
+4. Verification
+================================================================================
+
+cargo check -p alvr_session                  ✔ (24.74s)
+cargo check -p alvr_server_core              ✔ (39.95s)
+cargo xtask clippy --ci                      ✔ (full workspace, 1m 18s)
+cargo fmt --all -- --check                   ✔
+
+(cargo xtask check-format failed only on the C++ side because clang-format
+isn't installed on this Windows host — no C++ files were touched.)
+
+
+================================================================================
+5. How to use
+================================================================================
+
+1. Open dashboard → Settings → Extra → "Metrics export".
+2. Toggle on. Set:
+   - Endpoint URL (e.g. http://your-grafana-ingest:8086/api/metrics)
+   - Push interval (default 1000ms)
+   - HTTP timeout  (default 500ms; must be < interval)
+   - Headers (e.g. Authorization: Bearer ...)
+   - Tags    (e.g. host=desktop1, headset=quest3, room=lab)
+3. Reconnect the headset (settings are read at connection time).
+4. Endpoint receives one JSON POST per interval with the schema in §2.
+
+Static labels in the `tags` field can be used as Grafana dimensions to
+slice metrics across multiple sessions / hosts.
+
+
+================================================================================
+6. Open follow-ups (not implemented)
+================================================================================
+
+- Format alternatives (Influx line protocol, Prometheus remote-write).
+  Currently raw JSON only; the choice would change the body of
+  exporter_loop but not the aggregator.
+- Histograms for true p95/p99 — currently only min/max/avg/n.
+- Hot-reload of settings — currently requires reconnect.
+- Unit tests for Aggregator (push N samples, verify min/max/avg/n,
+  verify drain resets).
+
+
+================================================================================
+7. Commit
+================================================================================
+
+    eec11163  feat(server): push aggregated streaming stats to an
+                            external HTTP endpoint
+
+    8 files changed, 456 insertions(+), 3 deletions(-)
+    create mode 100644 alvr/server_core/src/metrics_exporter.rs
+
+Branch is 1 commit ahead of origin/master; not pushed.

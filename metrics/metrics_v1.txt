@@ -1,0 +1,344 @@
+ALVR Streaming Metrics — Field Reference
+=========================================
+
+Each row in `alvr.streaming_metrics` represents one aggregated snapshot
+pushed by the streamer's metrics exporter thread. A snapshot covers a
+fixed time window (default 1 000 ms) and captures statistics about every
+frame delivered during that window.
+
+Source: alvr/server_core/src/metrics_exporter.rs  (Aggregator::flush)
+Ingest model: metrics/server/models.py             (Snapshot)
+ClickHouse table: alvr.streaming_metrics           (metrics/clickhouse_schema.sql)
+
+
+────────────────────────────────────────────────────────────────────────────────
+IDENTITY
+────────────────────────────────────────────────────────────────────────────────
+
+ts                  DateTime64(3, UTC)
+    UTC timestamp of the moment the snapshot was flushed (end of the window).
+    Millisecond precision. Used as the primary time axis in Grafana.
+
+host                LowCardinality(String)
+    Free-form label set in Settings → Metrics → Host. Identifies the
+    streamer PC. Used as the primary aggregation key across the
+    `streaming_metrics` and `hw_*` tables — join them on (host, ts).
+    Empty string if not configured.
+
+window_ms           UInt64   [milliseconds]
+    Actual length of the aggregation window. Nominally equals
+    metrics_export.interval_ms but may differ if the thread wakes late.
+
+frames              UInt32   [count]
+    Number of fully-decoded frames received by the client during the window.
+    Used as the denominator for any per-frame average.
+
+dropped_samples     UInt64   [count]
+    Number of Sample::Frame events dropped at the producer side because the
+    channel was full (capacity = 4096). Non-zero values indicate the streamer
+    is producing statistics faster than the exporter can consume them.
+
+
+────────────────────────────────────────────────────────────────────────────────
+LATENCY  (latency_ms.*)
+────────────────────────────────────────────────────────────────────────────────
+
+Each latency stage is represented by four columns:
+    <stage>_min_ms    Nullable(Float32)  — minimum across all frames in window
+    <stage>_max_ms    Nullable(Float32)  — maximum across all frames in window
+    <stage>_avg_ms    Nullable(Float32)  — mean across all frames in window
+    <stage>_n         UInt32             — number of frames contributing
+
+All values are in milliseconds. NULL means no frame sample arrived for
+that stage during the window (e.g. no client connected).
+
+Raw values from GraphStatistics are in seconds and are multiplied by 1000
+before storage.
+
+total_pipeline_*_ms
+    End-to-end motion-to-photon latency: time from when the server samples
+    head tracking to when the rendered frame is displayed on the headset.
+    This is the primary user-visible latency figure.
+
+game_time_*_ms
+    Time spent inside the SteamVR game compositor / application render loop
+    waiting for the GPU to produce the next frame. High values indicate the
+    PC GPU is the bottleneck.
+
+server_compositor_*_ms
+    Time the SteamVR compositor spends compositing the rendered frame before
+    handing it to the encoder. Includes any server-side reprojection work.
+
+encoder_*_ms
+    Time the video encoder (NVENC / AMF / VPL) takes to encode one frame.
+    Sustained high values may force bitrate reduction.
+
+network_*_ms
+    One-way network transit time from the streamer to the client, estimated
+    from round-trip timing of statistics packets. Dominated by Wi-Fi latency.
+
+decoder_*_ms
+    Time the Android MediaCodec hardware decoder takes to decode one frame
+    on the headset.
+
+decoder_queue_*_ms
+    Time a decoded frame waits in the decoder output queue before the client
+    compositor picks it up. Elevated values indicate the client compositor
+    is falling behind the decoder.
+
+client_compositor_*_ms
+    Time the client-side Vulkan compositor takes to render and submit the
+    final frame to the OpenXR swapchain.
+
+vsync_queue_*_ms
+    Time the composed frame waits for the next display vsync. Expected to be
+    roughly half the frame interval (≈ 6–7 ms at 72 Hz).
+
+
+────────────────────────────────────────────────────────────────────────────────
+FPS  (fps.*)
+────────────────────────────────────────────────────────────────────────────────
+
+client_fps_{min,max,avg,n}    Nullable(Float32)
+    Client-reported frames per second measured on the headset.
+    Reflects the actual display refresh rate achieved.
+
+server_fps_{min,max,avg,n}    Nullable(Float32)
+    Server-side frame production rate. Should match the target refresh rate
+    when the PC GPU is not saturated. Divergence from client_fps indicates
+    network drops or decoder stalls.
+
+
+────────────────────────────────────────────────────────────────────────────────
+THROUGHPUT  (throughput.*)
+────────────────────────────────────────────────────────────────────────────────
+
+throughput_bps_{min,max,avg,n}    Nullable(Float32)   [bits/second]
+    Empirical network throughput measured by the bitrate adaptation algorithm.
+    Represents actual sustained link capacity observed during the window.
+
+bitrate_bps_{min,max,avg,n}       Nullable(Float32)   [bits/second]
+    Encoder output bitrate requested by the bitrate controller. Should track
+    throughput_bps with some headroom margin.
+
+video_packets_per_sec             Float64             [packets/second]
+    Rate of video UDP packets sent during the window, derived from the
+    cumulative counters at window boundaries.
+
+video_mbits_per_sec               Float64             [Mbit/second]
+    Network bandwidth consumed by video data during the window (bytes × 8 /
+    1 000 000 / window_secs). Distinct from bitrate_bps: this is raw bytes
+    on the wire including packet framing.
+
+
+────────────────────────────────────────────────────────────────────────────────
+TOTALS  (totals.*)  — cumulative end-of-window values
+────────────────────────────────────────────────────────────────────────────────
+
+video_packets_total    UInt64   [count]
+    Running total of video packets sent since the streamer started.
+    Use the delta between consecutive rows for per-window packet count.
+
+video_mbytes_total     UInt64   [megabytes]
+    Running total of video bytes sent since the streamer started (÷ 1 000 000,
+    truncated to integer). Use the delta between rows for per-window volume.
+
+
+────────────────────────────────────────────────────────────────────────────────
+BATTERY  (battery.*)  — last value carried from most recent Battery sample
+────────────────────────────────────────────────────────────────────────────────
+
+battery_hmd_pct        Nullable(UInt8)   [0–100 %]
+    Headset battery level as a percentage. NULL until the first battery
+    report is received from the client.
+
+battery_hmd_plugged    Nullable(UInt8)   [0 or 1]
+    1 if the headset is charging, 0 if on battery.
+    Stored as UInt8 because ClickHouse Bool is an alias for UInt8.
+
+
+────────────────────────────────────────────────────────────────────────────────
+BITRATE DIRECTIVES  (bitrate_directives.*)
+────────────────────────────────────────────────────────────────────────────────
+
+These are the internal signals feeding the bitrate controller each frame.
+All values are in bits/second. They reflect the last BitrateDirectives
+sample received in the window (not an average).
+
+bd_scaled_calculated_throughput_bps    Nullable(Float32)
+    Measured network throughput scaled by the saturation_multiplier setting.
+    This is the primary input to the adaptive bitrate algorithm. NULL when
+    using constant-bitrate mode.
+
+bd_decoder_latency_limiter_bps         Nullable(Float32)
+    Bitrate ceiling imposed when decoder latency exceeds its threshold.
+    NULL when the decoder latency limiter is not active.
+
+bd_network_latency_limiter_bps         Nullable(Float32)
+    Bitrate ceiling imposed when network latency exceeds its threshold.
+    NULL when the network latency limiter is not active.
+
+bd_encoder_latency_limiter_bps         Nullable(Float32)
+    Bitrate ceiling imposed when encoder latency exceeds its threshold.
+    NULL when the encoder latency limiter is not active.
+
+bd_manual_max_throughput_bps           Nullable(Float32)
+    User-configured hard ceiling on throughput. NULL when not set.
+
+bd_manual_min_throughput_bps           Nullable(Float32)
+    User-configured hard floor on throughput. NULL when not set.
+
+bd_requested_bitrate_bps               Float32
+    Final bitrate value sent to the encoder after all limiters and floors
+    are applied. This is what the encoder actually targets. Always present.
+
+
+────────────────────────────────────────────────────────────────────────────────
+EXPORTER HEALTH
+────────────────────────────────────────────────────────────────────────────────
+
+failed_posts    UInt64   [count]
+    Number of HTTP POST attempts that failed during the current window
+    (connection errors, timeouts, non-2xx responses). Resets each window.
+    A sustained non-zero value means the exporter cannot reach the server.
+
+
+────────────────────────────────────────────────────────────────────────────────
+INGESTION BOOKKEEPING
+────────────────────────────────────────────────────────────────────────────────
+
+ingested_at    DateTime64(3, UTC)
+    Server-side timestamp of when the row was written to ClickHouse.
+    Useful for diagnosing ingestion lag (ingested_at − ts).
+
+
+────────────────────────────────────────────────────────────────────────────────
+TABLE ENGINE & RETENTION
+────────────────────────────────────────────────────────────────────────────────
+
+Engine:      MergeTree
+Partition:   by month (toYYYYMM(ts))
+Order key:   (host, ts)
+TTL:         90 days from ts — rows are automatically dropped after 3 months
+Granularity: 8192 rows per index block (ClickHouse default)
+
+
+================================================================================
+HARDWARE METRICS  (hw_* tables)
+================================================================================
+
+Source: alvr/server_core/src/hwmonitor_exporter.rs  (build_payload)
+Sampler: alvr/hwmonitor                              (Hwmonitor::spawn)
+Ingest:  metrics/server/models.py                    (HwSnapshot)
+        metrics/server/db.py                         (insert_hw)
+Endpoint: POST /hw_metrics  (configured via Settings → Metrics →
+                             Hardware metrics endpoint URL)
+
+A single JSON document is POSTed every interval; the ingest service fans
+it out into seven tables keyed by `host` so each resource type can be
+aggregated and visualised independently. Sections corresponding to
+unavailable sources are omitted (e.g. no LibreHardwareMonitor → no
+package_temp_c, no `dimms`, no `storage`).
+
+Payload shape:
+  {
+    "ts":   "<RFC3339 ms>",
+    "host": "<host label>",
+    "cpu":        { ... } | null,
+    "cpu_cores":  [ { "index", "load_pct", "temp_c", "power_w" }, ... ],
+    "gpu":        { ... } | null,
+    "dram":       { ... } | null,
+    "dimms":      [ { "slot", "capacity_gb", "temp_c" }, ... ],
+    "storage":    [ { "device", "temp_c", "used_pct", ... }, ... ],
+    "network":    [ { "adapter", "bytes_sent_per_sec", ... }, ... ]
+  }
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_cpu — one row per snapshot per host
+────────────────────────────────────────────────────────────────────────────────
+
+ts                 DateTime64(3, UTC)    Snapshot timestamp.
+host               LowCardinality(String) Aggregation key.
+total_pct          Nullable(Float32)     Whole-CPU load 0–100.
+freq_mhz           Nullable(UInt32)      Reported clock in MHz (avg across cores).
+vrserver_pct       Nullable(Float32)     Per-process load of the streamer.
+package_temp_c     Nullable(Float32)     Package / die temperature (LHM).
+package_power_w    Nullable(Float32)     CPU Package power draw (LHM RAPL).
+cores_power_w     Nullable(Float32)     Cores-only power draw (LHM).
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_cpu_cores — one row per (snapshot, core)
+────────────────────────────────────────────────────────────────────────────────
+
+ts, host           Identity columns.
+core_index         UInt16                Zero-based logical core index.
+load_pct           Nullable(Float32)     Per-core load 0–100.
+temp_c             Nullable(Float32)     Per-core temperature (LHM).
+power_w            Nullable(Float32)     Per-core power (Ryzen SMU / LHM).
+
+Use this table for per-core hotspots / load distribution. Join to
+hw_cpu by (host, ts) to align with package-level metrics.
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_gpu — one row per snapshot per host
+────────────────────────────────────────────────────────────────────────────────
+
+ts, host           Identity columns.
+name               GPU model string (nvidia-smi / LHM).
+util_pct           Overall GPU utilisation 0–100.
+encoder_util_pct   NVENC encoder block utilisation 0–100.
+decoder_util_pct   NVDEC decoder block utilisation 0–100.
+mem_used_mb / mem_total_mb   VRAM used / total in MB.
+temp_c             Temperature in °C.
+power_w            Current power draw in W.
+power_limit_w      Board power limit in W.
+clock_graphics_mhz / clock_memory_mhz / clock_video_mhz  GPU clock domains.
+fan_pct            Fan duty cycle 0–100.
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_dram — one row per snapshot per host
+────────────────────────────────────────────────────────────────────────────────
+
+ts, host                       Identity columns.
+total_mb / used_mb / available_mb   Whole-system RAM in MB.
+used_pct                       Used fraction of total in percent.
+swap_total_mb / swap_used_mb   Page-file / swap usage in MB.
+vrserver_working_set_mb        Streamer process working set in MB.
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_dimms — one row per (snapshot, slot)
+────────────────────────────────────────────────────────────────────────────────
+
+ts, host           Identity columns.
+slot               LowCardinality(String) Module identifier (LHM).
+capacity_gb        Nullable(Float32)      Module capacity in GB.
+temp_c             Nullable(Float32)      Per-module temperature in °C.
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_storage — one row per (snapshot, device)
+────────────────────────────────────────────────────────────────────────────────
+
+ts, host           Identity columns.
+device             LowCardinality(String) Drive name (LHM).
+temp_c             Composite / hottest reported temperature.
+used_pct           Used space 0–100.
+life_left_pct      Remaining SMART life 0–100 (SSDs only).
+total_gb / free_gb Drive capacity totals in GB.
+
+
+────────────────────────────────────────────────────────────────────────────────
+hw_network — one row per (snapshot, adapter)
+────────────────────────────────────────────────────────────────────────────────
+
+ts, host                Identity columns.
+adapter                 LowCardinality(String) Adapter name (WMI).
+bytes_sent_per_sec / bytes_recv_per_sec       Throughput in bytes/sec.
+packets_sent_per_sec / packets_recv_per_sec   Packet rate in pps.
+outbound_errors / outbound_discarded          Adapter error counters.
+current_bandwidth_bps                          Link speed in bits/sec.
