@@ -28,6 +28,10 @@
 //!     `ServerCoreContext::get_hand_skeleton`; tracked iff the client sent a
 //!     hand sample for the resolved frame (Phase 7 hand-tracking passthrough,
 //!     ABI v4).
+//!   - [`alvr_oxr_get_foveation`] / [`alvr_oxr_set_foveation`] — RwLock-backed
+//!     cache of per-view foveation params; getter is the encoder hot-path
+//!     read, setter is the drain thread's `ServerCoreEvent::PerViewFoveation`
+//!     consumer (Phase 7 per-view foveation Slice 1, ABI v5).
 //!
 //! Only stub left:
 //!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3
@@ -324,7 +328,14 @@ fn event_loop(
 ///   skeleton, sourced via `ServerCoreContext::get_hand_skeleton` (Phase 7
 ///   hand-tracking passthrough — alvr-side Slices 1 + 3; the Monado-side
 ///   `xrt_device::get_hand_tracking` lands as Slice 2 on the fork branch).
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 4;
+/// - v5: added [`alvr_oxr_get_foveation`] + [`alvr_oxr_set_foveation`] +
+///   [`AlvrOxrFoveationView`] so the OpenXR-mode encoder can consume per-view
+///   foveation params and the `server_core` drain thread can update them
+///   per-frame from an eye-tracking-driven worker or a future
+///   `RealTimeConfig.per_view_foveation` field (Phase 7 per-view foveation
+///   Slice 1 — bridge surface only; encoder body still hardware-blocked,
+///   `server_core` glue is Slice 3).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 5;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -823,6 +834,86 @@ pub unsafe extern "C" fn alvr_oxr_get_hand_skeleton(
         unsafe { *out_is_tracked = true };
     }
 
+    AlvrOxrResult::Ok
+}
+
+/// Per-view foveation parameters. Lengths in image-space [0, 1]; centre at
+/// (0.5, 0.5) when shifts are zero. `edge_ratio[*]` are the per-axis fall-off
+/// factors (matches `alvr_session::FoveatedEncodingConfig`). Set
+/// `is_present = false` to mean "no foveation for this view this frame —
+/// encode the whole half at full resolution" (useful when an eye loses
+/// tracking confidence, or when foveation is disabled session-wide).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AlvrOxrFoveationView {
+    pub is_present: bool,
+    pub center_size: [f32; 2],
+    pub center_shift: [f32; 2],
+    pub edge_ratio: [f32; 2],
+}
+
+/// Cache default — "no foveation for this view". `edge_ratio` is 1.0 (no
+/// fall-off) rather than 0.0 so a caller that ignores `is_present` still
+/// behaves sensibly (matches `FoveatedEncodingConfig`'s valid range
+/// `[1.0, 10.0]`).
+const DEFAULT_FOVEATION_VIEW: AlvrOxrFoveationView = AlvrOxrFoveationView {
+    is_present: false,
+    center_size: [0.0; 2],
+    center_shift: [0.0; 2],
+    edge_ratio: [1.0; 2],
+};
+
+/// Bridge-side cache of the latest per-view foveation params. Written by
+/// [`alvr_oxr_set_foveation`] (driven by the drain thread when the future
+/// `ServerCoreEvent::PerViewFoveation` lands), read synchronously from the
+/// encoder via [`alvr_oxr_get_foveation`]. Defaults to no-foveation on both
+/// sides so the encoder defaults to full-resolution before any update lands.
+///
+/// Lives outside [`SERVER_CORE_CONTEXT`] on purpose: foveation is config-shaped
+/// (it survives connect/disconnect cycles cleanly) and the encoder hot-path
+/// shouldn't pay the cost of a SERVER_CORE_CONTEXT read just to ask for it.
+static FOVEATION: RwLock<[AlvrOxrFoveationView; 2]> = RwLock::new([DEFAULT_FOVEATION_VIEW; 2]);
+
+/// Read the latest cached per-view foveation params. Drives the encoder side
+/// inside [`alvr_oxr_submit_layers`]. Returns `Ok` with `is_present = false`
+/// for both views when foveation is disabled session-wide or no update has
+/// landed yet; the encoder should encode at full resolution in that case.
+///
+/// # Safety
+/// `out_views` must be a writable buffer of 2 [`AlvrOxrFoveationView`]s
+/// (left = index 0, right = index 1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_get_foveation(
+    out_views: *mut AlvrOxrFoveationView,
+) -> AlvrOxrResult {
+    if out_views.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+    let state = *FOVEATION.read();
+    unsafe {
+        *out_views = state[0];
+        *out_views.add(1) = state[1];
+    }
+    AlvrOxrResult::Ok
+}
+
+/// Push a new per-view foveation update into the bridge. Called by the
+/// `server_core` drain thread when a new `ServerCoreEvent::PerViewFoveation`
+/// arrives (which itself is fed by either an eye-tracking → foveation-centre
+/// worker or a future `RealTimeConfig.per_view_foveation` field).
+///
+/// # Safety
+/// `views` must point to 2 [`AlvrOxrFoveationView`]s. Caller retains ownership;
+/// the bridge copies into its internal cache.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_set_foveation(
+    views: *const AlvrOxrFoveationView,
+) -> AlvrOxrResult {
+    if views.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+    let new_state = unsafe { [*views, *views.add(1)] };
+    *FOVEATION.write() = new_state;
     AlvrOxrResult::Ok
 }
 

@@ -44,8 +44,15 @@
  *   skeleton, sourced via `ServerCoreContext::get_hand_skeleton` (Phase 7
  *   hand-tracking passthrough — alvr-side Slices 1 + 3; the Monado-side
  *   `xrt_device::get_hand_tracking` lands as Slice 2 on the fork branch).
+ * - v5: added [`alvr_oxr_get_foveation`] + [`alvr_oxr_set_foveation`] +
+ *   [`AlvrOxrFoveationView`] so the OpenXR-mode encoder can consume per-view
+ *   foveation params and the `server_core` drain thread can update them
+ *   per-frame from an eye-tracking-driven worker or a future
+ *   `RealTimeConfig.per_view_foveation` field (Phase 7 per-view foveation
+ *   Slice 1 — bridge surface only; encoder body still hardware-blocked,
+ *   `server_core` glue is Slice 3).
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 4
+#define ALVR_OXR_BRIDGE_ABI_VERSION 5
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -225,6 +232,21 @@ typedef struct AlvrOxrHandJoint {
 } AlvrOxrHandJoint;
 
 /**
+ * Per-view foveation parameters. Lengths in image-space [0, 1]; centre at
+ * (0.5, 0.5) when shifts are zero. `edge_ratio[*]` are the per-axis fall-off
+ * factors (matches `alvr_session::FoveatedEncodingConfig`). Set
+ * `is_present = false` to mean "no foveation for this view this frame —
+ * encode the whole half at full resolution" (useful when an eye loses
+ * tracking confidence, or when foveation is disabled session-wide).
+ */
+typedef struct AlvrOxrFoveationView {
+  bool is_present;
+  float center_size[2];
+  float center_shift[2];
+  float edge_ratio[2];
+} AlvrOxrFoveationView;
+
+/**
  * One submitted OpenXR composition layer. The Monado-side compositor builds
  * an array of these and hands them to the bridge once per frame.
  *
@@ -368,6 +390,30 @@ AlvrOxrResult alvr_oxr_get_hand_skeleton(AlvrOxrSide side,
                                          int64_t at_timestamp_ns,
                                          struct AlvrOxrHandJoint *out_joints,
                                          bool *out_is_tracked);
+
+/**
+ * Read the latest cached per-view foveation params. Drives the encoder side
+ * inside [`alvr_oxr_submit_layers`]. Returns `Ok` with `is_present = false`
+ * for both views when foveation is disabled session-wide or no update has
+ * landed yet; the encoder should encode at full resolution in that case.
+ *
+ * # Safety
+ * `out_views` must be a writable buffer of 2 [`AlvrOxrFoveationView`]s
+ * (left = index 0, right = index 1).
+ */
+AlvrOxrResult alvr_oxr_get_foveation(struct AlvrOxrFoveationView *out_views);
+
+/**
+ * Push a new per-view foveation update into the bridge. Called by the
+ * `server_core` drain thread when a new `ServerCoreEvent::PerViewFoveation`
+ * arrives (which itself is fed by either an eye-tracking → foveation-centre
+ * worker or a future `RealTimeConfig.per_view_foveation` field).
+ *
+ * # Safety
+ * `views` must point to 2 [`AlvrOxrFoveationView`]s. Caller retains ownership;
+ * the bridge copies into its internal cache.
+ */
+AlvrOxrResult alvr_oxr_set_foveation(const struct AlvrOxrFoveationView *views);
 
 /**
  * Submit a frame's worth of composition layers.
