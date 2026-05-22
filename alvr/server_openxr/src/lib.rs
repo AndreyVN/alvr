@@ -508,10 +508,25 @@ pub unsafe extern "C" fn alvr_oxr_get_controller_info(
 /// Pose returned by the bridge. Coordinate convention follows OpenXR
 /// (right-handed, +Y up, -Z forward).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct AlvrOxrPose {
     pub position: [f32; 3],
     pub orientation: [f32; 4], // (x, y, z, w)
+}
+
+// Default to identity, NOT zeroes. Quaternion (0,0,0,0) is degenerate — Monado's
+// xrLocateViews path runs the chain-resolved result through
+// `math_quat_ensure_normalized` and returns XR_ERROR_RUNTIME_FAILURE on a
+// non-unit quat. The derived Default would emit (0,0,0,0) and surface as a
+// silent runtime failure the moment any bridge getter falls back to it (e.g.
+// `alvr_oxr_get_head_pose` before the client has reported a tracking sample).
+impl Default for AlvrOxrPose {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 0.0, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
 }
 
 /// Query the predicted head pose at `at_timestamp_ns` (CLOCK_MONOTONIC ns).
