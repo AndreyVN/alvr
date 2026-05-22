@@ -38,8 +38,14 @@
  *   per-frame counts of submitted non-projection layer types (quad /
  *   cylinder / equirect / cube / passthrough) that the runtime currently
  *   drops (Phase 7 Slice 1; diagnostic before quad rasterisation lands).
+ * - v4: added [`alvr_oxr_get_hand_skeleton`] + [`AlvrOxrHandJoint`] +
+ *   [`ALVR_OXR_HAND_JOINT_COUNT`] so the Monado-side ALVR driver can answer
+ *   `XR_EXT_hand_tracking` queries from the client's existing 26-joint
+ *   skeleton, sourced via `ServerCoreContext::get_hand_skeleton` (Phase 7
+ *   hand-tracking passthrough — alvr-side Slices 1 + 3; the Monado-side
+ *   `xrt_device::get_hand_tracking` lands as Slice 2 on the fork branch).
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 3
+#define ALVR_OXR_BRIDGE_ABI_VERSION 4
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -87,6 +93,13 @@
  * 10000 gives 0.01% resolution, plenty for a battery percent indicator.
  */
 #define ALVR_OXR_BATTERY_GAUGE_SCALE 10000
+
+/**
+ * Number of joints per hand in the OpenXR `XR_EXT_hand_tracking` skeleton.
+ * Matches `XR_HAND_JOINT_COUNT_EXT` and the length of
+ * `TrackingData::hand_skeletons[side]`.
+ */
+#define ALVR_OXR_HAND_JOINT_COUNT 26
 
 /**
  * Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
@@ -201,6 +214,15 @@ typedef struct AlvrOxrHaptic {
   float frequency_hz;
   float amplitude;
 } AlvrOxrHaptic;
+
+/**
+ * Per-joint pose payload returned by [`alvr_oxr_get_hand_skeleton`]. Joints
+ * are indexed by the `XR_HAND_JOINT_*_EXT` order, which matches Monado's
+ * `xrt_hand_joint` enum 1:1 (`XRT_HAND_JOINT_PALM .. XRT_HAND_JOINT_LITTLE_TIP`).
+ */
+typedef struct AlvrOxrHandJoint {
+  struct AlvrOxrPose pose;
+} AlvrOxrHandJoint;
 
 /**
  * One submitted OpenXR composition layer. The Monado-side compositor builds
@@ -322,6 +344,30 @@ AlvrOxrResult alvr_oxr_get_controller_state(AlvrOxrSide side,
  * `params` must point to a valid `AlvrOxrHaptic`.
  */
 AlvrOxrResult alvr_oxr_set_haptic(AlvrOxrSide side, const struct AlvrOxrHaptic *params);
+
+/**
+ * Query the predicted hand skeleton at `at_timestamp_ns`. Writes
+ * `ALVR_OXR_HAND_JOINT_COUNT` joints into `out_joints` when the client has a
+ * tracked hand on this side. Sets `*out_is_tracked = false` and leaves
+ * `out_joints` untouched when the client reports `hand_skeletons[side] = None`
+ * for the resolved frame.
+ *
+ * Sources the skeleton from `ServerCoreContext::get_hand_skeleton`, which in
+ * turn reads the latest `TrackingData.hand_skeletons[side]` sample at-or-
+ * before `at_timestamp_ns` from the tracking manager. Joint order matches the
+ * `XR_HAND_JOINT_*_EXT` enum 1:1 — the bridge does no reordering, so the
+ * Monado-side `xrt_device::get_hand_tracking` can hand them straight to the
+ * state tracker. Returns `NotInitialised` when the bridge isn't initialised;
+ * otherwise `Ok` with `is_tracked` indicating whether real data was written.
+ *
+ * # Safety
+ * `out_joints` must be a writable buffer of at least
+ * `ALVR_OXR_HAND_JOINT_COUNT` elements. `out_is_tracked` must be writable.
+ */
+AlvrOxrResult alvr_oxr_get_hand_skeleton(AlvrOxrSide side,
+                                         int64_t at_timestamp_ns,
+                                         struct AlvrOxrHandJoint *out_joints,
+                                         bool *out_is_tracked);
 
 /**
  * Submit a frame's worth of composition layers.

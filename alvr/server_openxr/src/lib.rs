@@ -24,6 +24,10 @@
 //!     write stable bridge-side serials (`ALVR_HMD`, `ALVR_Controller_*`).
 //!   - [`alvr_oxr_poll_session_event`] — drains client-connect/disconnect
 //!     events surfaced by the drain thread.
+//!   - [`alvr_oxr_get_hand_skeleton`] — per-side 26-joint skeleton via
+//!     `ServerCoreContext::get_hand_skeleton`; tracked iff the client sent a
+//!     hand sample for the resolved frame (Phase 7 hand-tracking passthrough,
+//!     ABI v4).
 //!
 //! Only stub left:
 //!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3
@@ -48,7 +52,7 @@ use alvr_common::{
     warn,
 };
 use alvr_packets::{BatteryInfo, ButtonValue, Haptics};
-use alvr_server_core::{ServerCoreContext, ServerCoreEvent};
+use alvr_server_core::{HandType, ServerCoreContext, ServerCoreEvent};
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
@@ -314,7 +318,13 @@ fn event_loop(
 ///   per-frame counts of submitted non-projection layer types (quad /
 ///   cylinder / equirect / cube / passthrough) that the runtime currently
 ///   drops (Phase 7 Slice 1; diagnostic before quad rasterisation lands).
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 3;
+/// - v4: added [`alvr_oxr_get_hand_skeleton`] + [`AlvrOxrHandJoint`] +
+///   [`ALVR_OXR_HAND_JOINT_COUNT`] so the Monado-side ALVR driver can answer
+///   `XR_EXT_hand_tracking` queries from the client's existing 26-joint
+///   skeleton, sourced via `ServerCoreContext::get_hand_skeleton` (Phase 7
+///   hand-tracking passthrough — alvr-side Slices 1 + 3; the Monado-side
+///   `xrt_device::get_hand_tracking` lands as Slice 2 on the fork branch).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 4;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -739,6 +749,79 @@ pub unsafe extern "C" fn alvr_oxr_set_haptic(
         frequency: params.frequency_hz,
         amplitude: params.amplitude,
     });
+
+    AlvrOxrResult::Ok
+}
+
+/// Per-joint pose payload returned by [`alvr_oxr_get_hand_skeleton`]. Joints
+/// are indexed by the `XR_HAND_JOINT_*_EXT` order, which matches Monado's
+/// `xrt_hand_joint` enum 1:1 (`XRT_HAND_JOINT_PALM .. XRT_HAND_JOINT_LITTLE_TIP`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AlvrOxrHandJoint {
+    pub pose: AlvrOxrPose,
+}
+
+/// Number of joints per hand in the OpenXR `XR_EXT_hand_tracking` skeleton.
+/// Matches `XR_HAND_JOINT_COUNT_EXT` and the length of
+/// `TrackingData::hand_skeletons[side]`.
+pub const ALVR_OXR_HAND_JOINT_COUNT: u32 = 26;
+
+/// Query the predicted hand skeleton at `at_timestamp_ns`. Writes
+/// `ALVR_OXR_HAND_JOINT_COUNT` joints into `out_joints` when the client has a
+/// tracked hand on this side. Sets `*out_is_tracked = false` and leaves
+/// `out_joints` untouched when the client reports `hand_skeletons[side] = None`
+/// for the resolved frame.
+///
+/// Sources the skeleton from `ServerCoreContext::get_hand_skeleton`, which in
+/// turn reads the latest `TrackingData.hand_skeletons[side]` sample at-or-
+/// before `at_timestamp_ns` from the tracking manager. Joint order matches the
+/// `XR_HAND_JOINT_*_EXT` enum 1:1 — the bridge does no reordering, so the
+/// Monado-side `xrt_device::get_hand_tracking` can hand them straight to the
+/// state tracker. Returns `NotInitialised` when the bridge isn't initialised;
+/// otherwise `Ok` with `is_tracked` indicating whether real data was written.
+///
+/// # Safety
+/// `out_joints` must be a writable buffer of at least
+/// `ALVR_OXR_HAND_JOINT_COUNT` elements. `out_is_tracked` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_get_hand_skeleton(
+    side: AlvrOxrSide,
+    at_timestamp_ns: i64,
+    out_joints: *mut AlvrOxrHandJoint,
+    out_is_tracked: *mut bool,
+) -> AlvrOxrResult {
+    if out_joints.is_null() || out_is_tracked.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+    // Default to "no tracking"; out_joints stays untouched in that case so a
+    // caller that ignores out_is_tracked still sees its zero-initialised
+    // buffer rather than stale data from a different frame.
+    unsafe { *out_is_tracked = false };
+
+    let target = Duration::from_nanos(at_timestamp_ns.max(0) as u64);
+    let hand_type = match side {
+        AlvrOxrSide::Left => HandType::Left,
+        AlvrOxrSide::Right => HandType::Right,
+    };
+
+    let Some(context) = &*SERVER_CORE_CONTEXT.read() else {
+        return AlvrOxrResult::NotInitialised;
+    };
+
+    if let Some(skeleton) = context.get_hand_skeleton(hand_type, target) {
+        for (i, joint_pose) in skeleton.iter().enumerate() {
+            unsafe {
+                *out_joints.add(i) = AlvrOxrHandJoint {
+                    pose: AlvrOxrPose {
+                        position: joint_pose.position.to_array(),
+                        orientation: joint_pose.orientation.to_array(),
+                    },
+                };
+            }
+        }
+        unsafe { *out_is_tracked = true };
+    }
 
     AlvrOxrResult::Ok
 }
