@@ -1,6 +1,7 @@
 mod bitrate;
 mod c_api;
 mod connection;
+mod foveation;
 mod hand_gestures;
 mod haptics;
 mod hwmonitor_exporter;
@@ -14,6 +15,7 @@ mod web_server;
 
 pub use c_api::*;
 pub use logging_backend::init_logging;
+pub use foveation::gaze_to_center_shift;
 pub use tracking::HandType;
 
 use crate::connection::VideoPacket;
