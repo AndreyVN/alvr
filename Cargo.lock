@@ -400,6 +400,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "alvr_oxr_overlay_smoke"
+version = "21.0.0-dev13"
+dependencies = [
+ "ash",
+ "openxr",
+]
+
+[[package]]
 name = "alvr_packets"
 version = "21.0.0-dev13"
 dependencies = [
