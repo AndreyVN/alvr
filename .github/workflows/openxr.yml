@@ -43,15 +43,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # vcpkg's installed/ tree is what the per-port builds produce; caching
-      # it across runs keeps the build under 5 min once warm. The cache key
-      # is the hash of Monado's vcpkg.json + builtin-baseline — change either
-      # and we rebuild from scratch.
+      # Cache vcpkg's binary cache (%LOCALAPPDATA%\vcpkg\archives), which vcpkg
+      # writes every built package to and restores from on later runs — the log
+      # line "Restored N package(s) from ...\vcpkg\archives" is this mechanism.
+      # The old path (build/_thirdparty/vcpkg/installed) was never populated in
+      # manifest mode — vcpkg installs to build/openxr-debug/vcpkg_installed —
+      # so the key never hit and every run paid the full cold port build
+      # (~3.5 min). Key bumped to v2 because actions/cache won't overwrite the
+      # stale (empty) entry the old key already saved. Keyed on vcpkg.json so a
+      # dependency change forces a rebuild.
       - name: Cache vcpkg installs
         uses: actions/cache@v4
         with:
-          path: build/_thirdparty/vcpkg/installed
-          key: vcpkg-windows-${{ hashFiles('openxr/vcpkg.json') }}
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-windows-v2-${{ hashFiles('openxr/vcpkg.json') }}
 
       - name: Prepare ALVR deps
         env:
