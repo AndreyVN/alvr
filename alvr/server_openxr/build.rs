@@ -55,6 +55,19 @@ fn main() {
             .include(&cpp_root) // resolves `#include "encoder/EncoderBackend.h"`
             .define("NOMINMAX", None);
 
+        // The Vulkan-input NVENC encoder (Slice 3.3b) reuses the device-agnostic
+        // base NvEncoder and the shared FillNvencConfig from the D3D11 tree —
+        // both are free of OpenVR-side deps (verified: no Logger/Settings/
+        // bindings includes). Compile them into this crate's encoder lib and put
+        // the win32_d3d11 dir on the include path so `#include "NvEncoder.h"` /
+        // `"NvCodecUtils.h"` resolve. They link in regardless of CUDA presence;
+        // VkEncoderBackend only references them under the ALVR_OXR_HAVE_CUDA guard.
+        let d3d11_dir = cpp_root.join("encoder").join("win32_d3d11");
+        build
+            .file(d3d11_dir.join("NvEncoder.cpp"))
+            .file(cpp_root.join("encoder").join("NvencConfig.cpp"))
+            .include(&d3d11_dir);
+
         // Vulkan SDK include path. Required even by the skeleton header
         // (which holds Vulkan types opaque today) so that Slice 3.3 can
         // start referencing VkImage / VkFormat without another build.rs
