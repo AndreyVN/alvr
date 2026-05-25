@@ -65,14 +65,18 @@ jobs:
         run: cargo build -p alvr_server_openxr
 
       # OpenXR-mode-specific Rust unit tests: launcher session.json runtime-mode
-      # round-trip (8 tests in alvr/launcher/src/actions.rs) and metrics_exporter
+      # round-trip (8 tests in alvr/launcher/src/actions.rs), metrics_exporter
       # aggregators for OxrPacing / OxrLayerTypes / Battery (8 tests in
-      # alvr/server_core/src/metrics_exporter.rs). Both suites exist because of
-      # this fork's OpenXR mode work and have no other CI coverage.
+      # alvr/server_core/src/metrics_exporter.rs), and bridge-pose guards in
+      # alvr/server_openxr/src/lib.rs (pin AlvrOxrPose::default + the head/view
+      # getters to a normalized quaternion — the zero-quat that surfaced as an
+      # xrLocateViews RUNTIME_FAILURE). All exist because of this fork's OpenXR
+      # mode work and have no other CI coverage.
       - name: Run OpenXR-mode unit tests
         run: |
           cargo test -p alvr_launcher
           cargo test -p alvr_server_core metrics_exporter
+          cargo test -p alvr_server_openxr
 
       - name: Build OpenXR runtime
         env:

@@ -1114,3 +1114,68 @@ pub unsafe extern "C" fn alvr_oxr_poll_session_event(out_event: *mut AlvrOxrEven
     unsafe { *out_event = event };
     AlvrOxrResult::Ok
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Squared L2 norm of an (x, y, z, w) quaternion. A unit quaternion is ~1.0.
+    fn quat_norm_sq(q: [f32; 4]) -> f32 {
+        q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]
+    }
+
+    // Regression guard for the zero-quaternion bug (fix 1eac1daf): a (0,0,0,0)
+    // orientation flowed out of `alvr_oxr_get_head_pose` before any client
+    // connected, `alvr_hmd_get_tracked_pose` stamped ORIENTATION_VALID on it,
+    // and Monado's xrLocateViews failed with XR_ERROR_RUNTIME_FAILURE in
+    // `math_quat_ensure_normalized`. A derived Default would re-introduce it
+    // silently — pin the identity here so that can't ship again.
+    #[test]
+    fn default_pose_orientation_is_identity() {
+        let pose = AlvrOxrPose::default();
+        assert_eq!(pose.orientation, [0.0, 0.0, 0.0, 1.0]);
+        assert!(
+            (quat_norm_sq(pose.orientation) - 1.0).abs() < 1e-6,
+            "default orientation must be a unit quaternion, got {:?}",
+            pose.orientation
+        );
+    }
+
+    // Before a client reports its view config the bridge serves ViewParams::DUMMY.
+    // The orientation it hands Monado must be normalizable for both eyes, or the
+    // same xrLocateViews failure fires during session bring-up.
+    #[test]
+    fn dummy_view_params_orientation_is_normalized() {
+        for side in [AlvrOxrSide::Left, AlvrOxrSide::Right] {
+            let mut params = AlvrOxrViewParams {
+                pose: AlvrOxrPose::default(),
+                fov_radians: [0.0; 4],
+            };
+            let ret = unsafe { alvr_oxr_get_view_params(side, &mut params) };
+            assert!(matches!(ret, AlvrOxrResult::Ok), "got {ret:?}");
+            assert!(
+                (quat_norm_sq(params.pose.orientation) - 1.0).abs() < 1e-6,
+                "{side:?} dummy view orientation not normalized: {:?}",
+                params.pose.orientation
+            );
+        }
+    }
+
+    // With no SERVER_CORE_CONTEXT (no client) the getter must still leave a
+    // normalized orientation in `out_pose` — it writes the identity default up
+    // front, which is exactly the path that used to emit zeroes.
+    #[test]
+    fn head_pose_orientation_normalized_without_context() {
+        let mut pose = AlvrOxrPose {
+            position: [0.0; 3],
+            orientation: [0.0, 0.0, 0.0, 0.0], // deliberately degenerate input
+        };
+        let ret = unsafe { alvr_oxr_get_head_pose(0, &mut pose) };
+        assert!(matches!(ret, AlvrOxrResult::NotInitialised), "got {ret:?}");
+        assert!(
+            (quat_norm_sq(pose.orientation) - 1.0).abs() < 1e-6,
+            "head pose orientation not normalized without context: {:?}",
+            pose.orientation
+        );
+    }
+}
