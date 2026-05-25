@@ -236,6 +236,17 @@ pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
 
     let sh = Shell::new().unwrap();
 
+    // Build the bridge cdylib first: the CMake build links monado-service
+    // against its import library, and deploy_bridge_cdylib copies the resulting
+    // DLL afterwards. Doing this here (rather than relying on a pre-existing
+    // target/ artifact) guarantees the deployed DLL matches current source —
+    // skipping it once shipped a stale pre-fix cdylib that emitted a zero
+    // head-orientation quaternion and cost a multi-hour xrLocateViews
+    // misdiagnosis.
+    if enable_alvr_driver {
+        build_bridge_cdylib(&sh, profile);
+    }
+
     let src = openxr_source_dir();
     let build = openxr_build_dir(profile);
     fs::create_dir_all(&build).unwrap();
@@ -299,6 +310,19 @@ pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
 
     deploy_bridge_cdylib(&build, profile);
     publish_active_runtime_manifest(&build);
+}
+
+/// Build the `alvr_server_openxr` cdylib for the matching cargo profile. Run
+/// before the CMake build so the import library exists for monado-service to
+/// link against and the DLL `deploy_bridge_cdylib` copies is freshly compiled.
+fn build_bridge_cdylib(sh: &Shell, profile: Profile) {
+    let mut flags = vec!["-p", "alvr_server_openxr"];
+    if !matches!(profile, Profile::Debug) {
+        flags.push("--release");
+    }
+    let flags_ref = &flags;
+    println!("Building alvr_server_openxr cdylib ({profile})...");
+    cmd!(sh, "cargo build {flags_ref...}").run().unwrap();
 }
 
 /// Copy the alvr_server_openxr cdylib next to monado-service.exe so the loader
