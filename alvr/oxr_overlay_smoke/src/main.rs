@@ -48,7 +48,10 @@ const DEADLINE: Duration = Duration::from_secs(12);
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("=== oxr_overlay_smoke ===");
-    println!("XR_RUNTIME_JSON = {:?}", std::env::var("XR_RUNTIME_JSON").ok());
+    println!(
+        "XR_RUNTIME_JSON = {:?}",
+        std::env::var("XR_RUNTIME_JSON").ok()
+    );
 
     let xr_entry = unsafe { xr::Entry::load()? };
     let available = xr_entry.enumerate_extensions()?;
@@ -92,18 +95,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let want_vk_version = vk::API_VERSION_1_1;
-    if (want_vk_version as u64) < ((reqs.min_api_version_supported.major() as u64) << 22 | (reqs.min_api_version_supported.minor() as u64) << 12)
+    if (want_vk_version as u64)
+        < ((reqs.min_api_version_supported.major() as u64) << 22
+            | (reqs.min_api_version_supported.minor() as u64) << 12)
     {
-        return Err(format!(
-            "VK 1.1 below OpenXR min {}",
-            reqs.min_api_version_supported
-        )
-        .into());
+        return Err(format!("VK 1.1 below OpenXR min {}", reqs.min_api_version_supported).into());
     }
 
     let vk_instance_ext_str = xr_instance.vulkan_legacy_instance_extensions(system)?;
     let vk_instance_exts: Vec<&str> = vk_instance_ext_str.split_whitespace().collect();
-    println!("VK instance extensions required by OpenXR: {:?}", vk_instance_exts);
+    println!(
+        "VK instance extensions required by OpenXR: {:?}",
+        vk_instance_exts
+    );
 
     let vk_entry = unsafe { ash::Entry::load()? };
     let app_name_c = CString::new(APP_NAME)?;
@@ -127,9 +131,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vk_instance = unsafe { vk_entry.create_instance(&vk_inst_create_info, None)? };
 
     // Physical device — OpenXR tells us which to use.
-    let raw_phys = unsafe {
-        xr_instance.vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)?
-    };
+    let raw_phys =
+        unsafe { xr_instance.vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)? };
     let physical_device = vk::PhysicalDevice::from_raw(raw_phys as u64);
     let pd_props = unsafe { vk_instance.get_physical_device_properties(physical_device) };
     let name_str = unsafe {
@@ -137,7 +140,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .to_string_lossy()
             .into_owned()
     };
-    println!("VK physical device: {} (vendor 0x{:x})", name_str, pd_props.vendor_id);
+    println!(
+        "VK physical device: {} (vendor 0x{:x})",
+        name_str, pd_props.vendor_id
+    );
 
     // Graphics queue family.
     let qfs = unsafe { vk_instance.get_physical_device_queue_family_properties(physical_device) };
@@ -150,7 +156,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let vk_device_ext_str = xr_instance.vulkan_legacy_device_extensions(system)?;
     let vk_device_exts: Vec<&str> = vk_device_ext_str.split_whitespace().collect();
-    println!("VK device extensions required by OpenXR: {:?}", vk_device_exts);
+    println!(
+        "VK device extensions required by OpenXR: {:?}",
+        vk_device_exts
+    );
 
     let dev_ext_cstrings: Vec<CString> = vk_device_exts
         .iter()
@@ -167,6 +176,95 @@ fn main() -> Result<(), Box<dyn Error>> {
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&dev_ext_ptrs);
     let vk_device = unsafe { vk_instance.create_device(physical_device, &dev_create_info, None)? };
+
+    // Queue + a one-shot command buffer used to clear each acquired swapchain
+    // image to a (cycling) colour before release, so the streamed frames carry
+    // visible content instead of uninitialised memory. This makes the smoke a
+    // real end-to-end pixel test of the encode path, not just a protocol smoke.
+    let vk_queue = unsafe { vk_device.get_device_queue(graphics_family, 0) };
+    let cmd_pool = unsafe {
+        vk_device.create_command_pool(
+            &vk::CommandPoolCreateInfo::default()
+                .queue_family_index(graphics_family)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+            None,
+        )?
+    };
+    let cmd_buf = unsafe {
+        vk_device.allocate_command_buffers(
+            &vk::CommandBufferAllocateInfo::default()
+                .command_pool(cmd_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1),
+        )?[0]
+    };
+
+    // Clear `image` to `color` via a transfer clear (UNDEFINED -> TRANSFER_DST ->
+    // COLOR_ATTACHMENT), submitted synchronously. Cheap and CPU-stalling, which
+    // is fine for a smoke.
+    let clear_image =
+        |image: vk::Image, color: [f32; 4]| -> Result<(), Box<dyn std::error::Error>> {
+            let range = vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1)
+                .layer_count(1);
+            unsafe {
+                vk_device.reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())?;
+                vk_device.begin_command_buffer(
+                    cmd_buf,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )?;
+                let to_dst = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range);
+                vk_device.cmd_pipeline_barrier(
+                    cmd_buf,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_dst],
+                );
+                vk_device.cmd_clear_color_image(
+                    cmd_buf,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearColorValue { float32: color },
+                    &[range],
+                );
+                let to_color = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range);
+                vk_device.cmd_pipeline_barrier(
+                    cmd_buf,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_color],
+                );
+                vk_device.end_command_buffer(cmd_buf)?;
+                let cbs = [cmd_buf];
+                let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+                vk_device.queue_submit(vk_queue, &[submit], vk::Fence::null())?;
+                vk_device.queue_wait_idle(vk_queue)?;
+            }
+            Ok(())
+        };
 
     // OpenXR session over the Vulkan binding.
     let (session, mut frame_waiter, mut frame_stream) = unsafe {
@@ -201,10 +299,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let space = session.create_reference_space(space_type, xr::Posef::IDENTITY)?;
 
     // View configuration recommended dims.
-    let view_configs = xr_instance.enumerate_view_configuration_views(
-        system,
-        xr::ViewConfigurationType::PRIMARY_STEREO,
-    )?;
+    let view_configs = xr_instance
+        .enumerate_view_configuration_views(system, xr::ViewConfigurationType::PRIMARY_STEREO)?;
     let proj_w = view_configs[0].recommended_image_rect_width;
     let proj_h = view_configs[0].recommended_image_rect_height;
     println!("Projection view dims: {}x{}", proj_w, proj_h);
@@ -226,7 +322,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mk_proj_swapchain = || -> Result<xr::Swapchain<xr::Vulkan>, xr::sys::Result> {
         session.create_swapchain(&xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
-            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::SAMPLED,
+            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                | xr::SwapchainUsageFlags::SAMPLED
+                | xr::SwapchainUsageFlags::TRANSFER_DST,
             format: swapchain_format,
             sample_count: 1,
             width: proj_w,
@@ -240,18 +338,37 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|_| mk_proj_swapchain())
         .collect::<Result<_, _>>()?;
 
-    let mut quad_swapchain: xr::Swapchain<xr::Vulkan> = session.create_swapchain(&xr::SwapchainCreateInfo {
-        create_flags: xr::SwapchainCreateFlags::EMPTY,
-        usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::SAMPLED,
-        format: swapchain_format,
-        sample_count: 1,
-        width: QUAD_SIZE_PX,
-        height: QUAD_SIZE_PX,
-        face_count: 1,
-        array_size: 1,
-        mip_count: 1,
-    })?;
+    let mut quad_swapchain: xr::Swapchain<xr::Vulkan> =
+        session.create_swapchain(&xr::SwapchainCreateInfo {
+            create_flags: xr::SwapchainCreateFlags::EMPTY,
+            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                | xr::SwapchainUsageFlags::SAMPLED,
+            format: swapchain_format,
+            sample_count: 1,
+            width: QUAD_SIZE_PX,
+            height: QUAD_SIZE_PX,
+            face_count: 1,
+            array_size: 1,
+            mip_count: 1,
+        })?;
     println!("Swapchains created: 2 projection + 1 quad");
+
+    // Underlying VkImages per swapchain, indexed by the acquired image index.
+    let proj_images: Vec<Vec<vk::Image>> = proj_swapchains
+        .iter()
+        .map(|sc| -> Result<Vec<vk::Image>, Box<dyn std::error::Error>> {
+            Ok(sc
+                .enumerate_images()?
+                .into_iter()
+                .map(vk::Image::from_raw)
+                .collect())
+        })
+        .collect::<Result<_, _>>()?;
+    let quad_images: Vec<vk::Image> = quad_swapchain
+        .enumerate_images()?
+        .into_iter()
+        .map(vk::Image::from_raw)
+        .collect();
 
     // Frame loop — drain events until SYNCHRONIZED/VISIBLE/FOCUSED, then
     // submit overlay frames until either TARGET_FRAMES or DEADLINE.
@@ -261,7 +378,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut submitted = 0u32;
     let mut endframe_errors = 0u32;
 
-    while submitted < TARGET_FRAMES && start.elapsed() < DEADLINE {
+    // Defaults give the original 30-frame protocol smoke. Override via env for a
+    // long continuous stream to eyeball the decoded image on the headset, e.g.
+    // OXR_SMOKE_FRAMES=100000 OXR_SMOKE_SECS=600.
+    let target_frames = std::env::var("OXR_SMOKE_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(TARGET_FRAMES);
+    let deadline = std::env::var("OXR_SMOKE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEADLINE);
+
+    while submitted < target_frames && start.elapsed() < deadline {
         while let Some(ev) = xr_instance.poll_event(&mut storage)? {
             if let xr::Event::SessionStateChanged(e) = ev {
                 if e.state() != session_state {
@@ -294,13 +424,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         // a valid index. The compositor reads from the released image; what's
         // in it (uninitialised cleared memory) doesn't affect whether the
         // squasher dispatches.
-        for sc in proj_swapchains.iter_mut() {
-            let _ = sc.acquire_image()?;
+        // Cycle a colour each frame so the streamed image is unmistakably live
+        // on the headset (RGB phase-shifted by 120°). The quad gets the inverse
+        // colour so both composited layers are distinguishable.
+        let t = submitted as f32 * 0.06;
+        let proj_color = [
+            0.5 + 0.5 * t.sin(),
+            0.5 + 0.5 * (t + 2.094).sin(),
+            0.5 + 0.5 * (t + 4.188).sin(),
+            1.0,
+        ];
+        let quad_color = [
+            1.0 - proj_color[0],
+            1.0 - proj_color[1],
+            1.0 - proj_color[2],
+            1.0,
+        ];
+
+        for (v, sc) in proj_swapchains.iter_mut().enumerate() {
+            let idx = sc.acquire_image()?;
             sc.wait_image(xr::Duration::INFINITE)?;
+            clear_image(proj_images[v][idx as usize], proj_color)?;
             sc.release_image()?;
         }
-        let _ = quad_swapchain.acquire_image()?;
+        let qidx = quad_swapchain.acquire_image()?;
         quad_swapchain.wait_image(xr::Duration::INFINITE)?;
+        clear_image(quad_images[qidx as usize], quad_color)?;
         quad_swapchain.release_image()?;
 
         let (view_flags, located_views) = session.locate_views(
