@@ -30,6 +30,11 @@
 // null. Exposed across the bridge so the Rust side can log it.
 const char* VkEncoderBackendLastError();
 
+// A sample of the most recently imported scratch image (read back from the GPU):
+// dimensions, the centre-row first pixel, and min/max/non-zero byte stats. Tells
+// whether the encoder is fed real pixels or zeros. Never null.
+const char* VkEncoderBackendSubmitDiag();
+
 class VkEncoderBackend : public IEncoderBackend {
 public:
     // Per-frame submit payload. Mirrors the relevant fields of AlvrOxrLayer

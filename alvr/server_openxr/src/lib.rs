@@ -1066,6 +1066,7 @@ mod encoder_bridge {
 
     unsafe extern "C" {
         fn alvr_vk_encoder_last_error() -> *const c_char;
+        fn alvr_vk_encoder_submit_diag() -> *const c_char;
         fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
         fn alvr_vk_encoder_destroy(handle: *mut c_void);
         fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
@@ -1229,7 +1230,19 @@ mod encoder_bridge {
         };
         // # Safety: handle valid for the lock's duration; desc outlives the call;
         // on_packet is a valid extern "C" fn.
-        unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) }
+        let ok = unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) };
+
+        // Log the GPU-read-back content sample for the first few frames so we can
+        // tell whether the encoder is fed real pixels or zeros (black-frame
+        // diagnosis). Throttled so it doesn't spam the per-frame log.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static DIAG_FRAMES: AtomicU32 = AtomicU32::new(0);
+        if DIAG_FRAMES.fetch_add(1, Ordering::Relaxed) < 5 {
+            // # Safety: returns a valid NUL-terminated global string, never null.
+            let diag = unsafe { CStr::from_ptr(alvr_vk_encoder_submit_diag()) }.to_string_lossy();
+            warn!("OpenXR encoder content diag: {diag}");
+        }
+        ok
     }
 }
 
