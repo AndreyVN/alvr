@@ -36,6 +36,10 @@ typedef void (*AlvrVkPacketCallback)(
     void* ctx, const uint8_t* data, int len, bool is_idr, uint64_t target_timestamp_ns
 );
 
+// Human-readable reason the most recent alvr_vk_encoder_create returned null
+// (valid until the next create call). Never null.
+const char* alvr_vk_encoder_last_error();
+
 // Create the encoder from `cfg`. Returns an opaque handle, or null if CUDA/NVENC
 // is unavailable or initialization failed.
 void* alvr_vk_encoder_create(const NvencConfig* cfg);

@@ -1,6 +1,14 @@
 #include "VkEncoderBackend.h"
 
 #include <stdexcept>
+#include <string>
+
+// Last-error diagnostic, shared by both build variants. Set at every Create()
+// failure point so the Rust bridge can log *why* the encoder didn't come up.
+namespace {
+std::string g_vk_encoder_last_error = "no error recorded";
+}
+const char* VkEncoderBackendLastError() { return g_vk_encoder_last_error.c_str(); }
 
 // 3.3b-2 implements the real CUDA-interop NVENC encoder when the CUDA Toolkit is
 // present at build time (build.rs defines ALVR_OXR_HAVE_CUDA). Without it — CI's
@@ -24,9 +32,13 @@
 namespace {
 
 // This translation unit deliberately avoids the OpenVR-side Logger; the Rust
-// bridge logs the bool/nullptr returns. OutputDebugString traces help bring-up
-// without pulling in stdout/stderr.
-void trace(const char* msg) { OutputDebugStringA(msg); }
+// bridge logs the bool/nullptr returns. OutputDebugString traces help bring-up,
+// and we also stash the message as the last-error so the Rust warning on a null
+// Create() can report the specific failing step.
+void trace(const char* msg) {
+    OutputDebugStringA(msg);
+    g_vk_encoder_last_error = msg;
+}
 
 // NVENC encoder over a CUDA context. Allocates pitched CUDA device memory as the
 // input pool (NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR), mirroring how
@@ -369,6 +381,8 @@ VkEncoderBackend::~VkEncoderBackend() = default;
 
 std::unique_ptr<VkEncoderBackend> VkEncoderBackend::Create(const NvencConfig&) {
     // Built without CUDA: OpenXR-mode NVENC streaming is unavailable.
+    g_vk_encoder_last_error
+        = "alvr_server_openxr built without the CUDA Toolkit (ALVR_OXR_HAVE_CUDA undefined)";
     return nullptr;
 }
 

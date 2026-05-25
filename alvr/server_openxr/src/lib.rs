@@ -1005,7 +1005,11 @@ mod encoder_bridge {
     use super::{AlvrOxrLayer, LOCAL_VIEW_PARAMS, SERVER_CORE_CONTEXT};
     use alvr_common::warn;
     use alvr_session::{CodecType, OpenvrConfig};
-    use std::{ffi::c_void, ptr, slice, time::Duration};
+    use std::{
+        ffi::{CStr, c_char, c_void},
+        ptr, slice,
+        time::Duration,
+    };
 
     // #[repr(C)] mirror of the C++ NvencConfig (encoder/NvencConfig.h). Field
     // order and types MUST stay identical: repr(C) and the C++ default struct
@@ -1061,6 +1065,7 @@ mod encoder_bridge {
     type VkPacketCallback = unsafe extern "C" fn(*mut c_void, *const u8, i32, bool, u64);
 
     unsafe extern "C" {
+        fn alvr_vk_encoder_last_error() -> *const c_char;
         fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
         fn alvr_vk_encoder_destroy(handle: *mut c_void);
         fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
@@ -1164,9 +1169,13 @@ mod encoder_bridge {
         // # Safety: `cfg` outlives the call; Create copies what it needs.
         let handle = unsafe { alvr_vk_encoder_create(&cfg) };
         if handle.is_null() {
+            // # Safety: the C side returns a valid NUL-terminated static/global
+            // string, never null.
+            let reason = unsafe { CStr::from_ptr(alvr_vk_encoder_last_error()) }.to_string_lossy();
             warn!(
-                "OpenXR mode: NVENC encoder unavailable (no NVIDIA GPU / CUDA, or init failed); \
-                 no video will stream"
+                "OpenXR mode: NVENC encoder unavailable; no video will stream. \
+                 Encoder config: codec={} {}x{} @ {}Hz, {} bps. Reason: {reason}",
+                cfg.codec, cfg.render_width, cfg.render_height, cfg.refresh_rate, cfg.bitrate_bps
             );
             return;
         }

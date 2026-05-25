@@ -25,6 +25,11 @@
 // crate — compiles on hosts without the CUDA Toolkit. There, Create() returns
 // nullptr ("NVENC unavailable").
 
+// Human-readable reason the most recent VkEncoderBackend::Create() returned
+// null (diagnostic for hardware bring-up; valid until the next Create()). Never
+// null. Exposed across the bridge so the Rust side can log it.
+const char* VkEncoderBackendLastError();
+
 class VkEncoderBackend : public IEncoderBackend {
 public:
     // Per-frame submit payload. Mirrors the relevant fields of AlvrOxrLayer
