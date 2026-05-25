@@ -26,7 +26,12 @@ env:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # Pinned to windows-2022 (VS2022) — the toolchain the green runs built on
+    # (MSVC 14.44, "Visual Studio 17 2022"). `windows-latest` is being
+    # redirected to windows-2025/VS2026 by 2026-06-15; pin so that toolchain
+    # swap doesn't silently land on the Monado build. Revisit deliberately to
+    # validate VS2026.
+    runs-on: windows-2022
     steps:
       # The `openxr/` submodule is a private fork (AndreyVN/monado @ alvr
       # branch) that the default GITHUB_TOKEN can't reach. Repo settings
@@ -53,7 +58,7 @@ jobs:
       # stale (empty) entry the old key already saved. Keyed on vcpkg.json so a
       # dependency change forces a rebuild.
       - name: Cache vcpkg installs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~\AppData\Local\vcpkg\archives
           key: vcpkg-windows-v2-${{ hashFiles('openxr/vcpkg.json') }}
