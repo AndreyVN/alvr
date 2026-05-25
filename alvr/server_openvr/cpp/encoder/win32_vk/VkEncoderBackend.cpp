@@ -2,6 +2,21 @@
 
 #include <stdexcept>
 
+// Slice 3.3a build-wiring gate. When the CUDA Toolkit is present at build
+// time, build.rs defines ALVR_OXR_HAVE_CUDA and adds CUDA_PATH/include to the
+// search path; the headers below then resolve (cuda.h + cudaTypedefs.h for the
+// driver API, nvEncodeAPI.h via the cpp_root include for NVENC). A wrong
+// include path fails the build here — that is the compile gate. No CUDA/NVENC
+// symbols are referenced yet: the real encoder (Slice 3.3b) loads nvcuda.dll +
+// nvEncodeAPI64.dll dynamically, so this adds no link dependency and the cdylib
+// stays loadable on hosts without an NVIDIA driver. On CI's NVIDIA-less runner
+// (no CUDA Toolkit) the define is absent and this block is skipped.
+#ifdef ALVR_OXR_HAVE_CUDA
+#include "alvr_server/nvEncodeAPI.h"
+#include <cuda.h>
+#include <cudaTypedefs.h>
+#endif
+
 // Phase 3.0 Slice 3.1 skeleton. Every method is a stub. The real bodies
 // arrive in Slice 3.2 (NVENC Vulkan-input integration); see the header
 // comment for the prerequisites.

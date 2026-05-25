@@ -22,6 +22,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=ALVR_REGENERATE_BRIDGE_HEADER");
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
     let platform = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
@@ -66,15 +67,57 @@ fn main() {
                 "cargo:rustc-link-search=native={}",
                 sdk_path.join("Lib").to_string_lossy()
             );
-            // Don't link vulkan-1 yet — the skeleton calls no Vulkan
-            // symbols. Slice 3.3 will add `println!("cargo:rustc-link-lib=vulkan-1")`
-            // once the real impl uses VkImage / VkSemaphore.
+            // Don't link vulkan-1 — the CUDA-interop path (Slice 3.3) imports
+            // Monado's OPAQUE_WIN32 external-memory handle straight into CUDA
+            // and never stands up a VkDevice, so no Vulkan symbols are called.
+            // The SDK include stays only for VkFormat enum values used when
+            // mapping AlvrOxrLayer.image_format → an NVENC buffer format.
         } else {
             println!(
                 "cargo:warning=VULKAN_SDK not set; the encoder skeleton will compile but \
                  Slice 3.3's real Vulkan-input NVENC integration will need it. \
                  Install the LunarG Vulkan SDK and re-build."
             );
+        }
+
+        // CUDA Toolkit include path. The NVENC Vulkan-input encoder (Slice 3.3)
+        // bridges to NVENC through the CUDA driver API: it imports Monado's
+        // OPAQUE_WIN32 image handle via `cuImportExternalMemory` and registers
+        // the resulting array with NVENC as NV_ENC_INPUT_RESOURCE_TYPE_CUDAARRAY.
+        // We need `cuda.h` (driver API types/structs) and `cudaTypedefs.h`
+        // (PFN_cu* function-pointer typedefs) at compile time.
+        //
+        // We deliberately do NOT link `cuda.lib`: the driver entry points live
+        // in `nvcuda.dll`, which the encoder loads dynamically at runtime
+        // (mirroring how NvEncoder.cpp loads nvEncodeAPI64.dll). Static-linking
+        // the import lib would make this cdylib — and the `cargo test -p
+        // alvr_server_openxr` binary CI runs on the NVIDIA-less windows-2022
+        // runner — depend on nvcuda.dll being present just to load, which it
+        // isn't on the build host (AMD iGPU) or CI. Dynamic loading keeps both
+        // green and degrades to a clean "NVENC unavailable" at Create() time.
+        //
+        // NVENC's own header is already reachable via the cpp_root include
+        // (`#include "alvr_server/nvEncodeAPI.h"`), so no extra path for it.
+        match env::var_os("CUDA_PATH") {
+            Some(cuda) => {
+                build.include(PathBuf::from(cuda).join("include"));
+                // Drives the `#ifdef ALVR_OXR_HAVE_CUDA` guard in
+                // VkEncoderBackend.cpp. When set, the CUDA/NVENC headers are
+                // mandatory (a wrong include path fails the build — the point
+                // of the compile gate). When unset (CI's NVIDIA-less
+                // windows-2022 runner, where the CUDA Toolkit isn't installed),
+                // the guard compiles the skeleton fallback instead and
+                // `Create()` reports NVENC unavailable, so `cargo test -p
+                // alvr_server_openxr` still builds and runs there.
+                build.define("ALVR_OXR_HAVE_CUDA", None);
+            }
+            None => {
+                println!(
+                    "cargo:warning=CUDA_PATH not set; the encoder skeleton will compile but \
+                     Slice 3.3's NVENC CUDA-interop encoder needs the CUDA Toolkit. \
+                     Install it (see install.txt) and re-build."
+                );
+            }
         }
 
         build.compile("alvr_server_openxr_encoder");

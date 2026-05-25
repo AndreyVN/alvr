@@ -96,6 +96,23 @@ unzip                                   6.0.0.20250209
     Provides:       archive utilities used by prepare-deps download/extract steps.
 
 
+CUDA Toolkit (OpenXR-mode only; NOT used by prepare-deps or the SteamVR build):
+
+cuda                                    13.2
+    Install:        choco install cuda -y   (MUST be an elevated "Run as administrator"
+                    shell — a non-elevated choco prints the "not running from an elevated
+                    command shell" warning and the NVIDIA installer step silently no-ops.)
+    Path:           C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2
+    Sets:           CUDA_PATH (machine env)
+    Provides:       cuda.h + cudaTypedefs.h (CUDA driver API headers)
+    Required by:    cargo build -p alvr_server_openxr  (OpenXR-mode NVENC encoder, Slice 3.3).
+                    Only the headers are needed at build time: the encoder loads nvcuda.dll
+                    dynamically at runtime (no cuda.lib link), so a build host without an
+                    NVIDIA GPU still compiles, and CI's NVIDIA-less runner builds the skeleton
+                    fallback when CUDA_PATH is unset. The runtime host needs only the NVIDIA
+                    driver (ships nvcuda.dll + nvEncodeAPI64.dll) — no separate CUDA install.
+
+
 3. Rust toolchain
 -----------------
 
