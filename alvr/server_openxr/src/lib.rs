@@ -350,7 +350,13 @@ fn event_loop(
 ///   `RealTimeConfig.per_view_foveation` field (Phase 7 per-view foveation
 ///   Slice 1 — bridge surface only; encoder body still hardware-blocked,
 ///   `server_core` glue is Slice 3).
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 5;
+/// - v6: the NVENC encoder body landed (Slice 3.3). `AlvrOxrLayer` gains
+///   `image_sizes[2]` (each view's backing allocation size, required by
+///   `cuImportExternalMemory`), and [`alvr_oxr_submit_layers`] gains a
+///   `display_time_ns` argument (the frame's predicted display time, so encoded
+///   NALs carry the timestamp the client matches a pose against). Both are
+///   filled by the Monado-side `comp_alvr`.
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 6;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -977,6 +983,7 @@ pub struct AlvrOxrLayer {
     pub layer_type: u32,           // see XRT_LAYER_*
     pub view_count: u32,
     pub image_handles: [u64; 2],   // left/right view, native handles
+    pub image_sizes: [u64; 2], // left/right backing allocation size in bytes (v6)
     pub width: u32,
     pub height: u32,
     pub fov_radians: [f32; 4],     // per view: [left, right, up, down]; primary view only
@@ -1198,11 +1205,11 @@ mod encoder_bridge {
         let desc = VkSubmitDesc {
             image_handle_left: layer.image_handles[0],
             image_handle_right: layer.image_handles[1],
-            // TODO(3.3c-2): AlvrOxrLayer must carry each view's allocation size
-            // (cuImportExternalMemory needs it) and a VkFormat — bridge ABI v6.
-            // Until then the import fails and the frame is dropped.
-            image_size_left: 0,
-            image_size_right: 0,
+            image_size_left: layer.image_sizes[0],
+            image_size_right: layer.image_sizes[1],
+            // image_format stays 0: comp_alvr's squasher output is RGBA8 and the
+            // encoder assumes ABGR. A future ABI rev can carry the VkFormat if a
+            // non-RGBA8 scratch format is ever introduced.
             image_format: 0,
             image_width: layer.width,
             image_height: layer.height,
@@ -1237,9 +1244,12 @@ mod encoder_bridge {
 /// read here.
 ///
 /// Returns `Ok` when the frame was encoded, `Failed` when it was dropped (e.g.
-/// the encoder isn't up, or — until bridge ABI v6 supplies per-view image sizes
-/// — the external-memory import fails). Never `NotImplemented` now that the body
-/// is wired.
+/// the encoder isn't up or the external-memory import failed). Never
+/// `NotImplemented` now that the body is wired.
+///
+/// `display_time_ns` is the frame's predicted display time (Monado-monotonic
+/// nanoseconds); the encoded NALs carry it so the client can match the frame to
+/// a tracking pose.
 ///
 /// # Safety
 /// `layers` must point to `layer_count` valid `AlvrOxrLayer`s. `sync_handle`
@@ -1250,7 +1260,9 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
     layer_count: u32,
     layers: *const AlvrOxrLayer,
     sync_handle: u64,
+    display_time_ns: i64,
 ) -> AlvrOxrResult {
+    let _ = frame_id;
     if layers.is_null() || layer_count == 0 {
         return AlvrOxrResult::Failed;
     }
@@ -1259,11 +1271,9 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
     // we read only the first (the squashed projection layer).
     let layer = unsafe { &*layers };
 
-    // TODO(3.3c-2): the bridge carries no per-frame display timestamp yet, so the
-    // client can't match this frame to a tracking pose. Pass frame_id-derived 0
-    // for now; ABI v6 adds a real predicted-display-time argument.
-    let _ = frame_id;
-    let target_timestamp_ns = 0;
+    // Monado-monotonic ns; clamp the (always-positive) predicted display time
+    // into the u64 the encoder/send_video_nal path uses.
+    let target_timestamp_ns = display_time_ns.max(0) as u64;
 
     if encoder_bridge::submit(layer, sync_handle, target_timestamp_ns) {
         AlvrOxrResult::Ok

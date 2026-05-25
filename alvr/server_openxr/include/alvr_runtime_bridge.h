@@ -51,8 +51,14 @@
  *   `RealTimeConfig.per_view_foveation` field (Phase 7 per-view foveation
  *   Slice 1 — bridge surface only; encoder body still hardware-blocked,
  *   `server_core` glue is Slice 3).
+ * - v6: the NVENC encoder body landed (Slice 3.3). `AlvrOxrLayer` gains
+ *   `image_sizes[2]` (each view's backing allocation size, required by
+ *   `cuImportExternalMemory`), and [`alvr_oxr_submit_layers`] gains a
+ *   `display_time_ns` argument (the frame's predicted display time, so encoded
+ *   NALs carry the timestamp the client matches a pose against). Both are
+ *   filled by the Monado-side `comp_alvr`.
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 5
+#define ALVR_OXR_BRIDGE_ABI_VERSION 6
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -259,6 +265,7 @@ typedef struct AlvrOxrLayer {
   uint32_t layer_type;
   uint32_t view_count;
   uint64_t image_handles[2];
+  uint64_t image_sizes[2];
   uint32_t width;
   uint32_t height;
   float fov_radians[4];
@@ -270,6 +277,53 @@ typedef struct AlvrOxrEvent {
   int64_t timestamp_ns;
   int32_t data[4];
 } AlvrOxrEvent;
+
+typedef struct VkNvencConfig {
+  int32_t codec;
+  int32_t refresh_rate;
+  int32_t render_width;
+  int32_t render_height;
+  uint64_t bitrate_bps;
+  bool enable_hdr;
+  bool use_10bit_encoder;
+  uint32_t nvenc_quality_preset;
+  uint32_t nvenc_tuning_preset;
+  int64_t nvenc_refresh_rate;
+  bool nvenc_enable_weighted_prediction;
+  int64_t nvenc_max_num_ref_frames;
+  int64_t nvenc_gop_length;
+  uint32_t entropy_coding;
+  bool nvenc_enable_intra_refresh;
+  int64_t nvenc_intra_refresh_period;
+  int64_t nvenc_intra_refresh_count;
+  bool filler_data;
+  uint32_t rate_control_mode;
+  int64_t nvenc_p_frame_strategy;
+  uint32_t nvenc_multi_pass;
+  int64_t nvenc_low_delay_key_frame_scale;
+  uint32_t nvenc_adaptive_quantization_mode;
+  int64_t nvenc_rate_control_mode;
+  int64_t nvenc_rc_buffer_size;
+  int64_t nvenc_rc_initial_delay;
+  int64_t nvenc_rc_max_bitrate;
+  int64_t nvenc_rc_average_bitrate;
+} VkNvencConfig;
+
+typedef struct VkSubmitDesc {
+  uint64_t image_handle_left;
+  uint64_t image_handle_right;
+  uint64_t image_size_left;
+  uint64_t image_size_right;
+  uint32_t image_format;
+  uint32_t image_width;
+  uint32_t image_height;
+  uint64_t sync_semaphore_handle;
+  uint64_t sync_semaphore_value;
+  uint64_t presentation_time_ns;
+  uint64_t target_timestamp_ns;
+} VkSubmitDesc;
+
+typedef void (*VkPacketCallback)(void*, const uint8_t*, int32_t, bool, uint64_t);
 
 #ifdef __cplusplus
 extern "C" {
@@ -374,9 +428,13 @@ AlvrOxrResult alvr_oxr_set_haptic(AlvrOxrSide side, const struct AlvrOxrHaptic *
  * `out_joints` untouched when the client reports `hand_skeletons[side] = None`
  * for the resolved frame.
  *
- * Sources the skeleton from `ServerCoreContext::get_hand_skeleton`, which in
- * turn reads the latest `TrackingData.hand_skeletons[side]` sample at-or-
- * before `at_timestamp_ns` from the tracking manager. Joint order matches the
+ * Sources the skeleton from `ServerCoreContext::get_hand_skeleton`, which
+ * **ignores `at_timestamp_ns`** and returns the most recently received
+ * `TrackingData.hand_skeletons[side]` sample. Quest hand samples are
+ * timestamped in the client's predicted-display clock domain and there is no
+ * client↔server time sync, so timestamp-based matching cannot align with the
+ * PC-runtime clock that OpenXR callers query in. Staleness is bounded by the
+ * Quest's send cadence (~10–16 ms). Joint order matches the
  * `XR_HAND_JOINT_*_EXT` enum 1:1 — the bridge does no reordering, so the
  * Monado-side `xrt_device::get_hand_tracking` can hand them straight to the
  * state tracker. Returns `NotInitialised` when the bridge isn't initialised;
@@ -418,6 +476,20 @@ AlvrOxrResult alvr_oxr_set_foveation(const struct AlvrOxrFoveationView *views);
 /**
  * Submit a frame's worth of composition layers.
  *
+ * Forwards the projection layer (`layers[0]`) to the NVENC encoder via
+ * [`encoder_bridge`]; encoded NALs flow back through `server_core::send_video_nal`
+ * from the encoder's packet callback. Non-projection layers are squashed into
+ * the projection image by `comp_alvr` before this call, so only `layers[0]` is
+ * read here.
+ *
+ * Returns `Ok` when the frame was encoded, `Failed` when it was dropped (e.g.
+ * the encoder isn't up or the external-memory import failed). Never
+ * `NotImplemented` now that the body is wired.
+ *
+ * `display_time_ns` is the frame's predicted display time (Monado-monotonic
+ * nanoseconds); the encoded NALs carry it so the client can match the frame to
+ * a tracking pose.
+ *
  * # Safety
  * `layers` must point to `layer_count` valid `AlvrOxrLayer`s. `sync_handle`
  * may be 0 to indicate "no GPU sync, use a fence".
@@ -425,7 +497,8 @@ AlvrOxrResult alvr_oxr_set_foveation(const struct AlvrOxrFoveationView *views);
 AlvrOxrResult alvr_oxr_submit_layers(int64_t frame_id,
                                      uint32_t layer_count,
                                      const struct AlvrOxrLayer *layers,
-                                     uint64_t sync_handle);
+                                     uint64_t sync_handle,
+                                     int64_t display_time_ns);
 
 /**
  * Report per-frame compositor pacing timestamps for telemetry.
@@ -496,6 +569,19 @@ AlvrOxrResult alvr_oxr_report_layer_types(int64_t frame_id,
  * `out_event` must be a writable `AlvrOxrEvent`.
  */
 AlvrOxrResult alvr_oxr_poll_session_event(struct AlvrOxrEvent *out_event);
+
+extern void *alvr_vk_encoder_create(const struct VkNvencConfig *cfg);
+
+extern void alvr_vk_encoder_destroy(void *handle);
+
+extern void alvr_vk_encoder_on_stream_start(void *handle);
+
+extern int32_t alvr_vk_encoder_get_seq_params(void *handle, uint8_t *out_buf, int32_t cap);
+
+extern bool alvr_vk_encoder_submit(void *handle,
+                                   const struct VkSubmitDesc *desc,
+                                   VkPacketCallback cb,
+                                   void *ctx);
 
 #ifdef __cplusplus
 }  // extern "C"
