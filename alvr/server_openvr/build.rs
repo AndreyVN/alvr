@@ -95,6 +95,15 @@ fn main() {
     if let Some(enc) = encoder_subpath {
         build.include(enc);
     }
+
+    // The shared runtime-agnostic NVENC config builder (encoder/NvencConfig.cpp)
+    // lives at the encoder/ root, which the common walker excludes (it only
+    // descends into the per-OS encoder subdir). Compile it explicitly on
+    // Windows, where the D3D11 NVENC backend consumes it; the OpenXR-mode
+    // Vulkan-input backend shares the same file via alvr_server_openxr's build.rs.
+    if platform_name == "windows" {
+        build.file("cpp/encoder/NvencConfig.cpp");
+    }
     // Symmetrically, the moved Win32 encoder files still reference
     // `shared/d3drender.h`, which originally resolved via "same directory as
     // the including file" (cpp/platform/win32/shared/d3drender.h). Adding
