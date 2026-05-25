@@ -1153,6 +1153,23 @@ mod encoder_bridge {
         }
         // # Safety: NVENC guarantees `len` valid bytes for the call's duration.
         let nal = unsafe { slice::from_raw_parts(data, len as usize) }.to_vec();
+
+        // Diagnostic: log the first several encoded NALs (byte length + the first
+        // bytes, which carry the HEVC start code + NAL-unit type) to confirm
+        // NVENC is producing a real bitstream and the headers look sane.
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NAL_LOG: AtomicU32 = AtomicU32::new(0);
+            if NAL_LOG.fetch_add(1, Ordering::Relaxed) < 10 {
+                let head = &nal[..nal.len().min(8)];
+                warn!(
+                    "OpenXR NAL: len={} is_idr={} head={head:02x?}",
+                    nal.len(),
+                    is_idr
+                );
+            }
+        }
+
         let view_params = *LOCAL_VIEW_PARAMS.read();
         if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
             ctx.send_video_nal(
