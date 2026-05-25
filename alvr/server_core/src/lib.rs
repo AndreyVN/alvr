@@ -180,6 +180,15 @@ pub fn settings() -> Settings {
     SESSION_MANAGER.read().settings().clone()
 }
 
+/// The negotiated stream config (`contruct_openvr_config`), refreshed on each
+/// connection. Carries the per-eye resolution + codec/bitrate/NVENC knobs the
+/// OpenXR-mode encoder (`alvr_server_openxr`) needs to build its NVENC session —
+/// the same source the OpenVR-side C++ `Settings` reads. Only meaningful after a
+/// client has connected; returns `OpenvrConfig::default()` before that.
+pub fn openvr_config() -> alvr_session::OpenvrConfig {
+    SESSION_MANAGER.read().session().openvr_config.clone()
+}
+
 pub fn registered_button_set() -> HashSet<u64> {
     let session_manager = SESSION_MANAGER.read();
     if let Switch::Enabled(input_mapping) = &session_manager.settings().headset.controllers {

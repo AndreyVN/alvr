@@ -224,6 +224,11 @@ fn event_loop(
         match events_receiver.recv_timeout(recv_timeout) {
             Ok(event) => match event {
                 ServerCoreEvent::ClientConnected => {
+                    // Stand up the NVENC encoder from the now-negotiated
+                    // openvr_config and publish the sequence-header NALs. No-op
+                    // (logs) if NVENC/CUDA is unavailable. Mirrors the OpenVR
+                    // side's InitializeStreaming on ClientConnected.
+                    encoder_bridge::start();
                     let _ = session_events_tx.send(AlvrOxrEvent {
                         event_type: AlvrOxrEventType::StateChange,
                         timestamp_ns: 0,
@@ -235,6 +240,7 @@ fn event_loop(
                     });
                 }
                 ServerCoreEvent::ClientDisconnected | ServerCoreEvent::ShutdownPending => {
+                    encoder_bridge::stop();
                     let _ = session_events_tx.send(AlvrOxrEvent {
                         event_type: AlvrOxrEventType::ConnectionLost,
                         timestamp_ns: 0,
@@ -977,7 +983,263 @@ pub struct AlvrOxrLayer {
     pub pose: AlvrOxrPose,
 }
 
+/// OpenXR-mode NVENC encoder bridge (Slice 3.3c). Wraps the C++ `VkEncoderBackend`
+/// (`cpp/encoder/win32_vk/`, exposed via `VkEncoderBackendC.h`): created on
+/// `ClientConnected` from the negotiated `openvr_config`, fed by
+/// [`alvr_oxr_submit_layers`], output NALs pushed back through `server_core`
+/// (`send_video_nal` / `set_video_config_nals`) — the OpenXR counterpart to
+/// `alvr_server_openvr`'s `VideoSend` path.
+///
+/// Windows-only: the encoder C++ is compiled only on Windows (see
+/// `server_openxr/build.rs`), so other targets get the no-op stubs that keep the
+/// crate building cross-platform.
+#[cfg(target_os = "windows")]
+mod encoder_bridge {
+    use super::{AlvrOxrLayer, LOCAL_VIEW_PARAMS, SERVER_CORE_CONTEXT};
+    use alvr_common::warn;
+    use alvr_session::{CodecType, OpenvrConfig};
+    use std::{ffi::c_void, ptr, slice, time::Duration};
+
+    // #[repr(C)] mirror of the C++ NvencConfig (encoder/NvencConfig.h). Field
+    // order and types MUST stay identical: repr(C) and the C++ default struct
+    // layout follow the same rules, so matching fields => matching bytes.
+    #[repr(C)]
+    struct VkNvencConfig {
+        codec: i32,
+        refresh_rate: i32,
+        render_width: i32,
+        render_height: i32,
+        bitrate_bps: u64,
+        enable_hdr: bool,
+        use_10bit_encoder: bool,
+        nvenc_quality_preset: u32,
+        nvenc_tuning_preset: u32,
+        nvenc_refresh_rate: i64,
+        nvenc_enable_weighted_prediction: bool,
+        nvenc_max_num_ref_frames: i64,
+        nvenc_gop_length: i64,
+        entropy_coding: u32,
+        nvenc_enable_intra_refresh: bool,
+        nvenc_intra_refresh_period: i64,
+        nvenc_intra_refresh_count: i64,
+        filler_data: bool,
+        rate_control_mode: u32,
+        nvenc_p_frame_strategy: i64,
+        nvenc_multi_pass: u32,
+        nvenc_low_delay_key_frame_scale: i64,
+        nvenc_adaptive_quantization_mode: u32,
+        nvenc_rate_control_mode: i64,
+        nvenc_rc_buffer_size: i64,
+        nvenc_rc_initial_delay: i64,
+        nvenc_rc_max_bitrate: i64,
+        nvenc_rc_average_bitrate: i64,
+    }
+
+    // #[repr(C)] mirror of AlvrVkSubmitDesc (VkEncoderBackendC.h).
+    #[repr(C)]
+    struct VkSubmitDesc {
+        image_handle_left: u64,
+        image_handle_right: u64,
+        image_size_left: u64,
+        image_size_right: u64,
+        image_format: u32,
+        image_width: u32,
+        image_height: u32,
+        sync_semaphore_handle: u64,
+        sync_semaphore_value: u64,
+        presentation_time_ns: u64,
+        target_timestamp_ns: u64,
+    }
+
+    type VkPacketCallback = unsafe extern "C" fn(*mut c_void, *const u8, i32, bool, u64);
+
+    unsafe extern "C" {
+        fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
+        fn alvr_vk_encoder_destroy(handle: *mut c_void);
+        fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
+        fn alvr_vk_encoder_get_seq_params(handle: *mut c_void, out_buf: *mut u8, cap: i32) -> i32;
+        fn alvr_vk_encoder_submit(
+            handle: *mut c_void,
+            desc: *const VkSubmitDesc,
+            cb: VkPacketCallback,
+            ctx: *mut c_void,
+        ) -> bool;
+    }
+
+    // The encoder handle (VkEncoderBackend*) created on the drain thread and read
+    // by alvr_oxr_submit_layers on the compositor thread. The lock is held across
+    // a submit so a concurrent disconnect can't destroy it mid-encode; the C++
+    // side makes its own CUDA context current per call, so cross-thread use is
+    // fine. # Safety: the pointer is only ever produced by alvr_vk_encoder_create
+    // and destroyed once.
+    struct Handle(*mut c_void);
+    unsafe impl Send for Handle {}
+    static ENCODER: alvr_common::parking_lot::Mutex<Option<Handle>> =
+        alvr_common::parking_lot::Mutex::new(None);
+
+    fn codec_type(codec: u8) -> CodecType {
+        match codec {
+            1 => CodecType::Hevc,
+            2 => CodecType::AV1,
+            _ => CodecType::H264,
+        }
+    }
+
+    fn build_config(oc: &OpenvrConfig) -> VkNvencConfig {
+        // Default base bitrate matches the OpenVR NVENC path's 30 Mbit seed; the
+        // negotiated rc_average_bitrate overrides it when set.
+        let bitrate_bps = if oc.rc_average_bitrate > 0 {
+            oc.rc_average_bitrate as u64
+        } else {
+            30_000_000
+        };
+        VkNvencConfig {
+            codec: oc.codec as i32,
+            refresh_rate: oc.refresh_rate as i32,
+            // Both eyes are packed side by side into one encoded frame.
+            render_width: (oc.eye_resolution_width * 2) as i32,
+            render_height: oc.eye_resolution_height as i32,
+            bitrate_bps,
+            enable_hdr: oc.enable_hdr,
+            use_10bit_encoder: oc.use_10bit_encoder,
+            nvenc_quality_preset: oc.nvenc_quality_preset,
+            nvenc_tuning_preset: oc.nvenc_tuning_preset,
+            nvenc_refresh_rate: oc.nvenc_refresh_rate,
+            nvenc_enable_weighted_prediction: oc.nvenc_enable_weighted_prediction,
+            nvenc_max_num_ref_frames: oc.max_num_ref_frames,
+            nvenc_gop_length: oc.gop_length,
+            entropy_coding: oc.entropy_coding,
+            nvenc_enable_intra_refresh: oc.enable_intra_refresh,
+            nvenc_intra_refresh_period: oc.intra_refresh_period,
+            nvenc_intra_refresh_count: oc.intra_refresh_count,
+            filler_data: oc.filler_data,
+            rate_control_mode: oc.rate_control_mode,
+            nvenc_p_frame_strategy: oc.p_frame_strategy,
+            nvenc_multi_pass: oc.nvenc_multi_pass,
+            nvenc_low_delay_key_frame_scale: oc.nvenc_low_delay_key_frame_scale,
+            nvenc_adaptive_quantization_mode: oc.nvenc_adaptive_quantization_mode,
+            nvenc_rate_control_mode: oc.nvenc_rate_control_mode,
+            nvenc_rc_buffer_size: oc.rc_buffer_size,
+            nvenc_rc_initial_delay: oc.rc_initial_delay,
+            nvenc_rc_max_bitrate: oc.rc_max_bitrate,
+            nvenc_rc_average_bitrate: oc.rc_average_bitrate,
+        }
+    }
+
+    // NVENC output sink. Forwards each NAL to server_core with the latest cached
+    // view params (the client matches the frame to a pose by these + timestamp).
+    unsafe extern "C" fn on_packet(
+        _ctx: *mut c_void,
+        data: *const u8,
+        len: i32,
+        is_idr: bool,
+        target_timestamp_ns: u64,
+    ) {
+        if data.is_null() || len <= 0 {
+            return;
+        }
+        // # Safety: NVENC guarantees `len` valid bytes for the call's duration.
+        let nal = unsafe { slice::from_raw_parts(data, len as usize) }.to_vec();
+        let view_params = *LOCAL_VIEW_PARAMS.read();
+        if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
+            ctx.send_video_nal(
+                Duration::from_nanos(target_timestamp_ns),
+                view_params,
+                is_idr,
+                nal,
+            );
+        }
+    }
+
+    pub fn start() {
+        let oc = alvr_server_core::openvr_config();
+        let cfg = build_config(&oc);
+        // # Safety: `cfg` outlives the call; Create copies what it needs.
+        let handle = unsafe { alvr_vk_encoder_create(&cfg) };
+        if handle.is_null() {
+            warn!(
+                "OpenXR mode: NVENC encoder unavailable (no NVIDIA GPU / CUDA, or init failed); \
+                 no video will stream"
+            );
+            return;
+        }
+        // # Safety: handle just came from create and is non-null.
+        unsafe { alvr_vk_encoder_on_stream_start(handle) };
+
+        // Publish sequence-header (SPS/PPS/VPS) NALs. Query the length first
+        // (cap 0 = no copy), then fetch into a right-sized buffer.
+        // # Safety: handle valid; null/0 means "just return the length".
+        let len = unsafe { alvr_vk_encoder_get_seq_params(handle, ptr::null_mut(), 0) };
+        if len > 0 {
+            let mut buf = vec![0u8; len as usize];
+            // # Safety: buf has `len` bytes of capacity.
+            let written = unsafe { alvr_vk_encoder_get_seq_params(handle, buf.as_mut_ptr(), len) };
+            buf.truncate(written.max(0) as usize);
+            if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
+                ctx.set_video_config_nals(buf, codec_type(oc.codec));
+            }
+        }
+
+        *ENCODER.lock() = Some(Handle(handle));
+    }
+
+    pub fn stop() {
+        if let Some(handle) = ENCODER.lock().take() {
+            // # Safety: handle came from create and is destroyed exactly once.
+            unsafe { alvr_vk_encoder_destroy(handle.0) };
+        }
+    }
+
+    pub fn submit(layer: &AlvrOxrLayer, sync_handle: u64, target_timestamp_ns: u64) -> bool {
+        let guard = ENCODER.lock();
+        let Some(handle) = guard.as_ref() else {
+            return false;
+        };
+        let desc = VkSubmitDesc {
+            image_handle_left: layer.image_handles[0],
+            image_handle_right: layer.image_handles[1],
+            // TODO(3.3c-2): AlvrOxrLayer must carry each view's allocation size
+            // (cuImportExternalMemory needs it) and a VkFormat — bridge ABI v6.
+            // Until then the import fails and the frame is dropped.
+            image_size_left: 0,
+            image_size_right: 0,
+            image_format: 0,
+            image_width: layer.width,
+            image_height: layer.height,
+            sync_semaphore_handle: sync_handle,
+            sync_semaphore_value: 0,
+            presentation_time_ns: 0,
+            target_timestamp_ns,
+        };
+        // # Safety: handle valid for the lock's duration; desc outlives the call;
+        // on_packet is a valid extern "C" fn.
+        unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod encoder_bridge {
+    use super::AlvrOxrLayer;
+
+    pub fn start() {}
+    pub fn stop() {}
+    pub fn submit(_layer: &AlvrOxrLayer, _sync_handle: u64, _target_timestamp_ns: u64) -> bool {
+        false
+    }
+}
+
 /// Submit a frame's worth of composition layers.
+///
+/// Forwards the projection layer (`layers[0]`) to the NVENC encoder via
+/// [`encoder_bridge`]; encoded NALs flow back through `server_core::send_video_nal`
+/// from the encoder's packet callback. Non-projection layers are squashed into
+/// the projection image by `comp_alvr` before this call, so only `layers[0]` is
+/// read here.
+///
+/// Returns `Ok` when the frame was encoded, `Failed` when it was dropped (e.g.
+/// the encoder isn't up, or — until bridge ABI v6 supplies per-view image sizes
+/// — the external-memory import fails). Never `NotImplemented` now that the body
+/// is wired.
 ///
 /// # Safety
 /// `layers` must point to `layer_count` valid `AlvrOxrLayer`s. `sync_handle`
@@ -989,8 +1251,25 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
     layers: *const AlvrOxrLayer,
     sync_handle: u64,
 ) -> AlvrOxrResult {
-    let _ = (frame_id, layer_count, layers, sync_handle);
-    AlvrOxrResult::NotImplemented
+    if layers.is_null() || layer_count == 0 {
+        return AlvrOxrResult::Failed;
+    }
+
+    // # Safety: caller guarantees `layers` points to `layer_count` valid layers;
+    // we read only the first (the squashed projection layer).
+    let layer = unsafe { &*layers };
+
+    // TODO(3.3c-2): the bridge carries no per-frame display timestamp yet, so the
+    // client can't match this frame to a tracking pose. Pass frame_id-derived 0
+    // for now; ABI v6 adds a real predicted-display-time argument.
+    let _ = frame_id;
+    let target_timestamp_ns = 0;
+
+    if encoder_bridge::submit(layer, sync_handle, target_timestamp_ns) {
+        AlvrOxrResult::Ok
+    } else {
+        AlvrOxrResult::Failed
+    }
 }
 
 /// Report per-frame compositor pacing timestamps for telemetry.
