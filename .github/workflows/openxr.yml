@@ -58,6 +58,26 @@ jobs:
           RUST_BACKTRACE: 1
         run: cargo xtask prepare-deps --platform windows
 
+      # prepare-deps `choco install vulkan-sdk`s the LunarG SDK, but choco sets
+      # VULKAN_SDK / PATH at the machine level mid-job and GitHub Actions does
+      # not surface that to later steps. Export it explicitly so the cdylib's
+      # encoder skeleton sees VULKAN_SDK and Monado's SPIR-V.cmake finds
+      # glslangValidator.exe (in <sdk>\Bin) — without this the runtime build
+      # fails at configure with "glslangValidator required".
+      - name: Export Vulkan SDK to environment
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem 'C:\VulkanSDK' -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) {
+            Write-Error "Vulkan SDK not found under C:\VulkanSDK after prepare-deps (expected choco install vulkan-sdk)."
+            exit 1
+          }
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$($sdk.FullName)\Bin"       | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "VULKAN_SDK=$($sdk.FullName)"
+          & "$($sdk.FullName)\Bin\glslangValidator.exe" --version
+
       # The Monado-side ALVR driver + compositor link against this cdylib;
       # build it first so the .dll.lib import lib exists for the IMPORTED
       # target in drivers/alvr/CMakeLists.txt and compositor/alvr/CMakeLists.txt.
