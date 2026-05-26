@@ -63,8 +63,18 @@
  *   Makes the OpenXR resolution pipeline coherent end to end (app render →
  *   scratch → NVENC frame → client decode all agree), so the encoded frame is
  *   fully filled and the client decodes/presents the stream.
+ * - v8: added [`alvr_oxr_get_foveation_vars`] + [`AlvrOxrFoveationVars`] so the
+ *   Monado-side `comp_alvr` can run the server-side FFR (foveated-encoding)
+ *   compress pass. Returns the 32-aligned foveated per-eye resolution the
+ *   encoder must size to, plus the eight `ffr.comp` specialization constants
+ *   (`eyeSizeRatio`, `centerSize`, `centerShift`, `edgeRatio`), computed from
+ *   the negotiated `openvr_config` foveation params via
+ *   `alvr_session::foveation_compress_vars` — the exact inverse of the math
+ *   the client de-foveates with, so the round-trip matches. `enabled = false`
+ *   (foveation off session-wide) means "encode at full resolution, skip the
+ *   FFR pass" (OpenXR FFR Slice 1).
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 7
+#define ALVR_OXR_BRIDGE_ABI_VERSION 8
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -257,6 +267,50 @@ typedef struct AlvrOxrFoveationView {
   float center_shift[2];
   float edge_ratio[2];
 } AlvrOxrFoveationView;
+
+/**
+ * Static foveated-encoding compress parameters for the encoder's FFR pass.
+ * Unlike the per-frame [`AlvrOxrFoveationView`] cache (gaze-driven centre
+ * shift), these are derived once from the negotiated session config and tell
+ * `comp_alvr` how to set up its `ffr.comp` compute pass: the foveated output
+ * resolution and the eight specialization constants the shader consumes.
+ *
+ * When `enabled` is `false`, foveated encoding is off session-wide; the
+ * encoder should skip the FFR pass and encode the full-resolution image
+ * (`optimized_*` then equal the full per-eye resolution and the ratios are
+ * identity).
+ */
+typedef struct AlvrOxrFoveationVars {
+  /**
+   * `false` => foveated encoding disabled; encode full-res, skip FFR.
+   */
+  bool is_enabled;
+  /**
+   * 32-aligned foveated per-eye width (`ffr.comp` output). Combined frame
+   * width is `2 * optimized_width`.
+   */
+  uint32_t optimized_width;
+  /**
+   * 32-aligned foveated per-eye height (`ffr.comp` output).
+   */
+  uint32_t optimized_height;
+  /**
+   * `eyeSizeRatio` spec constant (`VIEW_WIDTH/HEIGHT_RATIO` on the client).
+   */
+  float eye_size_ratio[2];
+  /**
+   * `centerSize` spec constant (aligned).
+   */
+  float center_size[2];
+  /**
+   * `centerShift` spec constant (aligned).
+   */
+  float center_shift[2];
+  /**
+   * `edgeRatio` spec constant (raw, per axis).
+   */
+  float edge_ratio[2];
+} AlvrOxrFoveationVars;
 
 /**
  * One submitted OpenXR composition layer. The Monado-side compositor builds
@@ -496,6 +550,22 @@ AlvrOxrResult alvr_oxr_get_foveation(struct AlvrOxrFoveationView *out_views);
  * the bridge copies into its internal cache.
  */
 AlvrOxrResult alvr_oxr_set_foveation(const struct AlvrOxrFoveationView *views);
+
+/**
+ * Read the static foveated-encoding compress parameters derived from the
+ * negotiated `openvr_config`. Called once by the Monado-side `comp_alvr` when
+ * it builds the FFR compute pass (and again on reconnect, since the
+ * negotiated resolution / foveation config can change between sessions).
+ *
+ * Mirrors the resolution math [`alvr_oxr_get_view_resolution`] reports: the
+ * app still renders / the squasher still composes at the *full* per-eye
+ * resolution; this FFR pass then compresses that down to `optimized_*`, which
+ * is what the encoder sizes to and the client de-foveates back up from.
+ *
+ * # Safety
+ * `out_vars` must point to a writable [`AlvrOxrFoveationVars`].
+ */
+AlvrOxrResult alvr_oxr_get_foveation_vars(struct AlvrOxrFoveationVars *out_vars);
 
 /**
  * Submit a frame's worth of composition layers.

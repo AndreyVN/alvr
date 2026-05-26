@@ -32,6 +32,10 @@
 //!     cache of per-view foveation params; getter is the encoder hot-path
 //!     read, setter is the drain thread's `ServerCoreEvent::PerViewFoveation`
 //!     consumer (Phase 7 per-view foveation Slice 1, ABI v5).
+//!   - [`alvr_oxr_get_foveation_vars`] — static FFR compress params (foveated
+//!     output resolution + `ffr.comp` spec constants) derived from the
+//!     negotiated `openvr_config`, for `comp_alvr`'s server-side foveation
+//!     compress pass (OpenXR FFR Slice 1, ABI v8).
 //!
 //! Only stub left:
 //!   - [`alvr_oxr_submit_layers`] — Phase 3 Slice 3.2/3.3
@@ -51,12 +55,15 @@ use alvr_common::{
     RIGHT_SYSTEM_CLICK_ID, RIGHT_THUMBREST_TOUCH_ID, RIGHT_THUMBSTICK_CLICK_ID,
     RIGHT_THUMBSTICK_TOUCH_ID, RIGHT_THUMBSTICK_X_ID, RIGHT_THUMBSTICK_Y_ID,
     RIGHT_TRIGGER_CLICK_ID, RIGHT_TRIGGER_TOUCH_ID, RIGHT_TRIGGER_VALUE_ID, RIGHT_X_CLICK_ID,
-    RIGHT_X_TOUCH_ID, RIGHT_Y_CLICK_ID, RIGHT_Y_TOUCH_ID, ViewParams, error, info,
+    RIGHT_X_TOUCH_ID, RIGHT_Y_CLICK_ID, RIGHT_Y_TOUCH_ID, ViewParams, error,
+    glam::UVec2,
+    info,
     parking_lot::{Mutex, RwLock},
     warn,
 };
 use alvr_packets::{BatteryInfo, ButtonValue, Haptics};
 use alvr_server_core::{HandType, PerViewFoveationView, ServerCoreContext, ServerCoreEvent};
+use alvr_session::{FoveatedEncodingConfig, foveation_compress_vars, settings_schema::Switch};
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
@@ -374,7 +381,17 @@ fn event_loop(
 ///   Makes the OpenXR resolution pipeline coherent end to end (app render →
 ///   scratch → NVENC frame → client decode all agree), so the encoded frame is
 ///   fully filled and the client decodes/presents the stream.
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 7;
+/// - v8: added [`alvr_oxr_get_foveation_vars`] + [`AlvrOxrFoveationVars`] so the
+///   Monado-side `comp_alvr` can run the server-side FFR (foveated-encoding)
+///   compress pass. Returns the 32-aligned foveated per-eye resolution the
+///   encoder must size to, plus the eight `ffr.comp` specialization constants
+///   (`eyeSizeRatio`, `centerSize`, `centerShift`, `edgeRatio`), computed from
+///   the negotiated `openvr_config` foveation params via
+///   `alvr_session::foveation_compress_vars` — the exact inverse of the math
+///   the client de-foveates with, so the round-trip matches. `enabled = false`
+///   (foveation off session-wide) means "encode at full resolution, skip the
+///   FFR pass" (OpenXR FFR Slice 1).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 8;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -1016,6 +1033,103 @@ pub unsafe extern "C" fn alvr_oxr_set_foveation(
     }
     let new_state = unsafe { [*views, *views.add(1)] };
     *FOVEATION.write() = new_state;
+    AlvrOxrResult::Ok
+}
+
+/// Static foveated-encoding compress parameters for the encoder's FFR pass.
+/// Unlike the per-frame [`AlvrOxrFoveationView`] cache (gaze-driven centre
+/// shift), these are derived once from the negotiated session config and tell
+/// `comp_alvr` how to set up its `ffr.comp` compute pass: the foveated output
+/// resolution and the eight specialization constants the shader consumes.
+///
+/// When `enabled` is `false`, foveated encoding is off session-wide; the
+/// encoder should skip the FFR pass and encode the full-resolution image
+/// (`optimized_*` then equal the full per-eye resolution and the ratios are
+/// identity).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AlvrOxrFoveationVars {
+    /// `false` => foveated encoding disabled; encode full-res, skip FFR.
+    pub is_enabled: bool,
+    /// 32-aligned foveated per-eye width (`ffr.comp` output). Combined frame
+    /// width is `2 * optimized_width`.
+    pub optimized_width: u32,
+    /// 32-aligned foveated per-eye height (`ffr.comp` output).
+    pub optimized_height: u32,
+    /// `eyeSizeRatio` spec constant (`VIEW_WIDTH/HEIGHT_RATIO` on the client).
+    pub eye_size_ratio: [f32; 2],
+    /// `centerSize` spec constant (aligned).
+    pub center_size: [f32; 2],
+    /// `centerShift` spec constant (aligned).
+    pub center_shift: [f32; 2],
+    /// `edgeRatio` spec constant (raw, per axis).
+    pub edge_ratio: [f32; 2],
+}
+
+/// Read the static foveated-encoding compress parameters derived from the
+/// negotiated `openvr_config`. Called once by the Monado-side `comp_alvr` when
+/// it builds the FFR compute pass (and again on reconnect, since the
+/// negotiated resolution / foveation config can change between sessions).
+///
+/// Mirrors the resolution math [`alvr_oxr_get_view_resolution`] reports: the
+/// app still renders / the squasher still composes at the *full* per-eye
+/// resolution; this FFR pass then compresses that down to `optimized_*`, which
+/// is what the encoder sizes to and the client de-foveates back up from.
+///
+/// # Safety
+/// `out_vars` must point to a writable [`AlvrOxrFoveationVars`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_get_foveation_vars(
+    out_vars: *mut AlvrOxrFoveationVars,
+) -> AlvrOxrResult {
+    if out_vars.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+
+    let oc = alvr_server_core::openvr_config();
+
+    let vars = if oc.enable_foveated_encoding {
+        let config = FoveatedEncodingConfig {
+            force_enable: false,
+            center_size_x: oc.foveation_center_size_x,
+            center_size_y: oc.foveation_center_size_y,
+            center_shift_x: oc.foveation_center_shift_x,
+            center_shift_y: oc.foveation_center_shift_y,
+            edge_ratio_x: oc.foveation_edge_ratio_x,
+            edge_ratio_y: oc.foveation_edge_ratio_y,
+            // The per-frame gaze-driven shift flows through the separate
+            // [`alvr_oxr_get_foveation`] cache; this static derivation uses the
+            // session-config centre only.
+            per_view_eye_tracked: Switch::Disabled,
+        };
+        let compress = foveation_compress_vars(
+            UVec2::new(oc.eye_resolution_width, oc.eye_resolution_height),
+            config,
+        );
+        AlvrOxrFoveationVars {
+            is_enabled: true,
+            optimized_width: compress.optimized_view_resolution.x,
+            optimized_height: compress.optimized_view_resolution.y,
+            eye_size_ratio: compress.eye_size_ratio,
+            center_size: compress.center_size,
+            center_shift: compress.center_shift,
+            edge_ratio: compress.edge_ratio,
+        }
+    } else {
+        // Foveation off: encode at full resolution, identity ratios.
+        AlvrOxrFoveationVars {
+            is_enabled: false,
+            optimized_width: oc.eye_resolution_width,
+            optimized_height: oc.eye_resolution_height,
+            eye_size_ratio: [1.0, 1.0],
+            center_size: [0.0, 0.0],
+            center_shift: [0.0, 0.0],
+            edge_ratio: [1.0, 1.0],
+        }
+    };
+
+    // # Safety: caller guarantees `out_vars` is writable.
+    unsafe { *out_vars = vars };
     AlvrOxrResult::Ok
 }
 
