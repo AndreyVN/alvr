@@ -62,7 +62,7 @@ use std::{
     path::PathBuf,
     ptr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -117,6 +117,14 @@ static LOCAL_VIEW_PARAMS: RwLock<[ViewParams; 2]> = RwLock::new([ViewParams::DUM
 static SESSION_EVENTS_RX: Mutex<Option<mpsc::Receiver<AlvrOxrEvent>>> = Mutex::new(None);
 static EVENT_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None);
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Latest client tracking `poll_timestamp` (nanoseconds), updated by the drain
+/// thread on `ServerCoreEvent::Tracking`. The encoder stamps each video frame
+/// with this so the client can correlate the decoded frame to a pose it sent —
+/// the client's clock, NOT Monado's compositor display time (there is no
+/// client↔server clock sync, so a Monado timestamp matches nothing and the
+/// client discards every frame, showing black). 0 = no tracking received yet.
+static LATEST_POLL_TIMESTAMP_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Cached analogue + button state for one side. Indexed by AlvrOxrSide
 /// discriminant (Left = 0, Right = 1). Written by the event-drain thread on
@@ -288,11 +296,15 @@ fn event_loop(
                     // Devices not in the kind table (body trackers etc.) are
                     // dropped silently — the bridge ABI doesn't surface them.
                 }
+                ServerCoreEvent::Tracking { poll_timestamp } => {
+                    // The poses themselves are read on-demand via
+                    // get_device_motion; here we only stash the client's frame
+                    // timestamp so the encoder can stamp video with it (the
+                    // client correlates decoded frames by this exact value).
+                    LATEST_POLL_TIMESTAMP_NS
+                        .store(poll_timestamp.as_nanos() as u64, Ordering::Relaxed);
+                }
                 // Other events are drained but not yet routed.
-                //   - Tracking:           read on-demand by
-                //                         alvr_oxr_get_head_pose /
-                //                         _controller_state via
-                //                         context.get_device_motion.
                 //   - SetOpenvrProperty:  irrelevant in OpenXR mode.
                 //   - RefreshRate:        no upstream ServerCoreEvent variant
                 //                         exists today — refresh-rate is
@@ -1002,8 +1014,8 @@ pub struct AlvrOxrLayer {
 /// crate building cross-platform.
 #[cfg(target_os = "windows")]
 mod encoder_bridge {
-    use super::{AlvrOxrLayer, LOCAL_VIEW_PARAMS, SERVER_CORE_CONTEXT};
-    use alvr_common::warn;
+    use super::{AlvrOxrLayer, HEAD_ID, LOCAL_VIEW_PARAMS, SERVER_CORE_CONTEXT};
+    use alvr_common::{ViewParams, warn};
     use alvr_session::{CodecType, OpenvrConfig};
     use std::{
         ffi::{CStr, c_char, c_void},
@@ -1170,14 +1182,29 @@ mod encoder_bridge {
             }
         }
 
-        let view_params = *LOCAL_VIEW_PARAMS.read();
         if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
-            ctx.send_video_nal(
-                Duration::from_nanos(target_timestamp_ns),
-                view_params,
-                is_idr,
-                nal,
-            );
+            // The client reprojects the decoded frame using these per-eye view
+            // params, so they must be GLOBAL (world-space): head_pose × the
+            // head-relative LOCAL_VIEW_PARAMS — mirroring alvr_server_openvr's
+            // send_video. Passing the local (head-relative) params directly
+            // anchors the frame at the origin, so the client reprojects it far
+            // off the current head pose → off-screen → black.
+            let local = *LOCAL_VIEW_PARAMS.read();
+            let stamp = Duration::from_nanos(target_timestamp_ns);
+            let global_view_params = match ctx.get_device_motion(*HEAD_ID, stamp) {
+                Some(head) => [
+                    ViewParams {
+                        pose: head.pose * local[0].pose,
+                        fov: local[0].fov,
+                    },
+                    ViewParams {
+                        pose: head.pose * local[1].pose,
+                        fov: local[1].fov,
+                    },
+                ],
+                None => local,
+            };
+            ctx.send_video_nal(stamp, global_view_params, is_idr, nal);
         }
     }
 
@@ -1224,10 +1251,22 @@ mod encoder_bridge {
         }
     }
 
-    pub fn submit(layer: &AlvrOxrLayer, sync_handle: u64, target_timestamp_ns: u64) -> bool {
+    pub fn submit(layer: &AlvrOxrLayer, sync_handle: u64, monado_display_time_ns: u64) -> bool {
         let guard = ENCODER.lock();
         let Some(handle) = guard.as_ref() else {
             return false;
+        };
+        // Stamp the frame with the client's latest tracking poll_timestamp (its
+        // own clock) so it can correlate the decoded frame to a pose it sent.
+        // Monado's compositor display time is a different clock with no sync, so
+        // the client matches nothing and discards every frame (black). Fall back
+        // to the Monado time only before any tracking has arrived.
+        let latest_poll =
+            super::LATEST_POLL_TIMESTAMP_NS.load(std::sync::atomic::Ordering::Relaxed);
+        let stamp_ns = if latest_poll != 0 {
+            latest_poll
+        } else {
+            monado_display_time_ns
         };
         let desc = VkSubmitDesc {
             image_handle_left: layer.image_handles[0],
@@ -1243,7 +1282,7 @@ mod encoder_bridge {
             sync_semaphore_handle: sync_handle,
             sync_semaphore_value: 0,
             presentation_time_ns: 0,
-            target_timestamp_ns,
+            target_timestamp_ns: stamp_ns,
         };
         // # Safety: handle valid for the lock's duration; desc outlives the call;
         // on_packet is a valid extern "C" fn.
