@@ -1066,6 +1066,37 @@ pub struct AlvrOxrFoveationVars {
     pub edge_ratio: [f32; 2],
 }
 
+/// Per-eye foveated compress vars derived from the negotiated `openvr_config`,
+/// or `None` when foveated encoding is disabled. Single source of truth for the
+/// foveated resolution + spec constants, shared by the bridge
+/// [`alvr_oxr_get_foveation_vars`] (what `comp_alvr`'s FFR pass targets) and the
+/// encoder's `build_config` (what the NVENC frame is sized to) so the two can't
+/// drift — a mismatch would misalign the per-view copy into the encoded frame.
+fn foveation_compress_vars_from_config(
+    oc: &alvr_session::OpenvrConfig,
+) -> Option<alvr_session::FoveationCompressVars> {
+    if !oc.enable_foveated_encoding {
+        return None;
+    }
+    let config = FoveatedEncodingConfig {
+        force_enable: false,
+        center_size_x: oc.foveation_center_size_x,
+        center_size_y: oc.foveation_center_size_y,
+        center_shift_x: oc.foveation_center_shift_x,
+        center_shift_y: oc.foveation_center_shift_y,
+        edge_ratio_x: oc.foveation_edge_ratio_x,
+        edge_ratio_y: oc.foveation_edge_ratio_y,
+        // The per-frame gaze-driven shift flows through the separate
+        // [`alvr_oxr_get_foveation`] cache; this static derivation uses the
+        // session-config centre only.
+        per_view_eye_tracked: Switch::Disabled,
+    };
+    Some(foveation_compress_vars(
+        UVec2::new(oc.eye_resolution_width, oc.eye_resolution_height),
+        config,
+    ))
+}
+
 /// Read the static foveated-encoding compress parameters derived from the
 /// negotiated `openvr_config`. Called once by the Monado-side `comp_alvr` when
 /// it builds the FFR compute pass (and again on reconnect, since the
@@ -1088,25 +1119,8 @@ pub unsafe extern "C" fn alvr_oxr_get_foveation_vars(
 
     let oc = alvr_server_core::openvr_config();
 
-    let vars = if oc.enable_foveated_encoding {
-        let config = FoveatedEncodingConfig {
-            force_enable: false,
-            center_size_x: oc.foveation_center_size_x,
-            center_size_y: oc.foveation_center_size_y,
-            center_shift_x: oc.foveation_center_shift_x,
-            center_shift_y: oc.foveation_center_shift_y,
-            edge_ratio_x: oc.foveation_edge_ratio_x,
-            edge_ratio_y: oc.foveation_edge_ratio_y,
-            // The per-frame gaze-driven shift flows through the separate
-            // [`alvr_oxr_get_foveation`] cache; this static derivation uses the
-            // session-config centre only.
-            per_view_eye_tracked: Switch::Disabled,
-        };
-        let compress = foveation_compress_vars(
-            UVec2::new(oc.eye_resolution_width, oc.eye_resolution_height),
-            config,
-        );
-        AlvrOxrFoveationVars {
+    let vars = match foveation_compress_vars_from_config(&oc) {
+        Some(compress) => AlvrOxrFoveationVars {
             is_enabled: true,
             optimized_width: compress.optimized_view_resolution.x,
             optimized_height: compress.optimized_view_resolution.y,
@@ -1114,10 +1128,9 @@ pub unsafe extern "C" fn alvr_oxr_get_foveation_vars(
             center_size: compress.center_size,
             center_shift: compress.center_shift,
             edge_ratio: compress.edge_ratio,
-        }
-    } else {
-        // Foveation off: encode at full resolution, identity ratios.
-        AlvrOxrFoveationVars {
+        },
+        None => AlvrOxrFoveationVars {
+            // Foveation off: encode at full resolution, identity ratios.
             is_enabled: false,
             optimized_width: oc.eye_resolution_width,
             optimized_height: oc.eye_resolution_height,
@@ -1125,7 +1138,7 @@ pub unsafe extern "C" fn alvr_oxr_get_foveation_vars(
             center_size: [0.0, 0.0],
             center_shift: [0.0, 0.0],
             edge_ratio: [1.0, 1.0],
-        }
+        },
     };
 
     // # Safety: caller guarantees `out_vars` is writable.
@@ -1269,12 +1282,21 @@ mod encoder_bridge {
         } else {
             30_000_000
         };
+        // Per-eye encoded resolution: the foveated (compressed) size when FFR is
+        // on, else full. MUST match what `comp_alvr`'s FFR pass produces (both
+        // go through `foveation_compress_vars_from_config`) — the encoder copies
+        // each per-view image into a `2 * per_eye_w`-wide NVENC frame, so a
+        // size mismatch would misalign / partially fill the encoded frame.
+        let (per_eye_w, per_eye_h) = match super::foveation_compress_vars_from_config(oc) {
+            Some(v) => (v.optimized_view_resolution.x, v.optimized_view_resolution.y),
+            None => (oc.eye_resolution_width, oc.eye_resolution_height),
+        };
         VkNvencConfig {
             codec: oc.codec as i32,
             refresh_rate: oc.refresh_rate as i32,
             // Both eyes are packed side by side into one encoded frame.
-            render_width: (oc.eye_resolution_width * 2) as i32,
-            render_height: oc.eye_resolution_height as i32,
+            render_width: (per_eye_w * 2) as i32,
+            render_height: per_eye_h as i32,
             bitrate_bps,
             enable_hdr: oc.enable_hdr,
             use_10bit_encoder: oc.use_10bit_encoder,
