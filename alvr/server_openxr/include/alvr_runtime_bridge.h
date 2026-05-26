@@ -57,8 +57,14 @@
  *   `display_time_ns` argument (the frame's predicted display time, so encoded
  *   NALs carry the timestamp the client matches a pose against). Both are
  *   filled by the Monado-side `comp_alvr`.
+ * - v7: added [`alvr_oxr_get_view_resolution`] so the Monado-side HMD +
+ *   compositor advertise/allocate at the *negotiated* per-eye streaming
+ *   resolution (`openvr_config.eye_resolution`) instead of a hardcoded value.
+ *   Makes the OpenXR resolution pipeline coherent end to end (app render →
+ *   scratch → NVENC frame → client decode all agree), so the encoded frame is
+ *   fully filled and the client decodes/presents the stream.
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 6
+#define ALVR_OXR_BRIDGE_ABI_VERSION 7
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -339,6 +345,24 @@ extern "C" {
 uint32_t alvr_oxr_get_bridge_abi_version(void);
 
 /**
+ * Negotiated per-eye streaming resolution (`openvr_config.eye_resolution`), in
+ * pixels. The Monado-side HMD + compositor use this for the advertised view
+ * config, the squasher scratch extent, and the HMD display extents, so the
+ * whole OpenXR pipeline (app render → scratch → NVENC frame → client decode)
+ * runs at the resolution the client negotiated and the encoder produces —
+ * otherwise the encoded frame is partially filled / mis-sized and the client
+ * can't present it.
+ *
+ * Before any client has connected, `openvr_config` holds the value persisted
+ * from the previous session (or the schema default) — still sane for
+ * advertising the static OpenXR view config at startup.
+ *
+ * # Safety
+ * `out_width` and `out_height` must be writable `u32`s.
+ */
+AlvrOxrResult alvr_oxr_get_view_resolution(uint32_t *out_width, uint32_t *out_height);
+
+/**
  * Initialise the OpenXR-mode bridge. Called once by the Monado-side ALVR
  * driver at process start (after Monado has loaded `libalvr_server_openxr`).
  *
@@ -569,6 +593,10 @@ AlvrOxrResult alvr_oxr_report_layer_types(int64_t frame_id,
  * `out_event` must be a writable `AlvrOxrEvent`.
  */
 AlvrOxrResult alvr_oxr_poll_session_event(struct AlvrOxrEvent *out_event);
+
+extern const char *alvr_vk_encoder_last_error(void);
+
+extern const char *alvr_vk_encoder_submit_diag(void);
 
 extern void *alvr_vk_encoder_create(const struct VkNvencConfig *cfg);
 

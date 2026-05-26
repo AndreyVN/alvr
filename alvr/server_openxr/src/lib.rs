@@ -368,7 +368,13 @@ fn event_loop(
 ///   `display_time_ns` argument (the frame's predicted display time, so encoded
 ///   NALs carry the timestamp the client matches a pose against). Both are
 ///   filled by the Monado-side `comp_alvr`.
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 6;
+/// - v7: added [`alvr_oxr_get_view_resolution`] so the Monado-side HMD +
+///   compositor advertise/allocate at the *negotiated* per-eye streaming
+///   resolution (`openvr_config.eye_resolution`) instead of a hardcoded value.
+///   Makes the OpenXR resolution pipeline coherent end to end (app render →
+///   scratch → NVENC frame → client decode all agree), so the encoded frame is
+///   fully filled and the client decodes/presents the stream.
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 7;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -378,6 +384,37 @@ pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 6;
 #[unsafe(no_mangle)]
 pub extern "C" fn alvr_oxr_get_bridge_abi_version() -> u32 {
     ALVR_OXR_BRIDGE_ABI_VERSION
+}
+
+/// Negotiated per-eye streaming resolution (`openvr_config.eye_resolution`), in
+/// pixels. The Monado-side HMD + compositor use this for the advertised view
+/// config, the squasher scratch extent, and the HMD display extents, so the
+/// whole OpenXR pipeline (app render → scratch → NVENC frame → client decode)
+/// runs at the resolution the client negotiated and the encoder produces —
+/// otherwise the encoded frame is partially filled / mis-sized and the client
+/// can't present it.
+///
+/// Before any client has connected, `openvr_config` holds the value persisted
+/// from the previous session (or the schema default) — still sane for
+/// advertising the static OpenXR view config at startup.
+///
+/// # Safety
+/// `out_width` and `out_height` must be writable `u32`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_get_view_resolution(
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> AlvrOxrResult {
+    if out_width.is_null() || out_height.is_null() {
+        return AlvrOxrResult::Failed;
+    }
+    let oc = alvr_server_core::openvr_config();
+    // # Safety: caller guarantees both pointers are writable.
+    unsafe {
+        *out_width = oc.eye_resolution_width;
+        *out_height = oc.eye_resolution_height;
+    }
+    AlvrOxrResult::Ok
 }
 
 /// Result codes returned across the FFI boundary. Mirrors `xrt_result_t`
