@@ -1,7 +1,7 @@
 use alvr_common::{
     ALVR_VERSION, DebugGroupsConfig, DebugGroupsConfigDefault, LogSeverity, LogSeverityDefault,
     LogSeverityDefaultVariant,
-    glam::{self, UVec2},
+    glam::{self, UVec2, Vec2},
 };
 use alvr_system_info::{ClientFlavor, ClientFlavorDefault, ClientFlavorDefaultVariant};
 use bytemuck::{Pod, Zeroable};
@@ -524,19 +524,26 @@ pub struct PerViewFoveationConfig {
     pub confidence_floor: f32,
 }
 
-/// Canonical foveated-encoding math. Given a full per-eye resolution and a
-/// [`FoveatedEncodingConfig`], returns the 32-aligned *encoded* (compressed)
-/// per-eye resolution plus the shader constants that drive both the server's
-/// FFR compress pass and the client's de-foveation pass.
-///
-/// Lives in `alvr_session` (rather than `alvr_graphics`) so both the wgpu
-/// client renderer and the wgpu-free OpenXR-mode encoder bridge can call the
-/// exact same function — the server's compressed image only de-foveates
-/// correctly on the client if both sides agree on every constant here.
-pub fn foveated_encoding_shader_constants(
+/// Shared "aligned" foveation intermediates. The compress (server) and
+/// de-foveation (client) constant builders below both derive from these exact
+/// values; if they diverged, the foveated round-trip would warp. Mirrors the
+/// first half of the OpenVR `FFR.cpp::CalculateFoveationVars`.
+struct FoveationAligned {
+    /// 32-aligned foveated (compressed) per-eye resolution. Both the encoder's
+    /// FFR output image and the client's decode swapchain are sized to this.
+    optimized_aligned: UVec2,
+    /// `optimized_unaligned / optimized_aligned` — the `eyeSizeRatio` /
+    /// `VIEW_*_RATIO` the shaders use to map between the two resolutions.
+    view_ratio_aligned: Vec2,
+    center_size_aligned: Vec2,
+    center_shift_aligned: Vec2,
+    edge_ratio: Vec2,
+}
+
+fn foveation_aligned(
     expanded_view_resolution: UVec2,
     config: FoveatedEncodingConfig,
-) -> (UVec2, Vec<(&'static str, f64)>) {
+) -> FoveationAligned {
     let view_resolution = expanded_view_resolution.as_vec2();
 
     let center_size = glam::vec2(config.center_size_x, config.center_size_y);
@@ -560,6 +567,67 @@ pub fn foveated_encoding_shader_constants(
         optimized_view_resolution.map(|v| (v / 32.).ceil() * 32.);
 
     let view_ratio_aligned = optimized_view_resolution / optimized_view_resolution_aligned;
+
+    FoveationAligned {
+        optimized_aligned: optimized_view_resolution_aligned.as_uvec2(),
+        view_ratio_aligned,
+        center_size_aligned,
+        center_shift_aligned,
+        edge_ratio,
+    }
+}
+
+/// Compress-side foveation spec constants — the inverse of the de-foveation
+/// driven by [`foveated_encoding_shader_constants`]. These are the eight
+/// specialization constants the encoder's `ffr.comp` compute shader consumes
+/// (`eyeSizeRatio`, `centerSize`, `centerShift`, `edgeRatio`), matching the
+/// OpenVR `FFR.cpp::CalculateFoveationVars`. `optimized_view_resolution` is the
+/// 32-aligned foveated per-eye resolution the encoder must size to; it is the
+/// same value [`foveated_encoding_shader_constants`] returns for the same
+/// inputs (both go through [`foveation_aligned`]), so encode and decode agree.
+pub struct FoveationCompressVars {
+    pub optimized_view_resolution: UVec2,
+    pub eye_size_ratio: [f32; 2],
+    pub center_size: [f32; 2],
+    pub center_shift: [f32; 2],
+    pub edge_ratio: [f32; 2],
+}
+
+pub fn foveation_compress_vars(
+    expanded_view_resolution: UVec2,
+    config: FoveatedEncodingConfig,
+) -> FoveationCompressVars {
+    let aligned = foveation_aligned(expanded_view_resolution, config);
+    FoveationCompressVars {
+        optimized_view_resolution: aligned.optimized_aligned,
+        eye_size_ratio: aligned.view_ratio_aligned.to_array(),
+        center_size: aligned.center_size_aligned.to_array(),
+        center_shift: aligned.center_shift_aligned.to_array(),
+        edge_ratio: aligned.edge_ratio.to_array(),
+    }
+}
+
+/// Canonical foveated-encoding math. Given a full per-eye resolution and a
+/// [`FoveatedEncodingConfig`], returns the 32-aligned *encoded* (compressed)
+/// per-eye resolution plus the shader constants that drive the client's
+/// de-foveation pass.
+///
+/// Lives in `alvr_session` (rather than `alvr_graphics`) so both the wgpu
+/// client renderer and the wgpu-free OpenXR-mode encoder bridge can reach the
+/// shared [`foveation_aligned`] math — the server's compressed image only
+/// de-foveates correctly on the client if both sides agree on the resolution
+/// and ratios computed there.
+pub fn foveated_encoding_shader_constants(
+    expanded_view_resolution: UVec2,
+    config: FoveatedEncodingConfig,
+) -> (UVec2, Vec<(&'static str, f64)>) {
+    let FoveationAligned {
+        optimized_aligned,
+        view_ratio_aligned,
+        center_size_aligned,
+        center_shift_aligned,
+        edge_ratio,
+    } = foveation_aligned(expanded_view_resolution, config);
 
     let c0 = (1. - center_size_aligned) * 0.5;
     let c1 = (edge_ratio - 1.) * c0 * (center_shift_aligned + 1.) / edge_ratio;
@@ -610,7 +678,7 @@ pub fn foveated_encoding_shader_constants(
     .map(|(k, v)| (*k, *v as f64))
     .collect();
 
-    (optimized_view_resolution_aligned.as_uvec2(), constants)
+    (optimized_aligned, constants)
 }
 
 #[repr(C)]
@@ -2562,5 +2630,66 @@ pub fn session_settings_default() -> SettingsDefault {
             },
             extended_headset_telemetry: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod foveation_tests {
+    use super::*;
+
+    fn sample_config() -> FoveatedEncodingConfig {
+        FoveatedEncodingConfig {
+            force_enable: false,
+            center_size_x: 0.45,
+            center_size_y: 0.4,
+            center_shift_x: 0.4,
+            center_shift_y: 0.1,
+            edge_ratio_x: 4.0,
+            edge_ratio_y: 5.0,
+            per_view_eye_tracked: Switch::Disabled,
+        }
+    }
+
+    // The whole point of routing both builders through `foveation_aligned`:
+    // the foveated resolution the encoder sizes to (compress side) must equal
+    // the resolution the client decodes/de-foveates from (decompress side).
+    // If these ever diverge the headset image warps, so pin it.
+    #[test]
+    fn compress_and_decompress_resolutions_agree() {
+        let full = UVec2::new(2144, 2144);
+        let decode_res = foveated_encoding_shader_constants(full, sample_config()).0;
+        let encode_res = foveation_compress_vars(full, sample_config()).optimized_view_resolution;
+        assert_eq!(encode_res, decode_res);
+    }
+
+    #[test]
+    fn compress_resolution_is_32_aligned_and_smaller() {
+        let full = UVec2::new(2144, 2144);
+        let vars = foveation_compress_vars(full, sample_config());
+        assert_eq!(vars.optimized_view_resolution.x % 32, 0);
+        assert_eq!(vars.optimized_view_resolution.y % 32, 0);
+        assert!(vars.optimized_view_resolution.x <= full.x);
+        assert!(vars.optimized_view_resolution.y <= full.y);
+    }
+
+    // `eyeSizeRatio` (compress) and `VIEW_*_RATIO` (decompress) are the same
+    // aligned ratio; `edgeRatio` passes through raw on both sides. Confirm the
+    // two builders expose consistent values.
+    #[test]
+    fn compress_ratios_match_decompress_constants() {
+        let full = UVec2::new(2144, 2144);
+        let vars = foveation_compress_vars(full, sample_config());
+        let constants = foveated_encoding_shader_constants(full, sample_config()).1;
+        let get = |name: &str| {
+            constants
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("missing constant {name}"))
+        };
+        assert!((f64::from(vars.eye_size_ratio[0]) - get("VIEW_WIDTH_RATIO")).abs() < 1e-9);
+        assert!((f64::from(vars.eye_size_ratio[1]) - get("VIEW_HEIGHT_RATIO")).abs() < 1e-9);
+        assert!((f64::from(vars.edge_ratio[0]) - get("EDGE_X_RATIO")).abs() < 1e-9);
+        assert!((f64::from(vars.edge_ratio[1]) - get("EDGE_Y_RATIO")).abs() < 1e-9);
     }
 }
