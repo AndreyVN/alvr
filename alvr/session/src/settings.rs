@@ -1,6 +1,7 @@
 use alvr_common::{
     ALVR_VERSION, DebugGroupsConfig, DebugGroupsConfigDefault, LogSeverity, LogSeverityDefault,
     LogSeverityDefaultVariant,
+    glam::{self, UVec2},
 };
 use alvr_system_info::{ClientFlavor, ClientFlavorDefault, ClientFlavorDefaultVariant};
 use bytemuck::{Pod, Zeroable};
@@ -521,6 +522,95 @@ pub struct PerViewFoveationConfig {
     ))]
     #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.05)))]
     pub confidence_floor: f32,
+}
+
+/// Canonical foveated-encoding math. Given a full per-eye resolution and a
+/// [`FoveatedEncodingConfig`], returns the 32-aligned *encoded* (compressed)
+/// per-eye resolution plus the shader constants that drive both the server's
+/// FFR compress pass and the client's de-foveation pass.
+///
+/// Lives in `alvr_session` (rather than `alvr_graphics`) so both the wgpu
+/// client renderer and the wgpu-free OpenXR-mode encoder bridge can call the
+/// exact same function — the server's compressed image only de-foveates
+/// correctly on the client if both sides agree on every constant here.
+pub fn foveated_encoding_shader_constants(
+    expanded_view_resolution: UVec2,
+    config: FoveatedEncodingConfig,
+) -> (UVec2, Vec<(&'static str, f64)>) {
+    let view_resolution = expanded_view_resolution.as_vec2();
+
+    let center_size = glam::vec2(config.center_size_x, config.center_size_y);
+    let center_shift = glam::vec2(config.center_shift_x, config.center_shift_y);
+    let edge_ratio = glam::vec2(config.edge_ratio_x, config.edge_ratio_y);
+
+    let edge_size = view_resolution - center_size * view_resolution;
+    let center_size_aligned =
+        1. - (edge_size / (edge_ratio * 2.)).ceil() * (edge_ratio * 2.) / view_resolution;
+
+    let edge_size_aligned = view_resolution - center_size_aligned * view_resolution;
+    let center_shift_aligned = (center_shift * edge_size_aligned / (edge_ratio * 2.)).ceil()
+        * (edge_ratio * 2.)
+        / edge_size_aligned;
+
+    let foveation_scale = center_size_aligned + (1. - center_size_aligned) / edge_ratio;
+
+    let optimized_view_resolution = foveation_scale * view_resolution;
+
+    let optimized_view_resolution_aligned =
+        optimized_view_resolution.map(|v| (v / 32.).ceil() * 32.);
+
+    let view_ratio_aligned = optimized_view_resolution / optimized_view_resolution_aligned;
+
+    let c0 = (1. - center_size_aligned) * 0.5;
+    let c1 = (edge_ratio - 1.) * c0 * (center_shift_aligned + 1.) / edge_ratio;
+    let c2 = (edge_ratio - 1.) * center_size_aligned + 1.;
+
+    let lo_bound = c0 * (center_shift_aligned + 1.);
+    let hi_bound = c0 * (center_shift_aligned - 1.) + 1.;
+    let lo_bound_c = c0 * (center_shift_aligned + 1.) / c2;
+    let hi_bound_c = c0 * (center_shift_aligned - 1.) / c2 + 1.;
+
+    let a_left = c2 * (1. - edge_ratio) / (edge_ratio * lo_bound_c);
+    let b_left = (c1 + c2 * lo_bound_c) / lo_bound_c;
+
+    let a_right = c2 * (edge_ratio - 1.) / (edge_ratio * (1. - hi_bound_c));
+    let b_right = (c2 - edge_ratio * c1 - 2. * edge_ratio * c2
+        + c2 * edge_ratio * (1. - hi_bound_c)
+        + edge_ratio)
+        / (edge_ratio * (1. - hi_bound_c));
+    let c_right = (c2 * edge_ratio - c2) * (c1 - hi_bound_c + c2 * hi_bound_c)
+        / (edge_ratio * (1. - hi_bound_c) * (1. - hi_bound_c));
+
+    let constants = [
+        ("ENABLE_FFE", 1.),
+        ("VIEW_WIDTH_RATIO", view_ratio_aligned.x),
+        ("VIEW_HEIGHT_RATIO", view_ratio_aligned.y),
+        ("EDGE_X_RATIO", edge_ratio.x),
+        ("EDGE_Y_RATIO", edge_ratio.y),
+        ("C1_X", c1.x),
+        ("C1_Y", c1.y),
+        ("C2_X", c2.x),
+        ("C2_Y", c2.y),
+        ("LO_BOUND_X", lo_bound.x),
+        ("LO_BOUND_Y", lo_bound.y),
+        ("HI_BOUND_X", hi_bound.x),
+        ("HI_BOUND_Y", hi_bound.y),
+        ("A_LEFT_X", a_left.x),
+        ("A_LEFT_Y", a_left.y),
+        ("B_LEFT_X", b_left.x),
+        ("B_LEFT_Y", b_left.y),
+        ("A_RIGHT_X", a_right.x),
+        ("A_RIGHT_Y", a_right.y),
+        ("B_RIGHT_X", b_right.x),
+        ("B_RIGHT_Y", b_right.y),
+        ("C_RIGHT_X", c_right.x),
+        ("C_RIGHT_Y", c_right.y),
+    ]
+    .iter()
+    .map(|(k, v)| (*k, *v as f64))
+    .collect();
+
+    (optimized_view_resolution_aligned.as_uvec2(), constants)
 }
 
 #[repr(C)]
