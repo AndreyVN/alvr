@@ -1274,6 +1274,90 @@ mod encoder_bridge {
         }
     }
 
+    // The codec the active encoder was created with, so `on_packet` (a C callback
+    // with no context arg) can interpret NAL-unit types. Set in `start()`.
+    static CODEC: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    // NVENC repeats SPS/PPS (H.264) or VPS/SPS/PPS (HEVC) in front of every IDR
+    // frame (`repeatSPSPPS=1` in FillNvencConfig). The client already holds those
+    // as csd-0 (published once in `start()` from GetSequenceParams); a frame
+    // buffer that *also* carries them inline is queued to MediaCodec with no
+    // CODEC_CONFIG flag, and the Qualcomm Codec2 decoder rejects such mixed
+    // config+slice buffers ("Unsupported input buffer") — the IDR never decodes,
+    // every later P-frame loses its reference, and the headset stays black.
+    // alvr_server_openvr never hits this because every packet goes through
+    // `ParseFrameNals` (NalParsing.cpp), which strips the leading config NALs.
+    // Mirror that here: return the byte offset of the first slice NAL, past a
+    // leading AUD and the config NALs. Returns 0 for P-frames (which start at a
+    // slice) and for AV1 (OpenVR sends those frames whole).
+    fn config_nal_strip_len(codec: CodecType, buf: &[u8]) -> usize {
+        fn prefix_size(b: &[u8]) -> Option<usize> {
+            if b.starts_with(&[0, 0, 0, 1]) {
+                Some(4)
+            } else if b.starts_with(&[0, 0, 1]) {
+                Some(3)
+            } else {
+                None
+            }
+        }
+
+        // (AUD nal type, first-config nal type, count of config NALs)
+        let (aud_type, config_start_type, config_nal_count) = match codec {
+            CodecType::H264 => (9u8, 7u8, 2usize), // AUD, SPS; config = SPS + PPS
+            CodecType::Hevc => (35u8, 32u8, 3usize), // AUD, VPS; config = VPS + SPS + PPS
+            CodecType::AV1 => return 0,
+        };
+        let read_type = |b: &[u8], p: usize| -> u8 {
+            match codec {
+                CodecType::H264 => b[p] & 0x1F,
+                _ => (b[p] >> 1) & 0x3F, // HEVC nal_unit_type = bits 1..=6 of byte 0
+            }
+        };
+
+        let Some(mut prefix) = prefix_size(buf) else {
+            return 0;
+        };
+        if buf.len() <= prefix {
+            return 0;
+        }
+        let mut start = 0usize;
+        let mut nal_type = read_type(buf, prefix);
+
+        // Skip a leading access-unit delimiter (prefix + 1 header + 1 payload byte).
+        if nal_type == aud_type && buf.len() > prefix * 2 + 2 {
+            start += prefix + 2;
+            let Some(p) = prefix_size(&buf[start..]) else {
+                return start;
+            };
+            prefix = p;
+            if buf.len() <= start + prefix {
+                return start;
+            }
+            nal_type = read_type(&buf[start..], prefix);
+        }
+
+        // Only IDR frames lead with config NALs; P-frames start at a slice.
+        if nal_type != config_start_type {
+            return start;
+        }
+
+        // Walk to the (config_nal_count + 1)-th start code = the first slice NAL.
+        let mut found: i32 = -1;
+        let mut i = start;
+        while i + 3 <= buf.len() {
+            if let Some(p) = prefix_size(&buf[i..]) {
+                found += 1;
+                if found as usize == config_nal_count {
+                    return i;
+                }
+                i += p;
+            } else {
+                i += 1;
+            }
+        }
+        start
+    }
+
     fn build_config(oc: &OpenvrConfig) -> VkNvencConfig {
         // Default base bitrate matches the OpenVR NVENC path's 30 Mbit seed; the
         // negotiated rc_average_bitrate overrides it when set.
@@ -1337,10 +1421,20 @@ mod encoder_bridge {
             return;
         }
         // # Safety: NVENC guarantees `len` valid bytes for the call's duration.
-        let nal = unsafe { slice::from_raw_parts(data, len as usize) }.to_vec();
+        let raw = unsafe { slice::from_raw_parts(data, len as usize) };
 
-        // Diagnostic: log the first several encoded NALs (byte length + the first
-        // bytes, which carry the HEVC start code + NAL-unit type) to confirm
+        // Drop the SPS/PPS(/VPS) that NVENC repeats in front of each IDR: the
+        // client configured its decoder from csd-0 and rejects buffers that
+        // re-carry the config inline (see `config_nal_strip_len`).
+        let codec = codec_type(CODEC.load(std::sync::atomic::Ordering::Relaxed));
+        let off = config_nal_strip_len(codec, raw);
+        if off >= raw.len() {
+            return;
+        }
+        let nal = raw[off..].to_vec();
+
+        // Diagnostic: log the first several encoded NALs (config bytes stripped +
+        // the first bytes, which carry the start code + NAL-unit type) to confirm
         // NVENC is producing a real bitstream and the headers look sane.
         {
             use std::sync::atomic::{AtomicU32, Ordering};
@@ -1348,7 +1442,7 @@ mod encoder_bridge {
             if NAL_LOG.fetch_add(1, Ordering::Relaxed) < 10 {
                 let head = &nal[..nal.len().min(8)];
                 warn!(
-                    "OpenXR NAL: len={} is_idr={} head={head:02x?}",
+                    "OpenXR NAL: stripped {off}B config, len={} is_idr={} head={head:02x?}",
                     nal.len(),
                     is_idr
                 );
@@ -1383,6 +1477,9 @@ mod encoder_bridge {
 
     pub fn start() {
         let oc = alvr_server_core::openvr_config();
+        // `on_packet` needs the codec to parse NAL types; stash it before any
+        // packet can arrive.
+        CODEC.store(oc.codec, std::sync::atomic::Ordering::Relaxed);
         let cfg = build_config(&oc);
         // # Safety: `cfg` outlives the call; Create copies what it needs.
         let handle = unsafe { alvr_vk_encoder_create(&cfg) };
@@ -1409,9 +1506,23 @@ mod encoder_bridge {
             // # Safety: buf has `len` bytes of capacity.
             let written = unsafe { alvr_vk_encoder_get_seq_params(handle, buf.as_mut_ptr(), len) };
             buf.truncate(written.max(0) as usize);
+            // Diagnostic (black-screen bring-up): the client configures its
+            // decoder from this csd-0; if it lacks a valid SPS the Qualcomm
+            // decoder rejects every frame as "Unsupported input buffer". Log
+            // the length + head so we can confirm it carries SPS/PPS for the
+            // foveated resolution. Remove once OpenXR video is on-headset.
+            let head = &buf[..buf.len().min(24)];
+            warn!(
+                "OpenXR seq-params (csd-0): len={} head={head:02x?}",
+                buf.len()
+            );
             if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
                 ctx.set_video_config_nals(buf, codec_type(oc.codec));
             }
+        } else {
+            // No config NALs => client gets no csd-0 => decoder stuck at the
+            // placeholder resolution => "Unsupported input buffer" on frames.
+            warn!("OpenXR seq-params (csd-0): EMPTY (len={len}) — no DecoderConfig sent to client");
         }
 
         *ENCODER.lock() = Some(Handle(handle));
@@ -1472,6 +1583,91 @@ mod encoder_bridge {
             warn!("OpenXR encoder content diag: {diag}");
         }
         ok
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::config_nal_strip_len;
+        use alvr_session::CodecType;
+
+        // start code (4-byte) + the given bytes, the first being the NAL header.
+        fn nal(bytes: &[u8]) -> Vec<u8> {
+            let mut v = vec![0, 0, 0, 1];
+            v.extend_from_slice(bytes);
+            v
+        }
+
+        #[test]
+        fn h264_idr_strips_sps_pps() {
+            // [SPS][PPS][IDR slice]; NAL types in low 5 bits: 7, 8, 5.
+            let mut buf = nal(&[0x67, 0xAA, 0xBB]);
+            let pps_at = buf.len();
+            buf.extend(nal(&[0x68, 0xCC]));
+            let slice_at = buf.len();
+            buf.extend(nal(&[0x65, 0x11, 0x22]));
+            assert_eq!(config_nal_strip_len(CodecType::H264, &buf), slice_at);
+            // sanity: the offset lands exactly on the slice start code
+            assert_eq!(&buf[slice_at..slice_at + 5], &[0, 0, 0, 1, 0x65]);
+            let _ = pps_at;
+        }
+
+        #[test]
+        fn h264_pframe_keeps_everything() {
+            // A non-IDR slice (type 1) is not preceded by config NALs.
+            let buf = nal(&[0x61, 0x11, 0x22]);
+            assert_eq!(config_nal_strip_len(CodecType::H264, &buf), 0);
+        }
+
+        #[test]
+        fn h264_three_byte_start_codes() {
+            let mut buf = vec![0, 0, 1, 0x67, 0xAA];
+            buf.extend_from_slice(&[0, 0, 1, 0x68]);
+            let slice_at = buf.len();
+            buf.extend_from_slice(&[0, 0, 1, 0x65, 0x11]);
+            assert_eq!(config_nal_strip_len(CodecType::H264, &buf), slice_at);
+        }
+
+        #[test]
+        fn hevc_idr_strips_vps_sps_pps() {
+            // HEVC nal_unit_type in bits 1..=6: VPS=32 (0x40), SPS=33 (0x42),
+            // PPS=34 (0x44), IDR_W_RADL=19 (0x26).
+            let mut buf = nal(&[0x40, 0x01]);
+            buf.extend(nal(&[0x42, 0x01]));
+            buf.extend(nal(&[0x44, 0x01]));
+            let slice_at = buf.len();
+            buf.extend(nal(&[0x26, 0xAA]));
+            assert_eq!(config_nal_strip_len(CodecType::Hevc, &buf), slice_at);
+        }
+
+        #[test]
+        fn hevc_pframe_keeps_everything() {
+            // TRAIL_R = 1 (0x02).
+            let buf = nal(&[0x02, 0xAA]);
+            assert_eq!(config_nal_strip_len(CodecType::Hevc, &buf), 0);
+        }
+
+        #[test]
+        fn av1_never_strips() {
+            let buf = nal(&[0x12, 0x00]);
+            assert_eq!(config_nal_strip_len(CodecType::AV1, &buf), 0);
+        }
+
+        #[test]
+        fn h264_leading_aud_then_idr() {
+            // AUD (type 9) + SPS + PPS + slice: the AUD is skipped, then config.
+            let mut buf = nal(&[0x09, 0x10]); // access-unit delimiter
+            buf.extend(nal(&[0x67, 0xAA]));
+            buf.extend(nal(&[0x68, 0xCC]));
+            let slice_at = buf.len();
+            buf.extend(nal(&[0x65, 0x11]));
+            assert_eq!(config_nal_strip_len(CodecType::H264, &buf), slice_at);
+        }
+
+        #[test]
+        fn garbage_without_start_code_strips_nothing() {
+            let buf = vec![0xDE, 0xAD, 0xBE, 0xEF];
+            assert_eq!(config_nal_strip_len(CodecType::H264, &buf), 0);
+        }
     }
 }
 
