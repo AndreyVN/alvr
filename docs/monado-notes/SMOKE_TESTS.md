@@ -129,6 +129,40 @@ Acceptance:
 
 After: `cargo xtask unregister-openxr-runtime --release` and `cargo xtask register-openxr-runtime` again only when you mean to.
 
+## Gate H — per-view (eye-tracked) foveation end-to-end (Slice 6 exit)
+
+The exit gate for per-view foveation. The wire (both channels), the server-side producer cache, and the client de-foveation pipeline all landed (PRs #2/#3/#5, 2026-05-27/28). **Slice 6 is the one missing piece**: the OpenXR-mode encoder still applies *static, uniform* FFR (`alvr_oxr_get_foveation_vars`) — it must instead read the per-eye `alvr_oxr_get_foveation` cache so each eye's high-res inset follows its own gaze. This gate proves the full loop: per-eye params → encoder warps each eye differently → client inverts each eye correctly.
+
+### Preconditions
+
+1. **Slice 6 landed** — `alvr_oxr_submit_layers` (or the `VkEncoderBackend` FFR application it drives) consumes `alvr_oxr_get_foveation` per eye, not just the uniform `alvr_oxr_get_foveation_vars`. Until then this gate cannot run.
+2. **Synthetic injection hook** — Quest 3 (the standing test headset) has **no eye tracking**, so `FaceData.eyes_*` never arrives and `PerViewFoveationEmitter` never emits. The headset on `.101` cannot drive real per-view gaze. Slice 6 must therefore ship a test hook that injects synthetic per-eye centres. **Inject at the producer, not the bridge cache**: an env-gated branch in `PerViewFoveationEmitter`/`tracking_loop` (e.g. `ALVR_TEST_PER_VIEW_FOVEATION=lx,ly,rx,ry`) that emits a constant `ServerCoreEvent::PerViewFoveation([left, right])` regardless of `eyes_*`. This is the only injection point that feeds **both** consumers — the encoder cache (`alvr_oxr_set_foveation`) *and* the wire to the client (`VideoPacketHeader.per_view_foveation`). Injecting via `alvr_oxr_set_foveation` directly would warp the encoder but leave the client on its static path → guaranteed mismatch. (A Quest Pro / eye-tracked headset would exercise the real path instead and make this hook unnecessary.)
+3. **Session config** — `settings.video.foveated_encoding` enabled AND `foveated_encoding.per_view_eye_tracked` enabled. **Edit `session.json` no-BOM** (`WriteAllText` + `UTF8Encoding($false)`; PowerShell `Set-Content -Encoding utf8` writes a BOM/UTF-16 → ALVR loads defaults). Use clearly-asymmetric synthetic centres, e.g. left `center_shift = (-0.25, 0.0)`, right `center_shift = (+0.25, 0.0)` — the two eye insets should visibly diverge horizontally.
+
+### Setup (RTX 3090, `192.168.10.101`)
+
+Reuse the `oxr_overlay_smoke` deploy recipe (PS-remoting, `Copy-Item -ToSession` the freshly-built `monado-service.exe` + `openxr_monado.dll` + `alvr_server_openxr.dll`, HKLM `ActiveRuntime` flip to the Monado manifest with a `try/finally` restore, `run.bat` for the service, `adb shell monkey -p alvr.client.dev` for the client, `*:I` logcat). Run **non-elevated** (admin pipe ACL blocks the IPC) and set `ALVR_ROOT` to `%LOCALAPPDATA%`. Note: the OpenXR encoder resolution is `openvr_config.eye_resolution`, **not** the transcoding-view-resolution setting. Long smoke window (`OXR_SMOKE_SECS ≥ 1800`) so a conversation round-trip doesn't outlast it.
+
+### Expected — pass
+
+- **Server (`session_log.txt`, UTF-16 — use `Select-String`)**: the encoder content-diag reports two *different* foveation centres per frame (left vs right), matching the injected `ALVR_TEST_PER_VIEW_FOVEATION`. The throttled `report_hand_skeleton`-style `info!` for foveation (if added) confirms the per-view cache is being read on the hot path. Encoded frame is non-black and the per-eye insets sit at the injected positions.
+- **Client (Quest, logcat / a client built with logging)**: `per_view_center_shift()` returns `Some` with the injected per-eye values (not `None`); the `FFE_RUNTIME` pipeline is the one bound (not the static path). `hevcD`/`avcD` decodes cleanly (0 "Unsupported input buffer"), ~70 fps.
+- **On the headset (the real acceptance)**: the image is correctly reprojected for **both** eyes — the high-res region is offset left in the left eye and right in the right eye, with **no warp seams, doubling, or smearing** at the inset boundary in either eye. Compare against the uniform-FFR baseline (per_view disabled): the uniform case keeps both insets centred; the per-view case visibly diverges, and both still resolve to a sharp, artifact-free image.
+
+### Expected — negative cases (what failure looks like)
+
+- **Client stays on the static path** (per-eye inset identical in both eyes despite divergent injection) → the wire value isn't reaching `render`, or `per_view_center_shift()` returns `None`. Check `per_view_foveation_queue` is being filled and the timestamp match in `report_compositor_start`.
+- **Warp seam / smearing in one eye** → the client's runtime de-foveation constants don't match the encoder's warp for that eye (invertibility broken). Most likely cause: `center_size`/`edge_ratio` drift between the encoder's `foveation_compress_vars` and the client's baked spec-constants, or the WGSL `FFE_RUNTIME` derivation diverging from `foveated_encoding_shader_constants`. Only `center_shift` is meant to vary per frame; if `center_size`/`edge_ratio` differ per eye the staging resolution assumption breaks.
+- **Black headset** → re-check the resolution pipeline (encoder = `openvr_config.eye_resolution`) and that IDRs ship (the historical `RequestIDR`-dropped bug — see [[openxr-ffr-encoder-plan]]).
+
+### Cleanup
+
+Restore HKLM `ActiveRuntime` (the `finally` block), disable `per_view_eye_tracked` in `session.json` (no-BOM), unset `ALVR_TEST_PER_VIEW_FOVEATION`.
+
+### Verification ceiling
+
+Cannot be exercised from the dev host (no GPU; no eye-tracked headset). Needs `.101` + the synthetic-injection hook + Slice 6. The client de-foveation pipeline's only host-side guardrail today is the `naga` parse+validate test on `stream.wgsl`; true invertibility (encoder warp ⇄ client inverse) is confirmed only by the artifact-free-both-eyes criterion above.
+
 ## Verification log
 
 - **Gate A (Monado-side compile)** — Verified on Windows 11 Pro 26200 (MSVC 14.44.35207, CMake 4.3.2, Vulkan SDK 1.4.341.0, vcpkg auto-clone) on 2026-05-21. Tip commits at verification: alvr `a70396e8`, openxr submodule `897ff32d4`. `cargo xtask build-openxr-runtime --enable-alvr-driver` ran to completion: vcpkg installed the full Monado dep set from `vcpkg.json` (pthreads, wil, cjson, eigen3, glslang, vulkan-loader, libusb, hidapi, sdl2), Monado configured + built all targets including `comp_alvr.lib` and `drv_alvr.lib`, `monado-service.exe` linked against the `alvr_server_openxr.dll` bridge cdylib via the IMPORTED-target wiring, and `active_runtime_alvr.json` published under `build/openxr-debug/`.
