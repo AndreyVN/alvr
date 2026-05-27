@@ -16,6 +16,7 @@ use crate::PerViewFoveationView;
 use alvr_common::{
     ViewParams,
     glam::{Quat, Vec3},
+    info,
 };
 use alvr_packets::FaceData;
 use alvr_session::{FoveatedEncodingConfig, PerViewFoveationConfig};
@@ -105,6 +106,27 @@ fn apply_dead_band(value: f32, threshold: f32) -> f32 {
     if value.abs() < threshold { 0.0 } else { value }
 }
 
+/// Parse `ALVR_TEST_PER_VIEW_FOVEATION=lx,ly,rx,ry` into per-eye centre shifts
+/// `[[lx, ly], [rx, ry]]`. `None` when unset or malformed (wrong arity / unparsable).
+/// Test hook for Gate H — see [`PerViewFoveationEmitter::test_override`].
+fn parse_test_per_view_foveation() -> Option<[[f32; 2]; 2]> {
+    parse_per_view_foveation_spec(&std::env::var("ALVR_TEST_PER_VIEW_FOVEATION").ok()?)
+}
+
+/// Pure parse of a `lx,ly,rx,ry` spec into `[[lx, ly], [rx, ry]]`. Requires
+/// exactly four comma-separated finite floats; `None` otherwise.
+fn parse_per_view_foveation_spec(raw: &str) -> Option<[[f32; 2]; 2]> {
+    let nums: Vec<f32> = raw
+        .split(',')
+        .map(|s| s.trim().parse::<f32>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match nums.as_slice() {
+        [lx, ly, rx, ry] => Some([[*lx, *ly], [*rx, *ry]]),
+        _ => None,
+    }
+}
+
 /// Rate-limited producer of [`crate::ServerCoreEvent::PerViewFoveation`].
 /// Lives inside the tracking loop and consumes raw `FaceData.eyes_*` samples,
 /// applies [`gaze_to_center_shift`], and decides whether enough time has
@@ -115,8 +137,16 @@ fn apply_dead_band(value: f32, threshold: f32) -> f32 {
 /// `gaze_to_center_shift` dead band suppresses micro-jitter, and any further
 /// filtering (one-Euro, EMA, etc.) is a follow-up if real eye-tracking data
 /// turns out to be too jittery in practice.
+
 pub struct PerViewFoveationEmitter {
     last_emit: Option<Instant>,
+    /// Test hook (Gate H): when `ALVR_TEST_PER_VIEW_FOVEATION=lx,ly,rx,ry` is
+    /// set, the emitter injects this constant per-eye centre shift
+    /// (`[[lx, ly], [rx, ry]]`) instead of deriving one from `eyes_*`. Lets a
+    /// headset without eye tracking (e.g. Quest 3) drive the per-view path so
+    /// the encoder→client round-trip can be smoke-tested. Parsed once at
+    /// construction.
+    test_override: Option<[[f32; 2]; 2]>,
 }
 
 impl Default for PerViewFoveationEmitter {
@@ -127,7 +157,18 @@ impl Default for PerViewFoveationEmitter {
 
 impl PerViewFoveationEmitter {
     pub fn new() -> Self {
-        Self { last_emit: None }
+        let test_override = parse_test_per_view_foveation();
+        if let Some(shifts) = test_override {
+            info!(
+                "ALVR_TEST_PER_VIEW_FOVEATION active: injecting synthetic per-eye \
+                 center_shift L={:?} R={:?}",
+                shifts[0], shifts[1]
+            );
+        }
+        Self {
+            last_emit: None,
+            test_override,
+        }
     }
 
     /// Decide whether an emit is warranted this tick. Returns `Some(views)`
@@ -162,6 +203,20 @@ impl PerViewFoveationEmitter {
             && now.duration_since(last) < min_interval
         {
             return None;
+        }
+
+        // Test hook (Gate H): inject a constant per-eye centre shift, bypassing
+        // the `eyes_*` requirement so per-view foveation can be exercised on a
+        // headset without eye tracking. Still rate-limited by the gate above;
+        // size / edge-ratio come from the static config exactly as the gaze path.
+        if let Some(shifts) = self.test_override {
+            let synthetic = |shift: [f32; 2]| PerViewFoveationView {
+                center_size: [static_config.center_size_x, static_config.center_size_y],
+                center_shift: shift,
+                edge_ratio: [static_config.edge_ratio_x, static_config.edge_ratio_y],
+            };
+            self.last_emit = Some(now);
+            return Some([synthetic(shifts[0]), synthetic(shifts[1])]);
         }
 
         let gazes: [Option<Quat>; 2] = if let [Some(left), Some(right)] = face.eyes_social {
@@ -525,5 +580,28 @@ mod tests {
             assert_eq!(view.edge_ratio, [cfg.edge_ratio_x, cfg.edge_ratio_y]);
             assert!(view.center_shift[0].abs() < 1e-6 && view.center_shift[1].abs() < 1e-6);
         }
+    }
+
+    // ----- ALVR_TEST_PER_VIEW_FOVEATION spec parser (Gate H hook) ----------
+
+    #[test]
+    fn test_foveation_spec_parses_four_floats() {
+        assert_eq!(
+            parse_per_view_foveation_spec("-0.25,0.0,0.25,0.1"),
+            Some([[-0.25, 0.0], [0.25, 0.1]])
+        );
+        // Whitespace tolerated.
+        assert_eq!(
+            parse_per_view_foveation_spec(" -0.25 , 0.0 , 0.25 , 0.1 "),
+            Some([[-0.25, 0.0], [0.25, 0.1]])
+        );
+    }
+
+    #[test]
+    fn test_foveation_spec_rejects_malformed() {
+        assert_eq!(parse_per_view_foveation_spec(""), None);
+        assert_eq!(parse_per_view_foveation_spec("0.1,0.2,0.3"), None); // wrong arity
+        assert_eq!(parse_per_view_foveation_spec("0.1,0.2,0.3,0.4,0.5"), None);
+        assert_eq!(parse_per_view_foveation_spec("0.1,x,0.3,0.4"), None); // unparsable
     }
 }
