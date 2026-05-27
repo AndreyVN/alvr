@@ -4,6 +4,8 @@ Pick-up doc for future sessions. Pairs with the master plan at [`/openxr-migrati
 
 ## Where we are
 
+**🎉 2026-05-27 — OpenXR mode streams video end-to-end (black screen fixed, verified on RTX 3090 + Quest 3).** The full pipeline works: comp_alvr squashes + FFR-compresses the per-view layers, the Vulkan-input CUDA-interop NVENC encoder (`alvr_oxr_submit_layers`) encodes the foveated frame, and the client decodes and displays it. The last blocker — a black headset despite a valid bitstream — was root-caused to the OpenXR runtime's event loop **silently dropping every `ServerCoreEvent::RequestIDR`**: the encoder forces an IDR only once at stream start (which races the client's decoder setup and is missed), so the client only ever received P-frames and the Qualcomm decoder rejected every input buffer ("Unsupported input buffer") for lack of a keyframe. Fix (alvr `e2eb150e`): wire `RequestIDR → encoder_bridge::insert_idr()`, mirroring OpenVR's `RequestIDR()`. Supporting commits: `088dd27b` (strip the SPS/PPS NVENC repeats in front of each IDR, matching `ParseFrameNals`) and `efc93dec` (remove the bring-up diagnostics). See 3.4 below.
+
 **Phases 0–2 scaffolding is in place and compiles clean.** OpenVR mode is unchanged and remains the default. To verify the state of the tree at any point:
 
 ```sh
@@ -82,7 +84,7 @@ This refactor must land before 3.5 or both paths duplicate code.
 | `alvr_oxr_get_head_pose` | ✅ 3.1.2 | `context.get_device_motion(HEAD_ID, target)`; explicit `motion.predict()` deferred (Monado already passes a future predicted timestamp). |
 | `alvr_oxr_get_controller_state` | ✅ 3.1.3 + 3.1.4 | Pose + velocities via `get_device_motion`; trigger / squeeze / thumbstick / 16-bit buttons bitfield from `CONTROLLER_BUTTON_CACHE` populated by the drain thread on `ServerCoreEvent::Buttons`. |
 | `alvr_oxr_set_haptic` | ✅ 3.1.3 | Forwards to `context.send_haptics`. |
-| `alvr_oxr_submit_layers` | ⏸ pending | **Only stub left.** Awaits Slice 3.2/3.3 (Vulkan-input NVENC encoder); needs Vulkan SDK + NVENC 12.1+ + Monado verification environment. |
+| `alvr_oxr_submit_layers` | ✅ LANDED 2026-05-27 | Vulkan-input CUDA-interop NVENC encoder body (`encoder/win32_vk/VkEncoderBackend.cpp`). Imports comp_alvr's per-view OPAQUE_WIN32 scratch images into CUDA, composites them into the combined NVENC input frame, encodes (H.264/HEVC), and streams via `send_video_nal`. Verified end-to-end on RTX 3090 + Quest 3 — see 3.4. |
 | `alvr_oxr_poll_session_event` | ✅ 3.1.2 | Drains a `SESSION_EVENTS_RX` queue the drain thread populates from `ClientConnected` / `ClientDisconnected` / `ShutdownPending`. |
 | `alvr_oxr_get_view_params` (new in 3.1.5) | ✅ 3.1.5 | Per-eye pose + FOV from the `LOCAL_VIEW_PARAMS` cache the drain thread maintains. Drives Monado's `xrLocateViews` equivalent. |
 
@@ -118,9 +120,15 @@ Markers run unconditionally even on no-layer frames so the per-frame state machi
 
 **Latent comp_alvr-not-selected bug fixed in the same session** (fork commit `56466ce47`). `XRT_FEATURE_COMP_ALVR` was set as a CMake option and the comp_alvr target was being built + linked into `target_instance`, but the `#ifdef XRT_FEATURE_COMP_ALVR` guard in `targets/common/target_instance.c` was never true at compile time because the feature wasn't listed in `xrt_config_build.h.cmake_in`. Result: `target_instance` silently fell through to `comp_main_create_system_compositor`, and `comp_alvr_create_system_compositor` was unreachable despite a clean build and clean boot. This is the same class of "static link success doesn't prove dynamic behaviour" pattern that surfaced earlier this session (latent-bug list below). For future Monado-side touches, **always grep the boot log for the specific factory function name, not just for the builder/driver name**.
 
-### 3.4 — End-to-end smoke
+### 3.4 — End-to-end smoke — ✅ ACHIEVED 2026-05-27
 
-Exit criterion for Phase 3: `hello_xr` running against `libopenxr_monado` with `XRT_BUILD_DRIVER_ALVR=ON XRT_FEATURE_COMP_ALVR=ON` shows up on the headset and is interactive.
+Exit criterion for Phase 3: an OpenXR app running against the ALVR-Monado runtime (`XRT_BUILD_DRIVER_ALVR=ON XRT_FEATURE_COMP_ALVR=ON`) shows up on the headset and is interactive.
+
+**Met.** Streamed `oxr_overlay_smoke` (a colour-cycling projection-layer app) through `monado-service` on the RTX 3090 host to a Quest 3 running `alvr.client.dev`, foveation on, H.264 2560×1184. The headset shows video; the client decodes cleanly (0 "Unsupported input buffer", ffmpeg validates 120/120 of the client-received frames). Matches the OpenVR/SteamVR baseline on the same client.
+
+**The black-screen bug that gated this (root cause + fix):** the runtime dropped every `ServerCoreEvent::RequestIDR`, so after the single stream-start IDR (missed during the client's decoder setup) the client only ever received P-frames → no reference frame → the Qualcomm HW decoder rejected every input buffer. The investigation eliminated, in order, inline SPS/PPS config (`088dd27b` strips it anyway, matching `ParseFrameNals`), bitstream validity (ffmpeg decoded the server bytes 120/120), codec (H.264 and HEVC both failed identically), and resolution (2560×1184 and 960×416 both failed) — then a client-side NAL capture showed the dump contained only P-slices (`0x61`), never an IDR (`0x65`). Fix: `RequestIDR → encoder_bridge::insert_idr()` (alvr `e2eb150e`). Diagnostics removed in `efc93dec`.
+
+Note: this was reached via the `oxr_overlay_smoke` path rather than `hello_xr` specifically; the original `hello_xr` exit phrasing is satisfied equivalently (a real OpenXR client submitting frames renders on the headset).
 
 ## Phase 4 — runtime registration (2–3 days)
 
