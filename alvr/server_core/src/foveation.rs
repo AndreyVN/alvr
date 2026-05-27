@@ -137,7 +137,6 @@ fn parse_per_view_foveation_spec(raw: &str) -> Option<[[f32; 2]; 2]> {
 /// `gaze_to_center_shift` dead band suppresses micro-jitter, and any further
 /// filtering (one-Euro, EMA, etc.) is a follow-up if real eye-tracking data
 /// turns out to be too jittery in practice.
-
 pub struct PerViewFoveationEmitter {
     last_emit: Option<Instant>,
     /// Test hook (Gate H): when `ALVR_TEST_PER_VIEW_FOVEATION=lx,ly,rx,ry` is
