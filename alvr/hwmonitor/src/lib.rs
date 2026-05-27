@@ -10,6 +10,10 @@
 //! get a `Snapshot` with `None` filled in for unavailable sources.
 
 mod lhm;
+// WMI-based; only compiles on Windows (the `wmi` crate is a Windows-only
+// dependency). The sampler already gates all NetSource usage behind
+// `#[cfg(windows)]`, so on other platforms `Snapshot.network` stays empty.
+#[cfg(windows)]
 mod network;
 mod nvidia_smi;
 mod sampler;
