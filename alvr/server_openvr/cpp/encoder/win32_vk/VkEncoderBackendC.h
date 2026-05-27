@@ -40,10 +40,6 @@ typedef void (*AlvrVkPacketCallback)(
 // (valid until the next create call). Never null.
 const char* alvr_vk_encoder_last_error();
 
-// Sample of the most recently imported scratch image (GPU read-back): is the
-// encoder fed real pixels or zeros? Never null.
-const char* alvr_vk_encoder_submit_diag();
-
 // Create the encoder from `cfg`. Returns an opaque handle, or null if CUDA/NVENC
 // is unavailable or initialization failed.
 void* alvr_vk_encoder_create(const NvencConfig* cfg);

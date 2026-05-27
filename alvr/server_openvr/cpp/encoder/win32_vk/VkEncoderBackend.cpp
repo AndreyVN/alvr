@@ -7,13 +7,8 @@
 // failure point so the Rust bridge can log *why* the encoder didn't come up.
 namespace {
 std::string g_vk_encoder_last_error = "no error recorded";
-// Per-submit content diagnostic: a sample of the imported scratch array read
-// back from the GPU, so we can tell whether CUDA sees real pixels (colour) or
-// zeros. Set in importViewToInput; surfaced via the C-ABI shim.
-std::string g_vk_encoder_submit_diag = "no submit yet";
 }
 const char* VkEncoderBackendLastError() { return g_vk_encoder_last_error.c_str(); }
-const char* VkEncoderBackendSubmitDiag() { return g_vk_encoder_submit_diag.c_str(); }
 
 // 3.3b-2 implements the real CUDA-interop NVENC encoder when the CUDA Toolkit is
 // present at build time (build.rs defines ALVR_OXR_HAVE_CUDA). Without it — CI's
@@ -201,54 +196,6 @@ struct VkEncoderBackend::Impl {
             }
         }
 
-        // Diagnostic: read one row of the imported scratch array straight back to
-        // host so we can tell whether CUDA actually sees pixels (colour) or zeros
-        // (squash-black or a wrong array-import descriptor). Cheap (one row), and
-        // the Rust side only logs the first few frames.
-        if (ok) {
-            std::vector<uint8_t> row(static_cast<size_t>(desc.imageWidth) * 4, 0);
-            CUDA_MEMCPY2D rb = { };
-            rb.srcMemoryType = CU_MEMORYTYPE_ARRAY;
-            rb.srcArray = level;
-            rb.srcY = desc.imageHeight / 2;
-            rb.dstMemoryType = CU_MEMORYTYPE_HOST;
-            rb.dstHost = row.data();
-            rb.dstPitch = row.size();
-            rb.WidthInBytes = row.size();
-            rb.Height = 1;
-            if (cuda.cuMemcpy2D(&rb) == CUDA_SUCCESS) {
-                uint8_t mn = 255, mx = 0;
-                int nonzero = 0;
-                for (uint8_t b : row) {
-                    mn = std::min(mn, b);
-                    mx = std::max(mx, b);
-                    nonzero += (b != 0);
-                }
-                char buf[256];
-                std::snprintf(
-                    buf,
-                    sizeof buf,
-                    "view%d scratch %ux%u y=%u px0=[%u,%u,%u,%u] min=%u max=%u nonzero=%d/%zu",
-                    view,
-                    desc.imageWidth,
-                    desc.imageHeight,
-                    desc.imageHeight / 2,
-                    row[0],
-                    row[1],
-                    row[2],
-                    row[3],
-                    mn,
-                    mx,
-                    nonzero,
-                    row.size()
-                );
-                g_vk_encoder_submit_diag = buf;
-                OutputDebugStringA(buf);
-            } else {
-                g_vk_encoder_submit_diag = "scratch readback (cuMemcpy2D array->host) failed";
-            }
-        }
-
         if (mipmap) {
             cuda.cuMipmappedArrayDestroy(mipmap);
         }
@@ -383,57 +330,6 @@ bool VkEncoderBackend::Submit(const SubmitDesc& desc, PacketCallback onPacket, v
             // Both array->linear copies are async on the null stream; make sure
             // they finish before NVENC reads the input.
             cuda.cuCtxSynchronize();
-
-            // Diagnostic: sample the NVENC input device buffer itself (what the
-            // encoder reads) so we can compare against the scratch-array sample.
-            // If the array has colour but this is black, the array->device copy
-            // is the bug; if both have colour, the bug is NVENC/client side.
-            {
-                size_t wbytes = static_cast<size_t>(desc.imageWidth) * 2 * 4;
-                std::vector<uint8_t> irow(wbytes, 0);
-                CUDA_MEMCPY2D rb = { };
-                rb.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-                rb.srcDevice = dst;
-                rb.srcPitch = dstPitch;
-                rb.srcY = desc.imageHeight / 2;
-                rb.dstMemoryType = CU_MEMORYTYPE_HOST;
-                rb.dstHost = irow.data();
-                rb.dstPitch = wbytes;
-                rb.WidthInBytes = wbytes;
-                rb.Height = 1;
-                char ibuf[200];
-                if (cuda.cuMemcpy2D(&rb) == CUDA_SUCCESS) {
-                    uint8_t mn = 255, mx = 0;
-                    int nz = 0;
-                    for (uint8_t b : irow) {
-                        mn = std::min(mn, b);
-                        mx = std::max(mx, b);
-                        nz += (b != 0);
-                    }
-                    std::snprintf(
-                        ibuf,
-                        sizeof ibuf,
-                        "INPUT(nvenc %ux%u pitch=%zu) y=%u px0=[%u,%u,%u,%u] min=%u max=%u "
-                        "nz=%d/%zu "
-                        "|| ",
-                        m_impl->cfg.renderWidth,
-                        m_impl->cfg.renderHeight,
-                        dstPitch,
-                        desc.imageHeight / 2,
-                        irow[0],
-                        irow[1],
-                        irow[2],
-                        irow[3],
-                        mn,
-                        mx,
-                        nz,
-                        irow.size()
-                    );
-                } else {
-                    std::snprintf(ibuf, sizeof ibuf, "INPUT readback failed || ");
-                }
-                g_vk_encoder_submit_diag = std::string(ibuf) + g_vk_encoder_submit_diag;
-            }
 
             bool idr = m_impl->insertIdr.exchange(false);
             NV_ENC_PIC_PARAMS picParams = { };

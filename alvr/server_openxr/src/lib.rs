@@ -1249,7 +1249,6 @@ mod encoder_bridge {
 
     unsafe extern "C" {
         fn alvr_vk_encoder_last_error() -> *const c_char;
-        fn alvr_vk_encoder_submit_diag() -> *const c_char;
         fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
         fn alvr_vk_encoder_destroy(handle: *mut c_void);
         fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
@@ -1441,22 +1440,6 @@ mod encoder_bridge {
         }
         let nal = raw[off..].to_vec();
 
-        // Diagnostic: log the first several encoded NALs (config bytes stripped +
-        // the first bytes, which carry the start code + NAL-unit type) to confirm
-        // NVENC is producing a real bitstream and the headers look sane.
-        {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static NAL_LOG: AtomicU32 = AtomicU32::new(0);
-            if NAL_LOG.fetch_add(1, Ordering::Relaxed) < 10 {
-                let head = &nal[..nal.len().min(8)];
-                warn!(
-                    "OpenXR NAL: stripped {off}B config, len={} is_idr={} head={head:02x?}",
-                    nal.len(),
-                    is_idr
-                );
-            }
-        }
-
         if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
             // The client reprojects the decoded frame using these per-eye view
             // params, so they must be GLOBAL (world-space): head_pose × the
@@ -1514,23 +1497,13 @@ mod encoder_bridge {
             // # Safety: buf has `len` bytes of capacity.
             let written = unsafe { alvr_vk_encoder_get_seq_params(handle, buf.as_mut_ptr(), len) };
             buf.truncate(written.max(0) as usize);
-            // Diagnostic (black-screen bring-up): the client configures its
-            // decoder from this csd-0; if it lacks a valid SPS the Qualcomm
-            // decoder rejects every frame as "Unsupported input buffer". Log
-            // the length + head so we can confirm it carries SPS/PPS for the
-            // foveated resolution. Remove once OpenXR video is on-headset.
-            let head = &buf[..buf.len().min(24)];
-            warn!(
-                "OpenXR seq-params (csd-0): len={} head={head:02x?}",
-                buf.len()
-            );
             if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
                 ctx.set_video_config_nals(buf, codec_type(oc.codec));
             }
         } else {
-            // No config NALs => client gets no csd-0 => decoder stuck at the
-            // placeholder resolution => "Unsupported input buffer" on frames.
-            warn!("OpenXR seq-params (csd-0): EMPTY (len={len}) — no DecoderConfig sent to client");
+            // No sequence params => the client never gets a DecoderConfig (csd-0)
+            // and can't decode. A real error worth surfacing, not just bring-up.
+            warn!("OpenXR encoder produced no sequence params; client will have no decoder config");
         }
 
         *ENCODER.lock() = Some(Handle(handle));
@@ -1591,19 +1564,7 @@ mod encoder_bridge {
         };
         // # Safety: handle valid for the lock's duration; desc outlives the call;
         // on_packet is a valid extern "C" fn.
-        let ok = unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) };
-
-        // Log the GPU-read-back content sample for the first few frames so we can
-        // tell whether the encoder is fed real pixels or zeros (black-frame
-        // diagnosis). Throttled so it doesn't spam the per-frame log.
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static DIAG_FRAMES: AtomicU32 = AtomicU32::new(0);
-        if DIAG_FRAMES.fetch_add(1, Ordering::Relaxed) < 5 {
-            // # Safety: returns a valid NUL-terminated global string, never null.
-            let diag = unsafe { CStr::from_ptr(alvr_vk_encoder_submit_diag()) }.to_string_lossy();
-            warn!("OpenXR encoder content diag: {diag}");
-        }
-        ok
+        unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) }
     }
 
     #[cfg(test)]
