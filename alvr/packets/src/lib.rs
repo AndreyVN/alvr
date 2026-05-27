@@ -354,6 +354,20 @@ pub enum FirewallRulesAction {
     Remove,
 }
 
+/// Per-view foveation parameters carried over the wire in [`RealTimeConfig`].
+/// Per-axis shape mirrors `alvr_session::FoveatedEncodingConfig` and
+/// `alvr_server_core::PerViewFoveationView`; lengths are in image-space [0, 1]
+/// with the centre at (0.5, 0.5) when shifts are zero. Index 0 = left eye,
+/// index 1 = right eye. This is the server→client half of the per-view
+/// foveation design: the OpenXR-mode encoder applies these params per eye and
+/// the client uses them to invert the warp during reprojection.
+#[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
+pub struct FoveationView {
+    pub center_size: [f32; 2],
+    pub center_shift: [f32; 2],
+    pub edge_ratio: [f32; 2],
+}
+
 // Note: server sends a packet to the client at low frequency, binary encoding, without ensuring
 // compatibility between different versions, even if within the same major version.
 #[derive(Serialize, Deserialize, PartialEq, Clone)]
@@ -362,11 +376,32 @@ pub struct RealTimeConfig {
     pub clientside_post_processing: Option<ClientsidePostProcessingConfig>,
     pub cpu_performance_level: Option<PerformanceLevel>,
     pub gpu_performance_level: Option<PerformanceLevel>,
+    // Phase 7 per-view foveation. `Some` only when foveated encoding is on AND the eye-tracked
+    // per-view switch is enabled; carries the static baseline params (both eyes identical) the
+    // client should reproject against. `None` keeps the legacy single-source-of-truth path
+    // (foveation params travel once via `OpenvrConfig` at stream init). Because `RealTimeConfig`
+    // is built from settings and only re-sent on change, this is a low-rate baseline, not the
+    // per-frame eye-tracked centre — that stays server-internal (encoder bridge) for now.
+    pub per_view_foveation: Option<[FoveationView; 2]>,
     pub ext_str: String,
 }
 
 impl RealTimeConfig {
     pub fn from_settings(settings: &Settings) -> Self {
+        let per_view_foveation = settings
+            .video
+            .foveated_encoding
+            .as_option()
+            .filter(|config| config.per_view_eye_tracked.enabled())
+            .map(|config| {
+                let view = FoveationView {
+                    center_size: [config.center_size_x, config.center_size_y],
+                    center_shift: [config.center_shift_x, config.center_shift_y],
+                    edge_ratio: [config.edge_ratio_x, config.edge_ratio_y],
+                };
+                [view, view]
+            });
+
         Self {
             passthrough: settings.video.passthrough.clone().into_option(),
             clientside_post_processing: settings
@@ -376,7 +411,58 @@ impl RealTimeConfig {
                 .into_option(),
             cpu_performance_level: settings.headset.performance_level.clone().cpu.into_option(),
             gpu_performance_level: settings.headset.performance_level.clone().gpu.into_option(),
+            per_view_foveation,
             ext_str: String::new(), // No extensions for now
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alvr_session::SessionConfig;
+    use bincode::config;
+
+    fn roundtrip(config: &RealTimeConfig) -> RealTimeConfig {
+        let bytes = bincode::serde::encode_to_vec(config, config::standard()).unwrap();
+        let (decoded, _) =
+            bincode::serde::decode_from_slice::<RealTimeConfig, _>(&bytes, config::standard())
+                .unwrap();
+        decoded
+    }
+
+    /// The per-view foveation field bincode-round-trips in both states. This is
+    /// the cross-version coordination point flagged in
+    /// `docs/monado-notes/PER_VIEW_FOVEATION.md` (Slice 4): `RealTimeConfig` is
+    /// explicitly NOT version-compatible (see the comment on the struct), so the
+    /// only contract worth pinning is that the wire encoding is self-consistent.
+    #[test]
+    fn real_time_config_per_view_foveation_roundtrips() {
+        let base = RealTimeConfig::from_settings(&SessionConfig::default().to_settings());
+
+        let none = RealTimeConfig {
+            per_view_foveation: None,
+            ..base.clone()
+        };
+        assert!(roundtrip(&none) == none, "None variant must round-trip");
+
+        let view = FoveationView {
+            center_size: [0.45, 0.4],
+            center_shift: [0.1, -0.2],
+            edge_ratio: [4.0, 5.0],
+        };
+        let some = RealTimeConfig {
+            per_view_foveation: Some([view, view]),
+            ..base
+        };
+        assert!(roundtrip(&some) == some, "Some variant must round-trip");
+    }
+
+    /// Default settings have `per_view_eye_tracked` Disabled, so the field is
+    /// omitted (legacy single-source-of-truth path stays untouched).
+    #[test]
+    fn from_settings_omits_per_view_foveation_by_default() {
+        let config = RealTimeConfig::from_settings(&SessionConfig::default().to_settings());
+        assert!(config.per_view_foveation.is_none());
     }
 }
