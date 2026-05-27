@@ -224,10 +224,8 @@ fn walk(
         HardwareKind::Unknown => kind,
         other => {
             match other {
-                HardwareKind::Gpu => {
-                    if gpu.name.is_none() && !node.text.is_empty() {
-                        gpu.name = Some(node.text.clone());
-                    }
+                HardwareKind::Gpu if gpu.name.is_none() && !node.text.is_empty() => {
+                    gpu.name = Some(node.text.clone());
                 }
                 HardwareKind::Storage => {
                     // Open a new bucket for this device; leaves inside this
@@ -349,11 +347,13 @@ fn apply_leaf(
             }
             _ => {}
         },
-        "Control" if matches!(kind, HardwareKind::Gpu) => {
+        "Control"
+            if matches!(kind, HardwareKind::Gpu)
+                && name_l.contains("fan")
+                && gpu.fan_pct.is_none() =>
+        {
             // GPU fan duty cycle (0–100). LHM exposes this as a Control leaf.
-            if name_l.contains("fan") && gpu.fan_pct.is_none() {
-                gpu.fan_pct = Some(value);
-            }
+            gpu.fan_pct = Some(value);
         }
         "Load" if matches!(kind, HardwareKind::Gpu) => {
             // Primary GPU activity. LHM exposes one "GPU Core" Load sensor
