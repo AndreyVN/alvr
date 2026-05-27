@@ -435,6 +435,9 @@ impl StreamContext {
                 },
             ],
             self.config.passthrough.as_ref(),
+            // Per-view foveation not yet plumbed from the wire (Slice B); the runtime FFE pipeline
+            // stays dormant and the static de-foveation path runs.
+            None,
         );
 
         self.swapchains[0].release_image().unwrap();
