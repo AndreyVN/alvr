@@ -393,11 +393,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     while submitted < target_frames && start.elapsed() < deadline {
         while let Some(ev) = xr_instance.poll_event(&mut storage)? {
-            if let xr::Event::SessionStateChanged(e) = ev {
-                if e.state() != session_state {
-                    session_state = e.state();
-                    println!("  session state -> {:?}", session_state);
-                }
+            if let xr::Event::SessionStateChanged(e) = ev
+                && e.state() != session_state
+            {
+                session_state = e.state();
+                println!("  session state -> {:?}", session_state);
             }
         }
         // Do NOT gate frame submission on the OpenXR session state — the

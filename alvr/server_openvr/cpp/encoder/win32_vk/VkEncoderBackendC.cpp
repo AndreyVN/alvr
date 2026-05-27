@@ -47,7 +47,7 @@ bool alvr_vk_encoder_submit(
     if (!handle || !desc) {
         return false;
     }
-    VkEncoderBackend::SubmitDesc d = { };
+    VkEncoderBackend::SubmitDesc d = {};
     d.imageHandleLeft = desc->image_handle_left;
     d.imageHandleRight = desc->image_handle_right;
     d.imageSizeLeft = desc->image_size_left;

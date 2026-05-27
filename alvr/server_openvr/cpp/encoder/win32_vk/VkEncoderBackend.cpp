@@ -130,7 +130,7 @@ struct VkEncoderBackend::Impl {
     CudaApi cuda;
     CUcontext ctx = nullptr;
     std::unique_ptr<NvEncoderCuda> encoder;
-    NvencConfig cfg = { };
+    NvencConfig cfg = {};
     std::atomic<bool> insertIdr { false };
 
     // Import one view's OPAQUE_WIN32 image, map it as a CUDA array, and copy it
@@ -148,7 +148,7 @@ struct VkEncoderBackend::Impl {
             return false;
         }
 
-        CUDA_EXTERNAL_MEMORY_HANDLE_DESC memDesc = { };
+        CUDA_EXTERNAL_MEMORY_HANDLE_DESC memDesc = {};
         memDesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32;
         memDesc.handle.win32.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(handle));
         memDesc.size = size;
@@ -161,7 +161,7 @@ struct VkEncoderBackend::Impl {
             return false;
         }
 
-        CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC mipDesc = { };
+        CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC mipDesc = {};
         mipDesc.offset = 0;
         mipDesc.numLevels = 1;
         mipDesc.arrayDesc.Width = desc.imageWidth;
@@ -181,7 +181,7 @@ struct VkEncoderBackend::Impl {
         }
 
         if (ok) {
-            CUDA_MEMCPY2D copy = { };
+            CUDA_MEMCPY2D copy = {};
             copy.srcMemoryType = CU_MEMORYTYPE_ARRAY;
             copy.srcArray = level;
             copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
@@ -332,7 +332,7 @@ bool VkEncoderBackend::Submit(const SubmitDesc& desc, PacketCallback onPacket, v
             cuda.cuCtxSynchronize();
 
             bool idr = m_impl->insertIdr.exchange(false);
-            NV_ENC_PIC_PARAMS picParams = { };
+            NV_ENC_PIC_PARAMS picParams = {};
             if (idr) {
                 picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
             }
@@ -391,7 +391,7 @@ std::unique_ptr<VkEncoderBackend> VkEncoderBackend::Create(const NvencConfig&) {
 void VkEncoderBackend::Shutdown() { }
 void VkEncoderBackend::OnStreamStart() { }
 void VkEncoderBackend::InsertIDR() { }
-std::vector<uint8_t> VkEncoderBackend::GetSequenceParams() { return { }; }
+std::vector<uint8_t> VkEncoderBackend::GetSequenceParams() { return {}; }
 
 bool VkEncoderBackend::Submit(const SubmitDesc&, PacketCallback, void*) { return false; }
 

@@ -122,7 +122,7 @@ void VideoEncoderNVENC::Transmit(
         = reinterpret_cast<ID3D11Texture2D*>(encoderInputFrame->inputPtr);
     m_pD3DRender->GetContext()->CopyResource(pInputTexture, pTexture);
 
-    NV_ENC_PIC_PARAMS picParams = { };
+    NV_ENC_PIC_PARAMS picParams = {};
     if (insertIDR) {
         Debug("Inserting IDR frame.\n");
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
@@ -184,7 +184,7 @@ void VideoEncoderNVENC::FillEncodeConfig(
     static_assert((int)NVENC_AQ_TEMPORAL == (int)TemporalAQ, "AQ enum drift");
 
     auto& s = Settings::Instance();
-    NvencConfig cfg = { };
+    NvencConfig cfg = {};
     cfg.codec = m_codec;
     cfg.refreshRate = refreshRate;
     cfg.renderWidth = renderWidth;

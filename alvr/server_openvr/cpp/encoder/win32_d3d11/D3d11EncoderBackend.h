@@ -31,9 +31,7 @@ public:
     // texture type differs per backend family. The IDR flag is no longer a
     // parameter — the backend consults its owned IDRScheduler internally
     // right before forwarding to the underlying VideoEncoder.
-    void Transmit(
-        ID3D11Texture2D* pTexture, uint64_t presentationTime, uint64_t targetTimestampNs
-    );
+    void Transmit(ID3D11Texture2D* pTexture, uint64_t presentationTime, uint64_t targetTimestampNs);
 
 private:
     explicit D3d11EncoderBackend(std::shared_ptr<VideoEncoder> videoEncoder);

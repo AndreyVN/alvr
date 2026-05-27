@@ -32,10 +32,10 @@ std::unique_ptr<D3d11EncoderBackend> D3d11EncoderBackend::Create(
     if (Settings::Instance().m_force_sw_encoding) {
         try {
             Debug("Try to use VideoEncoderSW.\n");
-            auto encoder
-                = std::make_shared<VideoEncoderSW>(d3dRender, encoderWidth, encoderHeight);
+            auto encoder = std::make_shared<VideoEncoderSW>(d3dRender, encoderWidth, encoderHeight);
             encoder->Initialize();
-            return std::unique_ptr<D3d11EncoderBackend>(new D3d11EncoderBackend(std::move(encoder)));
+            return std::unique_ptr<D3d11EncoderBackend>(new D3d11EncoderBackend(std::move(encoder))
+            );
         } catch (Exception e) {
             swException = e;
         }

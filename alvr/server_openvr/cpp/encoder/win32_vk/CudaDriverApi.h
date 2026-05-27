@@ -33,13 +33,13 @@ struct CudaApi {
         = nullptr;
     CUresult(CUDAAPI* cuMemFree)(CUdeviceptr) = nullptr;
     CUresult(CUDAAPI* cuMemcpy2D)(const CUDA_MEMCPY2D*) = nullptr;
-    CUresult(CUDAAPI* cuImportExternalMemory)(
-        CUexternalMemory*, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC*
-    ) = nullptr;
+    CUresult(CUDAAPI*
+                 cuImportExternalMemory)(CUexternalMemory*, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC*)
+        = nullptr;
     CUresult(CUDAAPI* cuDestroyExternalMemory)(CUexternalMemory) = nullptr;
-    CUresult(CUDAAPI* cuExternalMemoryGetMappedMipmappedArray)(
-        CUmipmappedArray*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*
-    ) = nullptr;
+    CUresult(CUDAAPI*
+                 cuExternalMemoryGetMappedMipmappedArray)(CUmipmappedArray*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*)
+        = nullptr;
     CUresult(CUDAAPI* cuMipmappedArrayGetLevel)(CUarray*, CUmipmappedArray, unsigned int) = nullptr;
     CUresult(CUDAAPI* cuMipmappedArrayDestroy)(CUmipmappedArray) = nullptr;
     CUresult(CUDAAPI* cuGetErrorString)(CUresult, const char**) = nullptr;
