@@ -1,6 +1,6 @@
 # Per-view foveation — scoping (2026-05-22)
 
-Status: **Slices 1 + 2 + 3 + 5 + producer wiring + real per-view FOV plumb LANDED 2026-05-22** — eye-tracking → bridge cache is fully end-to-end on the alvr side, using the client's negotiated per-view FOV. Remaining: Slice 6 (encoder body in `alvr_oxr_submit_layers`, hardware-blocked) + Slice 4 (RealTimeConfig wire-compat, deferred until a remote producer needs it). See [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet for commits.
+Status: **Slices 1 + 2 + 3 + 4 + 5 + producer wiring + real per-view FOV plumb LANDED** (1/2/3/5 + producer + FOV on 2026-05-22; **Slice 4 wire bump 2026-05-27**) — eye-tracking → bridge cache is fully end-to-end on the alvr side, using the client's negotiated per-view FOV, and the static baseline params now travel server→client over `RealTimeConfig.per_view_foveation`. Remaining: Slice 6 (encoder body in `alvr_oxr_submit_layers`, hardware-blocked) + client-side per-view reprojection consumption of the new wire field (graphics work; the client deserializes it but still reprojects symmetrically). See [`NEXT_STEPS.md`](NEXT_STEPS.md) per-view foveation bullet for commits.
 
 ## What "per-view foveation" means here
 
@@ -121,13 +121,13 @@ A migration in `alvr_session` is not needed — both items are additive. Add an 
 
 ## Wire-compat checklist (for the actual landing slice)
 
-- [ ] `alvr_packets::TrackingData` unchanged on the wire (confirmed by bincode round-trip fixture).
-- [ ] `alvr_packets::RealTimeConfig` extended additively with `per_view_foveation: Option<[FoveationView; 2]>` at the *end* of the struct (bincode 2 standard config — trailing optional is forward-compatible only inside an additive bump on both halves).
-- [ ] `alvr_session::FoveatedEncodingConfig` additively gains the new `Switch<PerViewFoveationConfig>` field. No migration entry.
-- [ ] `ALVR_OXR_BRIDGE_ABI_VERSION` bumped 4 → 5 (single-source-of-truth via the alvr-side cbindgen header; no separate Monado-side constant).
-- [ ] cbindgen header regenerated via `ALVR_REGENERATE_BRIDGE_HEADER=1 cargo build -p alvr_server_openxr`.
-- [ ] `cargo xtask clippy --ci` clean.
-- [ ] Monado CTest clean (25/25 on host 101 — see [[reference-remote-test-host]]).
+- [x] `alvr_packets::TrackingData` unchanged on the wire (Slice 4 touches only `RealTimeConfig`).
+- [x] `alvr_packets::RealTimeConfig` extended additively with `per_view_foveation: Option<[FoveationView; 2]>` at the *end* of the struct (Slice 4, 2026-05-27). Note: the struct's own doc-comment states `RealTimeConfig` is sent without cross-version compatibility, so client+server ship together regardless — the additive placement keeps the encoding self-consistent rather than backward-compatible. `bincode` round-trip test in `alvr_packets` pins both the `Some` and `None` shapes.
+- [x] `alvr_session::FoveatedEncodingConfig` additively gains the new `Switch<PerViewFoveationConfig>` field. No migration entry. (Landed with Slice 2, 2026-05-22.)
+- [x] `ALVR_OXR_BRIDGE_ABI_VERSION` bumped 4 → 5 (Slice 1, 2026-05-22 — single-source-of-truth via the alvr-side cbindgen header). Slice 4 does **not** touch the bridge ABI: it's purely the server↔client wire surface.
+- [x] cbindgen header regenerated (with Slice 1). Slice 4 needs no regeneration.
+- [x] `cargo clippy -p alvr_packets --all-targets` clean (Slice 4 scope).
+- [ ] Monado CTest clean (25/25 on host 101 — see [[reference-remote-test-host]]). Unaffected by Slice 4 (no Monado-side change); re-run only gates the bridge/compositor slices.
 
 ## Verification ceiling
 
