@@ -30,8 +30,8 @@ use alvr_common::{
 use alvr_events::{EventType, HapticsEvent};
 use alvr_filesystem as afs;
 use alvr_packets::{
-    BatteryInfo, ButtonEntry, ClientConnectionsAction, DecoderInitializationConfig, Haptics,
-    VideoPacketHeader,
+    BatteryInfo, ButtonEntry, ClientConnectionsAction, DecoderInitializationConfig, FoveationView,
+    Haptics, VideoPacketHeader,
 };
 use alvr_server_io::ServerSessionManager;
 use alvr_session::{CodecType, OpenvrProperty, Settings};
@@ -87,6 +87,16 @@ pub struct PerViewFoveationView {
     pub edge_ratio: [f32; 2],
 }
 
+impl From<PerViewFoveationView> for FoveationView {
+    fn from(view: PerViewFoveationView) -> Self {
+        Self {
+            center_size: view.center_size,
+            center_shift: view.center_shift,
+            edge_ratio: view.edge_ratio,
+        }
+    }
+}
+
 pub enum ServerCoreEvent {
     SetOpenvrProperty {
         device_id: u64,
@@ -123,6 +133,13 @@ pub struct ConnectionContext {
     /// through `ServerCoreEvent`. Defaults to `[ViewParams::DUMMY; 2]` until
     /// the client sends its real view config.
     local_view_params: RwLock<[ViewParams; 2]>,
+    /// Latest per-view foveation the `tracking_loop` emitter computed, cached so
+    /// the per-frame video path ([`ServerCoreContext::send_video_nal`]) can stamp
+    /// it into each [`VideoPacketHeader`] without a round-trip through
+    /// `ServerCoreEvent`. `None` until the first emit (and stays `None` for the
+    /// whole session when `per_view_eye_tracked` is Disabled, which is
+    /// `steamvr-restart`-flagged so it can't toggle mid-session).
+    latest_per_view_foveation: RwLock<Option<[PerViewFoveationView; 2]>>,
     decoder_config: Mutex<Option<DecoderInitializationConfig>>,
     video_mirror_sender: Mutex<Option<broadcast::Sender<Vec<u8>>>>,
     video_recording_file: Mutex<Option<File>>,
@@ -245,6 +262,7 @@ impl ServerCoreContext {
                 initial_settings.connection.statistics_history_size,
             )),
             local_view_params: RwLock::new([ViewParams::DUMMY; 2]),
+            latest_per_view_foveation: RwLock::new(None),
             decoder_config: Mutex::new(None),
             video_mirror_sender: Mutex::new(None),
             video_recording_file: Mutex::new(None),
@@ -460,11 +478,18 @@ impl ServerCoreContext {
                     file.write_all(&nal_buffer).ok();
                 }
 
+                let per_view_foveation = self
+                    .connection_context
+                    .latest_per_view_foveation
+                    .read()
+                    .map(|views| [FoveationView::from(views[0]), FoveationView::from(views[1])]);
+
                 let sender_result = sender.try_send(VideoPacket {
                     header: VideoPacketHeader {
                         timestamp,
                         global_view_params,
                         is_idr,
+                        per_view_foveation,
                     },
                     payload: nal_buffer,
                 });
