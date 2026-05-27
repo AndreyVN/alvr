@@ -17,8 +17,9 @@ use alvr_common::{
 use alvr_packets::ClientTelemetry;
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientControlPacket, ClientStatistics, ConnectionAcceptedInfo,
-    HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
-    VIDEO, VideoPacketHeader, VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
+    FoveationView, HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING,
+    TrackingData, VIDEO, VideoPacketHeader, VideoStreamingCapabilities,
+    VideoStreamingCapabilitiesExt,
 };
 use alvr_session::{SocketProtocol, settings_schema::Switch};
 use alvr_sockets::{
@@ -67,6 +68,10 @@ pub struct ConnectionContext {
     pub statistics_manager: Mutex<Option<StatisticsManager>>,
     pub decoder_callback: Mutex<Option<Box<DecoderCallback>>>,
     pub global_view_params_queue: Mutex<VecDeque<(Duration, [ViewParams; 2])>>,
+    /// Per-frame per-view foveation params paired with each video frame (sibling to
+    /// `global_view_params_queue`). `None` entries are the common case until a per-view
+    /// (eye-tracked) producer ships; the renderer then de-foveates each eye independently.
+    pub per_view_foveation_queue: Mutex<VecDeque<(Duration, Option<[FoveationView; 2]>)>>,
     pub max_prediction: RwLock<Duration>,
 }
 
@@ -313,6 +318,16 @@ fn connection_pipeline(
 
                         while global_view_params_queue_lock.len() > 128 {
                             global_view_params_queue_lock.pop_front();
+                        }
+
+                        let per_view_foveation_queue_lock =
+                            &mut ctx.per_view_foveation_queue.lock();
+
+                        per_view_foveation_queue_lock
+                            .push_back((header.timestamp, header.per_view_foveation));
+
+                        while per_view_foveation_queue_lock.len() > 128 {
+                            per_view_foveation_queue_lock.pop_front();
                         }
                     }
 

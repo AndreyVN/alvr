@@ -80,6 +80,10 @@ pub struct ClientCoreContext {
     connection_context: Arc<ConnectionContext>,
     connection_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
     last_good_global_view_params: Mutex<[ViewParams; 2]>,
+    /// Per-view foveation inset centre (per eye) for the frame most recently resolved by
+    /// [`Self::report_compositor_start`]. `None` until a per-view producer ships; read by the
+    /// renderer via [`Self::per_view_center_shift`] to de-foveate each eye independently.
+    last_good_per_view_center_shift: Mutex<Option<[Vec2; 2]>>,
 }
 
 impl ClientCoreContext {
@@ -125,6 +129,7 @@ impl ClientCoreContext {
             connection_context,
             connection_thread: Arc::new(Mutex::new(Some(connection_thread))),
             last_good_global_view_params: Mutex::new([ViewParams::DUMMY; 2]),
+            last_good_per_view_center_shift: Mutex::new(None),
         }
     }
 
@@ -290,7 +295,30 @@ impl ClientCoreContext {
             }
         }
 
+        // Resolve the per-view foveation inset centre for this same frame, mirroring the view-param
+        // lookup. Only the center_shift varies per view/frame; center_size / edge_ratio are baked
+        // into the renderer's pipeline at stream start.
+        let center_shift_lock = &mut *self.last_good_per_view_center_shift.lock();
+        for (ts, foveation) in &*self.connection_context.per_view_foveation_queue.lock() {
+            if *ts == timestamp {
+                *center_shift_lock = foveation.map(|views| {
+                    [
+                        Vec2::from_array(views[0].center_shift),
+                        Vec2::from_array(views[1].center_shift),
+                    ]
+                });
+                break;
+            }
+        }
+
         *global_view_params_lock
+    }
+
+    /// Per-view foveation inset centre (per eye) for the frame most recently passed to
+    /// [`Self::report_compositor_start`]. `None` when the stream carries no per-view foveation
+    /// (today's default) — the renderer then uses its static de-foveation path.
+    pub fn per_view_center_shift(&self) -> Option<[Vec2; 2]> {
+        *self.last_good_per_view_center_shift.lock()
     }
 
     pub fn report_submit(&self, timestamp: Duration, vsync_queue: Duration) {

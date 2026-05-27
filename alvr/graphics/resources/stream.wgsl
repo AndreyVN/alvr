@@ -13,6 +13,19 @@ override UPSCALE_EDGE_SHARPNESS: f32 = 2.0;
 
 override ENABLE_FFE: bool = false;
 
+// Per-view (eye-tracked) foveation. Mutually exclusive with ENABLE_FFE: the static pipeline sets
+// ENABLE_FFE=true / FFE_RUNTIME=false (foveation constants baked as overrides below), the per-view
+// pipeline sets FFE_RUNTIME=true / ENABLE_FFE=false and derives those same constants at runtime
+// from CENTER_SIZE_* (spec-constant, resolution-coupled hence static), EDGE_*_RATIO, and a per-view
+// center_shift supplied via the `ffe_rt` uniform. This is the de-foveation inverse of
+// `alvr_session::foveated_encoding_shader_constants` (lines deriving c1/c2/bounds/a/b/c) so the
+// client reproduces whatever per-eye warp the encoder applied. Dormant until a per-view producer
+// ships (see docs/monado-notes/PER_VIEW_FOVEATION.md); when FFE_RUNTIME=false this whole path is
+// dead-stripped at pipeline creation and the static path is byte-identical.
+override FFE_RUNTIME: bool = false;
+override CENTER_SIZE_X: f32 = 0.0;
+override CENTER_SIZE_Y: f32 = 0.0;
+
 override VIEW_WIDTH_RATIO: f32 = 0.0;
 override VIEW_HEIGHT_RATIO: f32 = 0.0;
 override EDGE_X_RATIO: f32 = 0.0;
@@ -51,8 +64,17 @@ struct PushConstant {
 }
 var<push_constant> pc: PushConstant;
 
+// Per-view foveation center_shift for the FFE_RUNTIME path (the push-constant block is already at
+// the 128-byte guaranteed limit, so this rides a uniform instead). Only bound by the per-view
+// pipeline's bind group; dead-stripped (and not required in the bind group) when FFE_RUNTIME=false.
+struct FfeRuntimeUniform {
+    center_shift: vec2f,
+    _pad: vec2f,
+}
+
 @group(0) @binding(0) var stream_texture: texture_2d<f32>;
 @group(0) @binding(1) var stream_sampler: sampler;
+@group(0) @binding(2) var<uniform> ffe_rt: FfeRuntimeUniform;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -89,6 +111,69 @@ fn fragment_main(@location(0) uv: vec2f) -> @location(0) vec4f {
         let a_right = vec2f(A_RIGHT_X, A_RIGHT_Y);
         let b_right = vec2f(B_RIGHT_X, B_RIGHT_Y);
         let c_right = vec2f(C_RIGHT_X, C_RIGHT_Y);
+
+        if pc.view_idx == 1 {
+            corrected_uv.x = 1.0 - corrected_uv.x;
+        }
+
+        let center = (corrected_uv - c1) * edge_ratio / c2;
+        let left_edge = (-b_left + sqrt(b_left * b_left + 4.0 * a_left * corrected_uv)) / (2.0 * a_left);
+        let right_edge = (-b_right + sqrt(b_right * b_right - 4.0 * (c_right - a_right * corrected_uv))) / (2.0 * a_right);
+
+        if corrected_uv.x < lo_bound.x {
+            corrected_uv.x = left_edge.x;
+            upscale_source_resolution = upscale_source_resolution * edge_ratio.x;
+        } else if corrected_uv.x > hi_bound.x {
+            corrected_uv.x = right_edge.x;
+            upscale_source_resolution = upscale_source_resolution * edge_ratio.x;
+        } else {
+            corrected_uv.x = center.x;
+        }
+
+        if corrected_uv.y < lo_bound.y {
+            corrected_uv.y = left_edge.y;
+            upscale_source_resolution = upscale_source_resolution * edge_ratio.y;
+        } else if corrected_uv.y > hi_bound.y {
+            corrected_uv.y = right_edge.y;
+            upscale_source_resolution = upscale_source_resolution * edge_ratio.y;
+        } else {
+            corrected_uv.y = center.y;
+        }
+
+        corrected_uv = corrected_uv * view_size_ratio;
+
+        if pc.view_idx == 1 {
+            corrected_uv.x = 1.0 - corrected_uv.x;
+        }
+    }
+
+    if FFE_RUNTIME {
+        let view_size_ratio = vec2f(VIEW_WIDTH_RATIO, VIEW_HEIGHT_RATIO);
+        let edge_ratio = vec2f(EDGE_X_RATIO, EDGE_Y_RATIO);
+
+        // Derive the de-foveation constants from the per-view center_shift at runtime. Must stay
+        // in lockstep with `alvr_session::foveated_encoding_shader_constants`.
+        let center_size = vec2f(CENTER_SIZE_X, CENTER_SIZE_Y);
+        let center_shift = ffe_rt.center_shift;
+
+        let c0 = (1.0 - center_size) * 0.5;
+        let c1 = (edge_ratio - 1.0) * c0 * (center_shift + 1.0) / edge_ratio;
+        let c2 = (edge_ratio - 1.0) * center_size + 1.0;
+
+        let lo_bound = c0 * (center_shift + 1.0);
+        let hi_bound = c0 * (center_shift - 1.0) + 1.0;
+        let lo_bound_c = c0 * (center_shift + 1.0) / c2;
+        let hi_bound_c = c0 * (center_shift - 1.0) / c2 + 1.0;
+
+        let a_left = c2 * (1.0 - edge_ratio) / (edge_ratio * lo_bound_c);
+        let b_left = (c1 + c2 * lo_bound_c) / lo_bound_c;
+
+        let a_right = c2 * (edge_ratio - 1.0) / (edge_ratio * (1.0 - hi_bound_c));
+        let b_right = (c2 - edge_ratio * c1 - 2.0 * edge_ratio * c2
+            + c2 * edge_ratio * (1.0 - hi_bound_c)
+            + edge_ratio) / (edge_ratio * (1.0 - hi_bound_c));
+        let c_right = (c2 * edge_ratio - c2) * (c1 - hi_bound_c + c2 * hi_bound_c)
+            / (edge_ratio * (1.0 - hi_bound_c) * (1.0 - hi_bound_c));
 
         if pc.view_idx == 1 {
             corrected_uv.x = 1.0 - corrected_uv.x;

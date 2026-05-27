@@ -812,6 +812,8 @@ pub extern "C" fn alvr_render_stream_opengl(
                     },
                 ],
                 None,
+                // Embedded-engine path does not support per-view (eye-tracked) foveation.
+                None,
             );
         }
     });
