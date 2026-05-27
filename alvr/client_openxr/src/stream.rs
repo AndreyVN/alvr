@@ -420,6 +420,11 @@ impl StreamContext {
             openxr_display_time = vsync_time;
         }
 
+        // Per-view (eye-tracked) foveation centre for this frame, resolved by the
+        // `report_compositor_start` above. `None` (today's default — no per-view producer ships
+        // yet) keeps the renderer on its static de-foveation path.
+        let per_view_center_shift = self.core_context.per_view_center_shift();
+
         self.renderer.render(
             buffer_ptr,
             [
@@ -435,9 +440,7 @@ impl StreamContext {
                 },
             ],
             self.config.passthrough.as_ref(),
-            // Per-view foveation not yet plumbed from the wire (Slice B); the runtime FFE pipeline
-            // stays dormant and the static de-foveation path runs.
-            None,
+            per_view_center_shift,
         );
 
         self.swapchains[0].release_image().unwrap();
