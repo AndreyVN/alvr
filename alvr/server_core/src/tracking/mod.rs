@@ -512,6 +512,10 @@ pub fn tracking_loop(
                     Instant::now(),
                 )
             {
+                // Cache for the per-frame video path (`send_video_nal` stamps it into each
+                // `VideoPacketHeader`); the event still drives the OpenXR-mode drain thread.
+                *ctx.latest_per_view_foveation.write() = Some(views);
+
                 ctx.events_sender
                     .send(ServerCoreEvent::PerViewFoveation(views))
                     .ok();

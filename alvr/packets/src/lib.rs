@@ -269,6 +269,16 @@ pub struct VideoPacketHeader {
     pub timestamp: Duration,
     pub global_view_params: [ViewParams; 2],
     pub is_idr: bool,
+    // Phase 7 per-view foveation. The per-frame transport for the params the encoder applied to
+    // THIS frame, so the client can invert the warp per eye. `Some` only when the eye-tracked
+    // per-view switch is enabled (carries the dynamic per-frame centre); `None` keeps the legacy
+    // single-source-of-truth path (foveation travels once via `StreamConfig`/`OpenvrConfig` at
+    // stream init). Unlike the low-rate `RealTimeConfig.per_view_foveation` baseline, this varies
+    // per frame. NOTE: this is a deliberate per-frame wire break — `protocol_id` only gates the
+    // major version, so client and server must be built from the same revision (the existing ALVR
+    // model). Client-side per-view reprojection consumption is a separate slice; today the client
+    // deserializes this but still reprojects symmetrically.
+    pub per_view_foveation: Option<[FoveationView; 2]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -464,5 +474,41 @@ mod tests {
     fn from_settings_omits_per_view_foveation_by_default() {
         let config = RealTimeConfig::from_settings(&SessionConfig::default().to_settings());
         assert!(config.per_view_foveation.is_none());
+    }
+
+    /// The per-frame `VideoPacketHeader.per_view_foveation` field bincode-round-trips
+    /// in both states. This is the deliberate per-frame wire break (option 2 in
+    /// `docs/monado-notes/PER_VIEW_FOVEATION.md`); the only contract worth pinning
+    /// here is that the new field encodes/decodes self-consistently alongside the
+    /// existing header fields.
+    #[test]
+    fn video_packet_header_per_view_foveation_roundtrips() {
+        fn roundtrip(header: &VideoPacketHeader) -> VideoPacketHeader {
+            let bytes = bincode::serde::encode_to_vec(header, config::standard()).unwrap();
+            let (decoded, _) = bincode::serde::decode_from_slice::<VideoPacketHeader, _>(
+                &bytes,
+                config::standard(),
+            )
+            .unwrap();
+            decoded
+        }
+
+        let view = FoveationView {
+            center_size: [0.45, 0.4],
+            center_shift: [0.1, -0.2],
+            edge_ratio: [4.0, 5.0],
+        };
+        for foveation in [None, Some([view, view])] {
+            let header = VideoPacketHeader {
+                timestamp: Duration::from_micros(123_456),
+                global_view_params: [ViewParams::DUMMY; 2],
+                is_idr: true,
+                per_view_foveation: foveation,
+            };
+            let decoded = roundtrip(&header);
+            assert_eq!(decoded.timestamp, header.timestamp);
+            assert_eq!(decoded.is_idr, header.is_idr);
+            assert!(decoded.per_view_foveation == header.per_view_foveation);
+        }
     }
 }
