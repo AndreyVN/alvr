@@ -142,9 +142,7 @@ impl HardwareKind {
             Self::Gpu
         } else if id == "/motherboard" || id.starts_with("/lpc/") {
             Self::Mainboard
-        } else if id.starts_with("/nvme/")
-            || id.starts_with("/hdd/")
-            || id.starts_with("/storage/")
+        } else if id.starts_with("/nvme/") || id.starts_with("/hdd/") || id.starts_with("/storage/")
         {
             Self::Storage
         } else if id.starts_with("/memory/dimm/") {
@@ -178,7 +176,13 @@ fn classify(root: &Node) -> LhmReadings {
     let mut gpu = GpuSensors::default();
     let mut scratch = Scratch::default();
 
-    walk(root, &mut cpu, &mut gpu, &mut scratch, HardwareKind::Unknown);
+    walk(
+        root,
+        &mut cpu,
+        &mut gpu,
+        &mut scratch,
+        HardwareKind::Unknown,
+    );
 
     // AMD Ryzen exposes per-core power but no aggregate "Cores" rail;
     // derive cores_power_w from the per-core readings so the dashboard
@@ -473,8 +477,7 @@ fn apply_cpu_temperature(name_l: &str, value: f32, cpu: &mut CpuSensors) {
     let is_per_core_intel = name_l.contains("core #");
     let is_intel_package = name_l.contains("package");
     let is_amd_chiplet = name_l.contains("ccd");
-    let is_amd_overall =
-        (name_l.contains("tctl") || name_l.contains("tdie")) && !is_amd_chiplet;
+    let is_amd_overall = (name_l.contains("tctl") || name_l.contains("tdie")) && !is_amd_chiplet;
     let is_aggregate =
         name_l.contains("max") || name_l.contains("average") || name_l.contains("avg");
 

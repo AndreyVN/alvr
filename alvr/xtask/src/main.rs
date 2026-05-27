@@ -259,12 +259,8 @@ fn main() {
                 "build-openxr-runtime" => {
                     build_openxr::build_openxr_runtime(profile, enable_alvr_driver)
                 }
-                "register-openxr-runtime" => {
-                    build_openxr::register_openxr_runtime(profile)
-                }
-                "unregister-openxr-runtime" => {
-                    build_openxr::unregister_openxr_runtime(profile)
-                }
+                "register-openxr-runtime" => build_openxr::register_openxr_runtime(profile),
+                "unregister-openxr-runtime" => build_openxr::unregister_openxr_runtime(profile),
                 "run-streamer" => {
                     if !no_rebuild {
                         build::build_streamer(profile, gpl, None, false, profiling, keep_config);

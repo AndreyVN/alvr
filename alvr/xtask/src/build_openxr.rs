@@ -351,7 +351,11 @@ fn deploy_bridge_cdylib(build_dir: &Path, profile: Profile) {
             "warning: {} not found — build the bridge first via `cargo build -p alvr_server_openxr{}`. \
              monado-service.exe will exit with STATUS_DLL_NOT_FOUND until this is resolved.",
             src.display(),
-            if matches!(profile, Profile::Debug) { "" } else { " --release" }
+            if matches!(profile, Profile::Debug) {
+                ""
+            } else {
+                " --release"
+            }
         );
         return;
     }
@@ -543,13 +547,10 @@ fn register_runtime_windows(manifest: &Path) {
 fn unregister_runtime_windows(manifest: &Path) {
     let manifest_str = manifest.to_string_lossy().into_owned();
     let sh = Shell::new().unwrap();
-    let query = cmd!(
-        sh,
-        "reg query {OPENXR_REGISTRY_KEY} /v ActiveRuntime"
-    )
-    .ignore_status()
-    .read()
-    .unwrap_or_default();
+    let query = cmd!(sh, "reg query {OPENXR_REGISTRY_KEY} /v ActiveRuntime")
+        .ignore_status()
+        .read()
+        .unwrap_or_default();
     if !query.contains(&manifest_str) {
         eprintln!(
             "warning: current ActiveRuntime value doesn't reference {manifest_str}; \
@@ -558,12 +559,9 @@ fn unregister_runtime_windows(manifest: &Path) {
         );
         return;
     }
-    cmd!(
-        sh,
-        "reg delete {OPENXR_REGISTRY_KEY} /v ActiveRuntime /f"
-    )
-    .run()
-    .unwrap();
+    cmd!(sh, "reg delete {OPENXR_REGISTRY_KEY} /v ActiveRuntime /f")
+        .run()
+        .unwrap();
     println!("Unregistered ALVR runtime ({OPENXR_REGISTRY_KEY}\\ActiveRuntime cleared).");
 }
 
@@ -583,7 +581,9 @@ fn openxr_unix_config_dir() -> PathBuf {
     } else if let Some(home) = env::var_os("HOME").filter(|s| !s.is_empty()) {
         PathBuf::from(home).join(".config").join("openxr").join("1")
     } else {
-        eprintln!("error: neither $XDG_CONFIG_HOME nor $HOME is set; can't locate OpenXR config dir.");
+        eprintln!(
+            "error: neither $XDG_CONFIG_HOME nor $HOME is set; can't locate OpenXR config dir."
+        );
         process::exit(1);
     }
 }
@@ -596,7 +596,11 @@ fn register_runtime_unix(manifest: &Path) {
     });
     let dst = dir.join("active_runtime.json");
     fs::copy(manifest, &dst).unwrap_or_else(|err| {
-        eprintln!("error: failed to copy {} → {}: {err}", manifest.display(), dst.display());
+        eprintln!(
+            "error: failed to copy {} → {}: {err}",
+            manifest.display(),
+            dst.display()
+        );
         process::exit(1);
     });
     println!(

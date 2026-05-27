@@ -375,7 +375,10 @@ pub fn write_runtime_mode(installation_dir: &Path, variant: &str) -> Result<()> 
     runtime
         .as_object_mut()
         .with_context(|| "runtime field is not an object")?
-        .insert("variant".to_owned(), serde_json::Value::String(variant.to_owned()));
+        .insert(
+            "variant".to_owned(),
+            serde_json::Value::String(variant.to_owned()),
+        );
 
     let serialized = serde_json::to_vec_pretty(&json)?;
     fs::write(&path, serialized)
@@ -506,7 +509,11 @@ mod tests {
     }
 
     fn write_fixture(dir: &Path, value: &serde_json::Value) {
-        fs::write(dir.join("session.json"), serde_json::to_vec_pretty(value).unwrap()).unwrap();
+        fs::write(
+            dir.join("session.json"),
+            serde_json::to_vec_pretty(value).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -544,7 +551,10 @@ mod tests {
     fn read_runtime_mode_openxr() {
         let dir = unique_tempdir("read_openxr");
         write_fixture(&dir, &fixture_session_json(Some(RUNTIME_MODE_OPENXR)));
-        assert_eq!(read_runtime_mode(&dir).as_deref(), Some(RUNTIME_MODE_OPENXR));
+        assert_eq!(
+            read_runtime_mode(&dir).as_deref(),
+            Some(RUNTIME_MODE_OPENXR)
+        );
     }
 
     #[test]
@@ -553,7 +563,10 @@ mod tests {
         write_fixture(&dir, &fixture_session_json(Some(RUNTIME_MODE_STEAMVR)));
 
         write_runtime_mode(&dir, RUNTIME_MODE_OPENXR).unwrap();
-        assert_eq!(read_runtime_mode(&dir).as_deref(), Some(RUNTIME_MODE_OPENXR));
+        assert_eq!(
+            read_runtime_mode(&dir).as_deref(),
+            Some(RUNTIME_MODE_OPENXR)
+        );
 
         write_runtime_mode(&dir, RUNTIME_MODE_STEAMVR).unwrap();
         assert_eq!(

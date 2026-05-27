@@ -269,10 +269,8 @@ fn event_loop(
                     // Translate server_core's per-axis view into the bridge
                     // cache shape (which adds the `is_present` flag for the
                     // encoder's "encode at full resolution" fast path).
-                    *FOVEATION.write() = [
-                        per_view_to_bridge(&views[0]),
-                        per_view_to_bridge(&views[1]),
-                    ];
+                    *FOVEATION.write() =
+                        [per_view_to_bridge(&views[0]), per_view_to_bridge(&views[1])];
                 }
                 ServerCoreEvent::Buttons(entries) => {
                     // Route each entry by device_id from BUTTON_INFO.
@@ -281,7 +279,9 @@ fn event_loop(
                     // exposes left/right controller analogues.
                     let mut cache = CONTROLLER_BUTTON_CACHE.lock();
                     for entry in entries {
-                        let Some(info) = BUTTON_INFO.get(&entry.path_id) else { continue };
+                        let Some(info) = BUTTON_INFO.get(&entry.path_id) else {
+                            continue;
+                        };
                         let slot = if info.device_id == *HAND_LEFT_ID {
                             0
                         } else if info.device_id == *HAND_RIGHT_ID {
@@ -1163,13 +1163,13 @@ pub unsafe extern "C" fn alvr_oxr_get_foveation_vars(
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct AlvrOxrLayer {
-    pub layer_type: u32,           // see XRT_LAYER_*
+    pub layer_type: u32, // see XRT_LAYER_*
     pub view_count: u32,
-    pub image_handles: [u64; 2],   // left/right view, native handles
-    pub image_sizes: [u64; 2], // left/right backing allocation size in bytes (v6)
+    pub image_handles: [u64; 2], // left/right view, native handles
+    pub image_sizes: [u64; 2],   // left/right backing allocation size in bytes (v6)
     pub width: u32,
     pub height: u32,
-    pub fov_radians: [f32; 4],     // per view: [left, right, up, down]; primary view only
+    pub fov_radians: [f32; 4], // per view: [left, right, up, down]; primary view only
     pub pose: AlvrOxrPose,
 }
 
@@ -1813,7 +1813,9 @@ pub struct AlvrOxrEvent {
 /// # Safety
 /// `out_event` must be a writable `AlvrOxrEvent`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn alvr_oxr_poll_session_event(out_event: *mut AlvrOxrEvent) -> AlvrOxrResult {
+pub unsafe extern "C" fn alvr_oxr_poll_session_event(
+    out_event: *mut AlvrOxrEvent,
+) -> AlvrOxrResult {
     if out_event.is_null() {
         return AlvrOxrResult::Failed;
     }

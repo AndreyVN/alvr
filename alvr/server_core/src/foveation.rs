@@ -362,14 +362,13 @@ mod tests {
             eyes_social: [None, None],
             face_expressions: None,
         };
-        let out =
-            emitter.maybe_compute(
-                &face,
-                &default_static_config(),
-                &per_view_cfg(10.0),
-                &[ViewParams::DUMMY; 2],
-                Instant::now(),
-            );
+        let out = emitter.maybe_compute(
+            &face,
+            &default_static_config(),
+            &per_view_cfg(10.0),
+            &[ViewParams::DUMMY; 2],
+            Instant::now(),
+        );
         assert!(out.is_none(), "no gaze → no event");
     }
 
@@ -388,7 +387,10 @@ mod tests {
             .expect("combined gaze → event");
         // Both views share the same gaze → identical center_shift.
         assert_eq!(views[0].center_shift, views[1].center_shift);
-        assert!(views[0].center_shift[0] > 0.0, "right gaze → positive shift");
+        assert!(
+            views[0].center_shift[0] > 0.0,
+            "right gaze → positive shift"
+        );
     }
 
     #[test]

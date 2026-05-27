@@ -13,13 +13,13 @@ use alvr_common::{
     parking_lot::{Condvar, Mutex, RwLock},
     wait_rwlock, warn,
 };
+#[cfg(target_os = "android")]
+use alvr_packets::ClientTelemetry;
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientControlPacket, ClientStatistics, ConnectionAcceptedInfo,
     HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
     VIDEO, VideoPacketHeader, VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
 };
-#[cfg(target_os = "android")]
-use alvr_packets::ClientTelemetry;
 use alvr_session::{SocketProtocol, settings_schema::Switch};
 use alvr_sockets::{
     ControlSocketSender, KEEPALIVE_INTERVAL, KEEPALIVE_TIMEOUT, PeerType, ProtoControlSocket,
@@ -480,10 +480,7 @@ fn connection_pipeline(
                             gpu_busy_pct,
                             gpu_freq_hz,
                         };
-                        (
-                            alvr_system_info::get_controller_battery_status(),
-                            telemetry,
-                        )
+                        (alvr_system_info::get_controller_battery_status(), telemetry)
                     });
 
                     if let Some(sender) = &mut *ctx.control_sender.lock() {
@@ -511,9 +508,7 @@ fn connection_pipeline(
                                     .ok();
                             }
 
-                            sender
-                                .send(&ClientControlPacket::Telemetry(telemetry))
-                                .ok();
+                            sender.send(&ClientControlPacket::Telemetry(telemetry)).ok();
                         }
                     }
 

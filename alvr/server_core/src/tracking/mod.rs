@@ -17,8 +17,7 @@ use alvr_common::{
     AngleSlidingWindowAverage, ConnectionError, DEVICE_ID_TO_PATH, DeviceMotion, Pose,
     SlidingWindowAverage, ViewParams,
     glam::{Quat, Vec2, Vec3},
-    info,
-    inputs as inp,
+    info, inputs as inp,
     parking_lot::Mutex,
 };
 use alvr_events::{EventType, TrackingEvent};
@@ -314,8 +313,7 @@ impl TrackingManager {
             HandType::Right => 1usize,
         };
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-        static HAND_REPORT_COUNTER: [AtomicU32; 2] =
-            [AtomicU32::new(0), AtomicU32::new(0)];
+        static HAND_REPORT_COUNTER: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
         let n = HAND_REPORT_COUNTER[side_idx].fetch_add(1, AtomicOrdering::Relaxed);
         if n < 3 || n.is_multiple_of(120) {
             info!(

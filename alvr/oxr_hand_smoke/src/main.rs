@@ -7,13 +7,19 @@ use std::{
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("=== oxr_hand_smoke ===");
-    println!("XR_RUNTIME_JSON = {:?}", std::env::var("XR_RUNTIME_JSON").ok());
+    println!(
+        "XR_RUNTIME_JSON = {:?}",
+        std::env::var("XR_RUNTIME_JSON").ok()
+    );
 
     let entry = unsafe { xr::Entry::load()? };
 
     let available = entry.enumerate_extensions()?;
     println!("XR_MND_headless available    = {}", available.mnd_headless);
-    println!("XR_EXT_hand_tracking available = {}", available.ext_hand_tracking);
+    println!(
+        "XR_EXT_hand_tracking available = {}",
+        available.ext_hand_tracking
+    );
     if !available.mnd_headless || !available.ext_hand_tracking {
         return Err("required extension missing".into());
     }
@@ -99,11 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // binding, so we're testing Monado's view-location path in isolation.
     println!("Probing xrLocateViews (PRIMARY_STEREO)...");
     let probe_now = instance.now()?;
-    match session.locate_views(
-        xr::ViewConfigurationType::PRIMARY_STEREO,
-        probe_now,
-        &stage,
-    ) {
+    match session.locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, probe_now, &stage) {
         Ok((flags, views)) => {
             println!(
                 "  locate_views OK: flags=0x{:x} view_count={}",

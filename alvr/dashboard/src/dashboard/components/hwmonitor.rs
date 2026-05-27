@@ -73,10 +73,9 @@ impl HwmonitorTab {
         if snap.cpu.is_none() {
             hints.push("CPU: sysinfo not initialised yet");
         }
-        let lhm_missing = snap
-            .cpu
-            .as_ref()
-            .is_some_and(|c| c.package_temp_c.is_none() && c.package_power_w.is_none() && c.fans_rpm.is_empty());
+        let lhm_missing = snap.cpu.as_ref().is_some_and(|c| {
+            c.package_temp_c.is_none() && c.package_power_w.is_none() && c.fans_rpm.is_empty()
+        });
         if lhm_missing {
             hints.push(
                 "LibreHardwareMonitor not detected — temps, fan RPM and CPU power will be blank. \
@@ -101,31 +100,37 @@ impl HwmonitorTab {
                     ui.label("No data");
                     return;
                 };
-                Grid::new("hw_cpu").num_columns(2).striped(true).show(ui, |ui| {
-                    row(ui, "Total load", &format!("{:.1} %", cpu.total_pct));
-                    row(ui, "vrserver load", &opt_pct(cpu.vrserver_pct));
-                    row(ui, "Frequency", &format!("{} MHz", cpu.freq_mhz));
-                    row(ui, "Package temp", &opt_temp(cpu.package_temp_c));
-                    row(ui, "Package power", &opt_watts(cpu.package_power_w));
-                    row(ui, "Cores power", &opt_watts(cpu.cores_power_w));
-                });
+                Grid::new("hw_cpu")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        row(ui, "Total load", &format!("{:.1} %", cpu.total_pct));
+                        row(ui, "vrserver load", &opt_pct(cpu.vrserver_pct));
+                        row(ui, "Frequency", &format!("{} MHz", cpu.freq_mhz));
+                        row(ui, "Package temp", &opt_temp(cpu.package_temp_c));
+                        row(ui, "Package power", &opt_watts(cpu.package_power_w));
+                        row(ui, "Cores power", &opt_watts(cpu.cores_power_w));
+                    });
 
                 if !cpu.per_core_pct.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new("Per-core load").strong());
-                    Grid::new("hw_cpu_cores").num_columns(4).striped(true).show(ui, |ui| {
-                        for (idx, load) in cpu.per_core_pct.iter().enumerate() {
-                            let temp = cpu.per_core_temp_c.get(idx).copied();
-                            let label = match temp {
-                                Some(t) => format!("Core {idx}: {load:.0}% @ {t:.0} °C"),
-                                None => format!("Core {idx}: {load:.0}%"),
-                            };
-                            ui.label(label);
-                            if idx % 4 == 3 {
-                                ui.end_row();
+                    Grid::new("hw_cpu_cores")
+                        .num_columns(4)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (idx, load) in cpu.per_core_pct.iter().enumerate() {
+                                let temp = cpu.per_core_temp_c.get(idx).copied();
+                                let label = match temp {
+                                    Some(t) => format!("Core {idx}: {load:.0}% @ {t:.0} °C"),
+                                    None => format!("Core {idx}: {load:.0}%"),
+                                };
+                                ui.label(label);
+                                if idx % 4 == 3 {
+                                    ui.end_row();
+                                }
                             }
-                        }
-                    });
+                        });
                 }
 
                 if !cpu.per_core_power_w.is_empty() {
@@ -147,9 +152,12 @@ impl HwmonitorTab {
                 if !cpu.fans_rpm.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new("Fans").strong());
-                    Grid::new("hw_cpu_fans").num_columns(2).striped(true).show(ui, |ui| {
-                        named_rows(ui, &cpu.fans_rpm, |rpm| format!("{rpm} RPM"));
-                    });
+                    Grid::new("hw_cpu_fans")
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            named_rows(ui, &cpu.fans_rpm, |rpm| format!("{rpm} RPM"));
+                        });
                 }
             });
     }
@@ -162,48 +170,54 @@ impl HwmonitorTab {
                     ui.label("No data");
                     return;
                 };
-                Grid::new("hw_gpu").num_columns(2).striped(true).show(ui, |ui| {
-                    row(ui, "Name", gpu.name.as_deref().unwrap_or("—"));
-                    row(ui, "Utilization", &opt_pct(gpu.util_pct));
-                    row(ui, "Encoder (NVENC)", &opt_pct(gpu.encoder_util_pct));
-                    row(ui, "Decoder (NVDEC)", &opt_pct(gpu.decoder_util_pct));
-                    row(
-                        ui,
-                        "VRAM",
-                        &format!(
-                            "{} / {} MB",
-                            opt_int(gpu.mem_used_mb),
-                            opt_int(gpu.mem_total_mb),
-                        ),
-                    );
-                    row(ui, "Temperature", &opt_temp(gpu.temp_c));
-                    row(
-                        ui,
-                        "Power",
-                        &format!(
-                            "{} / {}",
-                            opt_watts(gpu.power_w),
-                            opt_watts(gpu.power_limit_w),
-                        ),
-                    );
-                    row(ui, "Clock graphics", &opt_mhz(gpu.clock_graphics_mhz));
-                    row(ui, "Clock memory", &opt_mhz(gpu.clock_memory_mhz));
-                    row(ui, "Clock video (NVENC)", &opt_mhz(gpu.clock_video_mhz));
-                    row(ui, "P-state", gpu.pstate.as_deref().unwrap_or("—"));
-                    row(
-                        ui,
-                        "Throttle reasons",
-                        gpu.throttle_reasons.as_deref().unwrap_or("—"),
-                    );
-                    row(ui, "Fan duty", &opt_pct(gpu.fan_pct));
-                });
+                Grid::new("hw_gpu")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        row(ui, "Name", gpu.name.as_deref().unwrap_or("—"));
+                        row(ui, "Utilization", &opt_pct(gpu.util_pct));
+                        row(ui, "Encoder (NVENC)", &opt_pct(gpu.encoder_util_pct));
+                        row(ui, "Decoder (NVDEC)", &opt_pct(gpu.decoder_util_pct));
+                        row(
+                            ui,
+                            "VRAM",
+                            &format!(
+                                "{} / {} MB",
+                                opt_int(gpu.mem_used_mb),
+                                opt_int(gpu.mem_total_mb),
+                            ),
+                        );
+                        row(ui, "Temperature", &opt_temp(gpu.temp_c));
+                        row(
+                            ui,
+                            "Power",
+                            &format!(
+                                "{} / {}",
+                                opt_watts(gpu.power_w),
+                                opt_watts(gpu.power_limit_w),
+                            ),
+                        );
+                        row(ui, "Clock graphics", &opt_mhz(gpu.clock_graphics_mhz));
+                        row(ui, "Clock memory", &opt_mhz(gpu.clock_memory_mhz));
+                        row(ui, "Clock video (NVENC)", &opt_mhz(gpu.clock_video_mhz));
+                        row(ui, "P-state", gpu.pstate.as_deref().unwrap_or("—"));
+                        row(
+                            ui,
+                            "Throttle reasons",
+                            gpu.throttle_reasons.as_deref().unwrap_or("—"),
+                        );
+                        row(ui, "Fan duty", &opt_pct(gpu.fan_pct));
+                    });
 
                 if !gpu.fans_rpm.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new("Fans").strong());
-                    Grid::new("hw_gpu_fans").num_columns(2).striped(true).show(ui, |ui| {
-                        named_rows(ui, &gpu.fans_rpm, |rpm| format!("{rpm} RPM"));
-                    });
+                    Grid::new("hw_gpu_fans")
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            named_rows(ui, &gpu.fans_rpm, |rpm| format!("{rpm} RPM"));
+                        });
                 }
             });
     }
@@ -216,29 +230,32 @@ impl HwmonitorTab {
                     ui.label("No data");
                     return;
                 };
-                Grid::new("hw_mem").num_columns(2).striped(true).show(ui, |ui| {
-                    row(
-                        ui,
-                        "RAM",
-                        &format!(
-                            "{} / {} MB ({:.1} %)",
-                            mem.used_mb, mem.total_mb, mem.used_pct,
-                        ),
-                    );
-                    row(ui, "Available", &format!("{} MB", mem.available_mb));
-                    row(
-                        ui,
-                        "Swap / page file",
-                        &format!("{} / {} MB", mem.swap_used_mb, mem.swap_total_mb),
-                    );
-                    row(
-                        ui,
-                        "vrserver working set",
-                        &mem.vrserver_working_set_mb
-                            .map(|v| format!("{v} MB"))
-                            .unwrap_or_else(|| "—".to_string()),
-                    );
-                });
+                Grid::new("hw_mem")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        row(
+                            ui,
+                            "RAM",
+                            &format!(
+                                "{} / {} MB ({:.1} %)",
+                                mem.used_mb, mem.total_mb, mem.used_pct,
+                            ),
+                        );
+                        row(ui, "Available", &format!("{} MB", mem.available_mb));
+                        row(
+                            ui,
+                            "Swap / page file",
+                            &format!("{} / {} MB", mem.swap_used_mb, mem.swap_total_mb),
+                        );
+                        row(
+                            ui,
+                            "vrserver working set",
+                            &mem.vrserver_working_set_mb
+                                .map(|v| format!("{v} MB"))
+                                .unwrap_or_else(|| "—".to_string()),
+                        );
+                    });
 
                 if !mem.dimms.is_empty() {
                     ui.add_space(6.0);
@@ -368,19 +385,23 @@ fn named_rows<T: Copy>(ui: &mut Ui, items: &[NamedValue<T>], fmt: impl Fn(T) -> 
 }
 
 fn opt_pct(v: Option<f32>) -> String {
-    v.map(|x| format!("{x:.1} %")).unwrap_or_else(|| "—".to_string())
+    v.map(|x| format!("{x:.1} %"))
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn opt_temp(v: Option<f32>) -> String {
-    v.map(|x| format!("{x:.1} °C")).unwrap_or_else(|| "—".to_string())
+    v.map(|x| format!("{x:.1} °C"))
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn opt_watts(v: Option<f32>) -> String {
-    v.map(|x| format!("{x:.1} W")).unwrap_or_else(|| "—".to_string())
+    v.map(|x| format!("{x:.1} W"))
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn opt_mhz(v: Option<u32>) -> String {
-    v.map(|x| format!("{x} MHz")).unwrap_or_else(|| "—".to_string())
+    v.map(|x| format!("{x} MHz"))
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn opt_int<T: std::fmt::Display>(v: Option<T>) -> String {
