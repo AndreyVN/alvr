@@ -1,5 +1,5 @@
 use crate::dashboard::{ServerRequest, theme::graph_colors};
-use alvr_events::{GraphStatistics, StatisticsSummary};
+use alvr_events::{GraphStatistics, OxrLayerTypesSummary, OxrPacingSummary, StatisticsSummary};
 use alvr_gui_common::theme;
 use eframe::{
     egui::{
@@ -22,6 +22,13 @@ fn draw_lines(painter: &Painter, points: Vec<Pos2>, color: Color32) {
 pub struct StatisticsTab {
     history: VecDeque<GraphStatistics>,
     last_statistics_summary: Option<StatisticsSummary>,
+    /// Latest OpenXR-mode aggregate, fed by `EventType::OxrFrameSummary`. Stays
+    /// `None` until the first such event arrives — which only happens when the
+    /// streamer runs as the Monado OpenXR runtime and the bridge forwards
+    /// compositor pacing / layer-type samples. Either inner field can be `None`
+    /// independently (no pacing this window, or no layer-type sample yet).
+    last_oxr_pacing: Option<OxrPacingSummary>,
+    last_oxr_layer_types: Option<OxrLayerTypesSummary>,
 }
 
 impl StatisticsTab {
@@ -31,6 +38,8 @@ impl StatisticsTab {
                 .into_iter()
                 .collect(),
             last_statistics_summary: None,
+            last_oxr_pacing: None,
+            last_oxr_layer_types: None,
         }
     }
 
@@ -43,6 +52,19 @@ impl StatisticsTab {
         self.history.push_back(statistics);
     }
 
+    pub fn update_oxr_frame_summary(
+        &mut self,
+        pacing: Option<OxrPacingSummary>,
+        layer_types: Option<OxrLayerTypesSummary>,
+    ) {
+        if let Some(p) = pacing {
+            self.last_oxr_pacing = Some(p);
+        }
+        if let Some(lt) = layer_types {
+            self.last_oxr_layer_types = Some(lt);
+        }
+    }
+
     pub fn ui(&self, ui: &mut Ui) -> Option<ServerRequest> {
         if let Some(stats) = &self.last_statistics_summary {
             ScrollArea::new([false, true]).show(ui, |ui| {
@@ -51,6 +73,7 @@ impl StatisticsTab {
                 self.draw_fps_graph(ui, available_width);
                 self.draw_bitrate_graph(ui, available_width);
                 self.draw_statistics_overview(ui, stats);
+                self.draw_oxr_section(ui);
             });
         } else {
             ui.heading(
@@ -476,6 +499,62 @@ impl StatisticsTab {
                     "unplugged"
                 }
             ));
+        });
+    }
+
+    fn draw_oxr_section(&self, ui: &mut Ui) {
+        if self.last_oxr_pacing.is_none() && self.last_oxr_layer_types.is_none() {
+            return;
+        }
+
+        ui.add_space(14.0);
+        ui.label(RichText::new("OpenXR mode (Monado bridge)").size(18.0));
+        ui.label(
+            RichText::new(
+                "Per-window aggregates forwarded from comp_alvr. Only visible while the streamer \
+                 runs as the Monado OpenXR runtime.",
+            )
+            .italics()
+            .weak(),
+        );
+
+        ui.add_space(4.0);
+        ui.columns(2, |ui| {
+            if let Some(p) = &self.last_oxr_pacing {
+                ui[0].label("Compositor frames (last window):");
+                ui[1].label(p.frames.to_string());
+
+                ui[0].label("CPU duration (min / avg / max):");
+                ui[1].label(format!(
+                    "{:.0} / {:.0} / {:.0} µs",
+                    p.cpu_us_min, p.cpu_us_avg, p.cpu_us_max,
+                ));
+
+                ui[0].label("Submit duration (min / avg / max):");
+                ui[1].label(format!(
+                    "{:.0} / {:.0} / {:.0} µs",
+                    p.submit_us_min, p.submit_us_avg, p.submit_us_max,
+                ));
+            } else {
+                ui[0].label("Compositor pacing:");
+                ui[1].label("—");
+            }
+
+            if let Some(lt) = &self.last_oxr_layer_types {
+                ui[0].label("Dropped layers (last window):");
+                ui[1].label(format!(
+                    "quad {} · cyl {} · equi {} · cube {} · pass {} (frames {})",
+                    lt.quad_total,
+                    lt.cylinder_total,
+                    lt.equirect_total,
+                    lt.cube_total,
+                    lt.passthrough_total,
+                    lt.frames,
+                ));
+            } else {
+                ui[0].label("Dropped layers:");
+                ui[1].label("—");
+            }
         });
     }
 }

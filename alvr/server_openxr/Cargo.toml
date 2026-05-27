@@ -1,0 +1,29 @@
+[package]
+name = "alvr_server_openxr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["alvr-org"]
+license = "MIT"
+
+# Mirrors alvr_server_openvr — produces a cdylib that the Monado-side ALVR
+# driver (openxr/src/xrt/drivers/alvr/) links against via a generated C header.
+# This crate is the OpenXR analogue of alvr_server_openvr.
+#
+# At this scaffolding stage all bridge functions return XRT_ERROR_NOT_IMPLEMENTED
+# / log a warning. Wiring them up to alvr_server_core is Phase 3 of
+# openxr-migration.md.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+alvr_common.workspace = true
+alvr_filesystem.workspace = true
+alvr_packets.workspace = true
+alvr_server_core.workspace = true
+alvr_session.workspace = true
+
+[build-dependencies]
+cbindgen = "0.29"
+cc = "1"

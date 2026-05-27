@@ -1,7 +1,7 @@
 //! Top-level sampler: owns one background thread that polls every source on a
 //! fixed cadence and caches the latest `Snapshot` for cheap reads.
 
-use crate::lhm::{LhmSource, DEFAULT_URL as LHM_DEFAULT_URL};
+use crate::lhm::{DEFAULT_URL as LHM_DEFAULT_URL, LhmSource};
 use crate::nvidia_smi::NvidiaSmiSource;
 use crate::sysinfo_source::SysinfoSource;
 use crate::{DimmSample, NamedValue, Snapshot, StorageSample};

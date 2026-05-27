@@ -16,17 +16,14 @@ impl SysinfoSource {
     }
 
     pub fn refresh(&mut self) {
-        self.sys.refresh_cpu_specifics(
-            CpuRefreshKind::nothing().with_cpu_usage().with_frequency(),
-        );
+        self.sys
+            .refresh_cpu_specifics(CpuRefreshKind::nothing().with_cpu_usage().with_frequency());
         self.sys
             .refresh_memory_specifics(MemoryRefreshKind::everything());
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory(),
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
     }
 
@@ -76,7 +73,9 @@ impl SysinfoSource {
     fn find_vrserver(&self) -> Option<&sysinfo::Process> {
         self.sys.processes().values().find(|p| {
             let n = p.name().to_string_lossy();
-            VRSERVER_NAMES.iter().any(|target| n.eq_ignore_ascii_case(target))
+            VRSERVER_NAMES
+                .iter()
+                .any(|target| n.eq_ignore_ascii_case(target))
         })
     }
 

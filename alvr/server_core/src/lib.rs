@@ -1,6 +1,7 @@
 mod bitrate;
 mod c_api;
 mod connection;
+mod foveation;
 mod hand_gestures;
 mod haptics;
 mod hwmonitor_exporter;
@@ -13,6 +14,7 @@ mod tracking;
 mod web_server;
 
 pub use c_api::*;
+pub use foveation::gaze_to_center_shift;
 pub use logging_backend::init_logging;
 pub use tracking::HandType;
 
@@ -72,6 +74,19 @@ pub fn initialize_environment(layout: afs::Layout) {
     SESSION_MANAGER.write().session_mut();
 }
 
+/// Per-view foveation parameters carried over [`ServerCoreEvent::PerViewFoveation`].
+/// Matches the per-axis shape of `alvr_session::FoveatedEncodingConfig` — both
+/// the eye-tracking-driven worker (Slice 5) and a future wire-side
+/// `RealTimeConfig.per_view_foveation` (Slice 4) converge on this shape.
+/// SteamVR mode ignores the event; the OpenXR-mode drain thread translates
+/// it into `alvr_oxr_set_foveation`.
+#[derive(Debug, Clone, Copy)]
+pub struct PerViewFoveationView {
+    pub center_size: [f32; 2],
+    pub center_shift: [f32; 2],
+    pub edge_ratio: [f32; 2],
+}
+
 pub enum ServerCoreEvent {
     SetOpenvrProperty {
         device_id: u64,
@@ -82,6 +97,7 @@ pub enum ServerCoreEvent {
     Battery(BatteryInfo),
     PlayspaceSync(Vec2),
     LocalViewParams([ViewParams; 2]), // In relation to head
+    PerViewFoveation([PerViewFoveationView; 2]), // Phase 7 per-view foveation
     Tracking {
         poll_timestamp: Duration,
     },
@@ -99,6 +115,14 @@ pub struct ConnectionContext {
     statistics_manager: RwLock<Option<StatisticsManager>>,
     bitrate_manager: Mutex<BitrateManager>,
     tracking_manager: RwLock<TrackingManager>,
+    /// Latest per-side view parameters the client reported via
+    /// [`ClientControlPacket::LocalViewParams`]. Mirrors what
+    /// `alvr_server_openxr`'s `LOCAL_VIEW_PARAMS` already caches on the bridge
+    /// side — kept here too so server_core-internal consumers (e.g. the
+    /// per-view foveation emitter in `tracking_loop`) don't need a round-trip
+    /// through `ServerCoreEvent`. Defaults to `[ViewParams::DUMMY; 2]` until
+    /// the client sends its real view config.
+    local_view_params: RwLock<[ViewParams; 2]>,
     decoder_config: Mutex<Option<DecoderInitializationConfig>>,
     video_mirror_sender: Mutex<Option<broadcast::Sender<Vec<u8>>>>,
     video_recording_file: Mutex<Option<File>>,
@@ -156,6 +180,15 @@ pub fn settings() -> Settings {
     SESSION_MANAGER.read().settings().clone()
 }
 
+/// The negotiated stream config (`contruct_openvr_config`), refreshed on each
+/// connection. Carries the per-eye resolution + codec/bitrate/NVENC knobs the
+/// OpenXR-mode encoder (`alvr_server_openxr`) needs to build its NVENC session —
+/// the same source the OpenVR-side C++ `Settings` reads. Only meaningful after a
+/// client has connected; returns `OpenvrConfig::default()` before that.
+pub fn openvr_config() -> alvr_session::OpenvrConfig {
+    SESSION_MANAGER.read().session().openvr_config.clone()
+}
+
 pub fn registered_button_set() -> HashSet<u64> {
     let session_manager = SESSION_MANAGER.read();
     if let Switch::Enabled(input_mapping) = &session_manager.settings().headset.controllers {
@@ -211,6 +244,7 @@ impl ServerCoreContext {
             tracking_manager: RwLock::new(TrackingManager::new(
                 initial_settings.connection.statistics_history_size,
             )),
+            local_view_params: RwLock::new([ViewParams::DUMMY; 2]),
             decoder_config: Mutex::new(None),
             video_mirror_sender: Mutex::new(None),
             video_recording_file: Mutex::new(None),
@@ -515,6 +549,37 @@ impl ServerCoreContext {
             .write()
             .as_mut()
             .map(|stats| stats.duration_until_next_vsync())
+    }
+
+    /// Forward an OpenXR-mode compositor pacing sample into the metrics
+    /// exporter. Called once per frame from the bridge's
+    /// `alvr_oxr_report_pacing` (ABI v2). Read-lock only — `StatisticsManager`'s
+    /// own method here is `&self` because metrics-channel push doesn't touch
+    /// any mutable per-frame state.
+    pub fn report_oxr_pacing(&self, begin_ns: i64, submit_begin_ns: i64, submit_end_ns: i64) {
+        dbg_server_core!("report_oxr_pacing");
+
+        if let Some(stats) = self.connection_context.statistics_manager.read().as_ref() {
+            stats.report_oxr_pacing(begin_ns, submit_begin_ns, submit_end_ns);
+        }
+    }
+
+    /// Forward an OpenXR-mode per-frame layer-type histogram into the metrics
+    /// exporter. Called from the bridge's `alvr_oxr_report_layer_types`
+    /// (ABI v3) — see that function for the count semantics.
+    pub fn report_oxr_layer_types(
+        &self,
+        quad: u32,
+        cylinder: u32,
+        equirect: u32,
+        cube: u32,
+        passthrough: u32,
+    ) {
+        dbg_server_core!("report_oxr_layer_types");
+
+        if let Some(stats) = self.connection_context.statistics_manager.read().as_ref() {
+            stats.report_oxr_layer_types(quad, cylinder, equirect, cube, passthrough);
+        }
     }
 
     pub fn restart(self) {

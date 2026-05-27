@@ -2,3 +2,8 @@
 	path = openvr
 	url = https://github.com/ValveSoftware/openvr.git
 	shallow = true
+
+[submodule "openxr"]
+	path = openxr
+	url = https://github.com/AndreyVN/monado.git
+	branch = alvr

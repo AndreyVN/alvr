@@ -1,4 +1,5 @@
 mod build;
+mod build_openxr;
 mod ci;
 mod command;
 mod dependencies;
@@ -30,6 +31,20 @@ SUBCOMMANDS:
     build-client        Build client, then copy binaries to build folder
     build-client-lib    Build a C-ABI ALVR client library and header
     build-client-xr-lib Build a C-ABI ALVR OpenXR entry point client library and header
+    build-openxr-runtime
+                        Build the Monado-based OpenXR runtime (PC side, new mode).
+                        Does not affect the OpenVR/SteamVR path. Requires the
+                        openxr/ source tree to be present. Pass --enable-alvr-driver
+                        to also build the in-tree ALVR Monado driver.
+    register-openxr-runtime
+                        Register the built Monado-as-ALVR runtime as the per-user
+                        OpenXR active runtime. Windows: HKCU registry value.
+                        Linux: file at $XDG_CONFIG_HOME/openxr/1/active_runtime.json.
+                        System-modifying — affects every OpenXR app for this user
+                        until unregistered or another runtime overwrites it.
+    unregister-openxr-runtime
+                        Reverse of register-openxr-runtime. Refuses to clear if
+                        the currently-registered runtime isn't this profile's.
     run-streamer        Build streamer and then open the dashboard
     run-launcher        Build launcher and then open it
     format              Autoformat all code
@@ -184,6 +199,7 @@ fn main() {
         let keep_config = args.contains("--keep-config");
         let link_stdcpp = !args.contains("--no-stdcpp");
         let all_targets = args.contains("--all-targets");
+        let enable_alvr_driver = args.contains("--enable-alvr-driver");
 
         let platform: Option<String> = args.opt_value_from_str("--platform").unwrap();
         let platform = platform.as_deref().map(|platform| match platform {
@@ -240,6 +256,11 @@ fn main() {
                 "build-client-xr-lib" => {
                     build::build_android_client_openxr_lib(profile, link_stdcpp)
                 }
+                "build-openxr-runtime" => {
+                    build_openxr::build_openxr_runtime(profile, enable_alvr_driver)
+                }
+                "register-openxr-runtime" => build_openxr::register_openxr_runtime(profile),
+                "unregister-openxr-runtime" => build_openxr::unregister_openxr_runtime(profile),
                 "run-streamer" => {
                     if !no_rebuild {
                         build::build_streamer(profile, gpl, None, false, profiling, keep_config);

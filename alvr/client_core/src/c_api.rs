@@ -20,6 +20,7 @@ use alvr_graphics::{
 use alvr_packets::{ButtonEntry, ButtonValue, FaceData, TrackingData};
 use alvr_session::{
     CodecType, FoveatedEncodingConfig, MediacodecPropType, MediacodecProperty, UpscalingConfig,
+    settings_schema::Switch,
 };
 use std::{
     cell::RefCell,
@@ -691,6 +692,11 @@ pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
         center_shift_y: config.foveation_center_shift_y,
         edge_ratio_x: config.foveation_edge_ratio_x,
         edge_ratio_y: config.foveation_edge_ratio_y,
+        // Per-view eye-tracked foveation is OpenXR-mode-server-side only;
+        // the OpenGL embedded-client C ABI doesn't surface it. Leaving it
+        // Disabled here keeps third-party engine integrations on the same
+        // single-FFR path they already use.
+        per_view_eye_tracked: Switch::Disabled,
     });
     let upscaling = config.enable_upscaling.then_some(UpscalingConfig {
         edge_direction: config.upscaling_edge_direction,

@@ -3,11 +3,8 @@
 
 #include "shared/threadtools.h"
 
+#include "D3d11EncoderBackend.h"
 #include "FrameRender.h"
-#include "VideoEncoder.h"
-#include "VideoEncoderAMF.h"
-#include "VideoEncoderNVENC.h"
-#include "VideoEncoderVPL.h"
 #include "alvr_server/Utils.h"
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -15,10 +12,6 @@
 #include <wincodec.h>
 #include <wincodecsdk.h>
 #include <wrl.h>
-#ifdef ALVR_GPL
-#include "VideoEncoderSW.h"
-#endif
-#include "alvr_server/IDRScheduler.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -69,12 +62,10 @@ public:
 
 private:
     CThreadEvent m_newFrameReady, m_encodeFinished;
-    std::shared_ptr<VideoEncoder> m_videoEncoder;
+    std::unique_ptr<D3d11EncoderBackend> m_encoderBackend;
     bool m_bExiting;
     uint64_t m_presentationTime;
     uint64_t m_targetTimestampNs;
 
     std::shared_ptr<FrameRender> m_FrameRender;
-
-    IDRScheduler m_scheduler;
 };

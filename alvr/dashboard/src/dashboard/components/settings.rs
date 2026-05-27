@@ -146,25 +146,25 @@ impl SettingsTab {
 
         // Collect results from the background test threads.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.metrics_test_running {
-            if let Some(text) = self.metrics_test_result.lock().unwrap().take() {
-                self.metrics_dialog_text = Some(text);
-                self.metrics_test_running = false;
-            }
+        if self.metrics_test_running
+            && let Some(text) = self.metrics_test_result.lock().unwrap().take()
+        {
+            self.metrics_dialog_text = Some(text);
+            self.metrics_test_running = false;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.hw_test_running {
-            if let Some(text) = self.hw_test_result.lock().unwrap().take() {
-                self.hw_dialog_text = Some(text);
-                self.hw_test_running = false;
-            }
+        if self.hw_test_running
+            && let Some(text) = self.hw_test_result.lock().unwrap().take()
+        {
+            self.hw_dialog_text = Some(text);
+            self.hw_test_running = false;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.lhm_test_running {
-            if let Some(text) = self.lhm_test_result.lock().unwrap().take() {
-                self.lhm_dialog_text = Some(text);
-                self.lhm_test_running = false;
-            }
+        if self.lhm_test_running
+            && let Some(text) = self.lhm_test_result.lock().unwrap().take()
+        {
+            self.lhm_dialog_text = Some(text);
+            self.lhm_test_running = false;
         }
 
         let now = Instant::now();
@@ -305,9 +305,16 @@ impl SettingsTab {
                             .min_col_width(MIN_COLUMN_SIZE)
                             .show(ui, |ui| {
                                 ui.label("Endpoint URL");
-                                let label = if self.metrics_test_running { "Testing…" } else { "Test" };
+                                let label = if self.metrics_test_running {
+                                    "Testing…"
+                                } else {
+                                    "Test"
+                                };
                                 let enabled = url_opt.is_some() && !self.metrics_test_running;
-                                if ui.add_enabled(enabled, eframe::egui::Button::new(label)).clicked() {
+                                if ui
+                                    .add_enabled(enabled, eframe::egui::Button::new(label))
+                                    .clicked()
+                                {
                                     let url = url_opt.clone().unwrap();
                                     let result_arc = Arc::clone(&self.metrics_test_result);
                                     let ctx = ui.ctx().clone();
@@ -325,11 +332,18 @@ impl SettingsTab {
                                 ui.end_row();
 
                                 ui.label("Hardware endpoint URL");
-                                let hw_label = if self.hw_test_running { "Testing…" } else { "Test" };
+                                let hw_label = if self.hw_test_running {
+                                    "Testing…"
+                                } else {
+                                    "Test"
+                                };
                                 let hw_enabled = hw_url_opt.is_some()
                                     && !hw_url_opt.as_deref().unwrap_or("").is_empty()
                                     && !self.hw_test_running;
-                                if ui.add_enabled(hw_enabled, eframe::egui::Button::new(hw_label)).clicked() {
+                                if ui
+                                    .add_enabled(hw_enabled, eframe::egui::Button::new(hw_label))
+                                    .clicked()
+                                {
                                     let url = hw_url_opt.clone().unwrap();
                                     let result_arc = Arc::clone(&self.hw_test_result);
                                     let ctx = ui.ctx().clone();
@@ -347,11 +361,18 @@ impl SettingsTab {
                                 ui.end_row();
 
                                 ui.label("LibreHardwareMonitor URL");
-                                let lhm_label = if self.lhm_test_running { "Testing…" } else { "Test" };
+                                let lhm_label = if self.lhm_test_running {
+                                    "Testing…"
+                                } else {
+                                    "Test"
+                                };
                                 let lhm_enabled = lhm_url_opt.is_some()
                                     && !lhm_url_opt.as_deref().unwrap_or("").is_empty()
                                     && !self.lhm_test_running;
-                                if ui.add_enabled(lhm_enabled, eframe::egui::Button::new(lhm_label)).clicked() {
+                                if ui
+                                    .add_enabled(lhm_enabled, eframe::egui::Button::new(lhm_label))
+                                    .clicked()
+                                {
                                     let url = lhm_url_opt.clone().unwrap();
                                     let result_arc = Arc::clone(&self.lhm_test_result);
                                     let ctx = ui.ctx().clone();
@@ -363,9 +384,16 @@ impl SettingsTab {
                                         let text = match ureq::get(&url).call() {
                                             Ok(mut resp) => {
                                                 let status = resp.status();
-                                                match resp.body_mut().read_json::<serde_json::Value>() {
-                                                    Ok(_) => format!("✓  HTTP {status}  —  LHM responding"),
-                                                    Err(e) => format!("⚠  HTTP {status}  —  body not JSON: {e}"),
+                                                match resp
+                                                    .body_mut()
+                                                    .read_json::<serde_json::Value>()
+                                                {
+                                                    Ok(_) => format!(
+                                                        "✓  HTTP {status}  —  LHM responding"
+                                                    ),
+                                                    Err(e) => format!(
+                                                        "⚠  HTTP {status}  —  body not JSON: {e}"
+                                                    ),
                                                 }
                                             }
                                             Err(e) => format!("✗  {e}"),

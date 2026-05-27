@@ -169,6 +169,12 @@ impl eframe::App for Dashboard {
                 EventType::StatisticsSummary(statistics) => {
                     self.statistics_tab.update_statistics(statistics)
                 }
+                EventType::OxrFrameSummary {
+                    pacing,
+                    layer_types,
+                } => self
+                    .statistics_tab
+                    .update_oxr_frame_summary(pacing, layer_types),
                 EventType::Session(session) => {
                     let settings = session.to_settings();
 

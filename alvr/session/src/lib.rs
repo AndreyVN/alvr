@@ -647,4 +647,60 @@ mod tests {
         assert_eq!(settings.video.preferred_fps, 60.0);
         assert!(settings.headset.controllers.as_option().is_none());
     }
+
+    /// Pins the additive-by-default contract for the new per-view foveation
+    /// switch added with bridge ABI v5 (see `docs/monado-notes/PER_VIEW_FOVEATION.md`).
+    /// Both halves: a fresh default has the switch Disabled, AND an old
+    /// session.json that pre-dates the field merges in without flipping it on.
+    #[test]
+    fn test_per_view_eye_tracked_defaults_disabled_and_survives_old_session() {
+        // Fresh default: foveated_encoding Enabled, per_view_eye_tracked Disabled.
+        let settings = SessionConfig::default().to_settings();
+        let fov = settings
+            .video
+            .foveated_encoding
+            .as_option()
+            .expect("foveated_encoding defaults Enabled");
+        assert!(
+            fov.per_view_eye_tracked.as_option().is_none(),
+            "per_view_eye_tracked must default to Disabled"
+        );
+
+        // Old session.json predating per_view_eye_tracked — the field is
+        // absent under `content`. After a merge the default Disabled should
+        // be preserved.
+        let old_session_json = r#"{
+            "session_settings": {
+              "video": {
+                "foveated_encoding": {
+                  "enabled": true,
+                  "content": {
+                    "force_enable": false,
+                    "center_size_x": 0.45,
+                    "center_size_y": 0.4,
+                    "center_shift_x": 0.4,
+                    "center_shift_y": 0.1,
+                    "edge_ratio_x": 4.0,
+                    "edge_ratio_y": 5.0
+                  }
+                }
+              }
+            }
+          }"#;
+
+        let mut session = SessionConfig::default();
+        session
+            .merge_from_json(&json::from_str(old_session_json).unwrap())
+            .unwrap();
+        let settings = session.to_settings();
+        let fov = settings
+            .video
+            .foveated_encoding
+            .as_option()
+            .expect("foveated_encoding still Enabled after old-session merge");
+        assert!(
+            fov.per_view_eye_tracked.as_option().is_none(),
+            "per_view_eye_tracked must stay Disabled after merging an old session.json that omits it"
+        );
+    }
 }

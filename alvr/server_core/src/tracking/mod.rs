@@ -9,6 +9,7 @@ pub use vmc::*;
 use crate::{
     ConnectionContext, SESSION_MANAGER, ServerCoreEvent,
     connection::STREAMING_RECV_TIMEOUT,
+    foveation::PerViewFoveationEmitter,
     hand_gestures::{self, HAND_GESTURE_BUTTON_SET, HandGestureManager},
     input_mapping::ButtonMappingManager,
 };
@@ -16,7 +17,7 @@ use alvr_common::{
     AngleSlidingWindowAverage, ConnectionError, DEVICE_ID_TO_PATH, DeviceMotion, Pose,
     SlidingWindowAverage, ViewParams,
     glam::{Quat, Vec2, Vec3},
-    inputs as inp,
+    info, inputs as inp,
     parking_lot::Mutex,
 };
 use alvr_events::{EventType, TrackingEvent};
@@ -31,7 +32,7 @@ use std::{
     collections::{HashMap, VecDeque},
     f32::consts::{FRAC_PI_2, FRAC_PI_4, PI},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const DEG_TO_RAD: f32 = PI / 180.0;
@@ -307,27 +308,52 @@ impl TrackingManager {
         timestamp: Duration,
         mut skeleton: [Pose; 26],
     ) {
+        let side_idx = match hand_type {
+            HandType::Left => 0usize,
+            HandType::Right => 1usize,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        static HAND_REPORT_COUNTER: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+        let n = HAND_REPORT_COUNTER[side_idx].fetch_add(1, AtomicOrdering::Relaxed);
+        if n < 3 || n.is_multiple_of(120) {
+            info!(
+                "report_hand_skeleton: side={hand_type:?} ts={timestamp:?} samples_seen={}",
+                n + 1
+            );
+        }
+
         for pose in &mut skeleton {
             *pose = self.recenter_pose(*pose);
         }
 
-        let skeleton_history = &mut self.hand_skeletons_history[hand_type as usize];
+        let skeleton_history = &mut self.hand_skeletons_history[side_idx];
 
-        skeleton_history.push_back((timestamp, skeleton));
+        skeleton_history.push_front((timestamp, skeleton));
 
         if skeleton_history.len() > self.max_history_size {
-            skeleton_history.pop_front();
+            skeleton_history.pop_back();
         }
     }
 
+    // Returns the most recently received skeleton, ignoring `_sample_timestamp`.
+    //
+    // Quest hand samples are timestamped in the client's predicted-display
+    // clock domain (Quest OpenXR `xrLocateViews` target_time, see
+    // `alvr/client_openxr/src/stream.rs` near "no time sync step is performed").
+    // OpenXR-mode callers on the PC side query with a PC-runtime timestamp
+    // (Monado monotonic ns, ultimately derived from `instance.now()`), so
+    // timestamp-based matching cannot work without an explicit clock sync.
+    // Returning the freshest sample is bounded by the Quest's send cadence
+    // (~10–16 ms) which is well under the perceptual threshold for hand
+    // visualization. The only consumer of this method is
+    // `alvr_oxr_get_hand_skeleton`.
     pub fn get_hand_skeleton(
         &self,
         hand_type: HandType,
-        sample_timestamp: Duration,
+        _sample_timestamp: Duration,
     ) -> Option<&[Pose; 26]> {
         self.hand_skeletons_history[hand_type as usize]
-            .iter()
-            .find(|(timestamp, _)| *timestamp == sample_timestamp)
+            .front()
             .map(|(_, skeleton)| skeleton)
     }
 
@@ -383,6 +409,8 @@ pub fn tracking_loop(
         .vmc
         .into_option()
         .and_then(|config| VMCSink::new(config).ok());
+
+    let mut per_view_foveation_emitter = PerViewFoveationEmitter::new();
 
     while is_streaming() {
         let data = match tracking_receiver.recv(STREAMING_RECV_TIMEOUT) {
@@ -465,6 +493,28 @@ pub fn tracking_loop(
 
             if let Some(sink) = &mut face_tracking_sink {
                 sink.send_tracking(&tracking.face);
+            }
+
+            // Per-view foveation producer: gated on the (nested) session
+            // switch, rate-limited inside the emitter. View params come from
+            // the local cache the connection control thread updates on
+            // ClientControlPacket::LocalViewParams. Sends straight to the
+            // OpenXR-mode drain thread (which forwards to the bridge cache);
+            // SteamVR mode drops the event in its own handler.
+            if let Switch::Enabled(static_config) =
+                &session_manager_lock.settings().video.foveated_encoding
+                && let Switch::Enabled(per_view_config) = &static_config.per_view_eye_tracked
+                && let Some(views) = per_view_foveation_emitter.maybe_compute(
+                    &tracking.face,
+                    static_config,
+                    per_view_config,
+                    &ctx.local_view_params.read(),
+                    Instant::now(),
+                )
+            {
+                ctx.events_sender
+                    .send(ServerCoreEvent::PerViewFoveation(views))
+                    .ok();
             }
 
             if session_manager_lock.settings().extra.logging.log_tracking {

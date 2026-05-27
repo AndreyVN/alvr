@@ -1,6 +1,7 @@
 use alvr_common::{
     ALVR_VERSION, DebugGroupsConfig, DebugGroupsConfigDefault, LogSeverity, LogSeverityDefault,
     LogSeverityDefaultVariant,
+    glam::{self, UVec2, Vec2},
 };
 use alvr_system_info::{ClientFlavor, ClientFlavorDefault, ClientFlavorDefaultVariant};
 use bytemuck::{Pod, Zeroable};
@@ -489,6 +490,195 @@ pub struct FoveatedEncodingConfig {
     #[schema(gui(slider(min = 1.0, max = 10.0, step = 1.0)))]
     #[schema(flag = "steamvr-restart")]
     pub edge_ratio_y: f32,
+
+    #[schema(strings(
+        display_name = "Per-view (eye-tracked) foveation",
+        help = r"When enabled, the OpenXR-mode encoder receives a per-eye foveation centre derived from the headset's eye tracker. SteamVR mode ignores this knob. Requires the headset to expose eye tracking via OpenXR (Quest Pro, Pico Neo 3 Pro Eye, etc.)."
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub per_view_eye_tracked: Switch<PerViewFoveationConfig>,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[schema(collapsible)]
+pub struct PerViewFoveationConfig {
+    #[schema(strings(
+        display_name = "Update rate",
+        help = "How often the server samples the headset's gaze and re-publishes a per-view foveation centre. Low rates (5–10 Hz) match real saccade cadence; per-frame is overkill for a centre that's already low-pass-filtered."
+    ))]
+    #[schema(gui(slider(min = 1.0, max = 60.0, step = 1.0)), suffix = " Hz")]
+    pub update_rate_hz: f32,
+
+    #[schema(strings(
+        display_name = "Maximum offset",
+        help = "How far each view's centre may track from straight-ahead, as a fraction of the view's width/height. 0.25 ≈ ±25% — most natural saccades stay well within."
+    ))]
+    #[schema(gui(slider(min = 0.0, max = 0.5, step = 0.01)))]
+    pub max_offset_normalized: f32,
+
+    #[schema(strings(
+        display_name = "Confidence floor",
+        help = "Eye-tracker confidence below which the centre falls back to the static config values. 0.5 = require ≥50% confidence to honour the eye-tracked centre."
+    ))]
+    #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.05)))]
+    pub confidence_floor: f32,
+}
+
+/// Shared "aligned" foveation intermediates. The compress (server) and
+/// de-foveation (client) constant builders below both derive from these exact
+/// values; if they diverged, the foveated round-trip would warp. Mirrors the
+/// first half of the OpenVR `FFR.cpp::CalculateFoveationVars`.
+struct FoveationAligned {
+    /// 32-aligned foveated (compressed) per-eye resolution. Both the encoder's
+    /// FFR output image and the client's decode swapchain are sized to this.
+    optimized_aligned: UVec2,
+    /// `optimized_unaligned / optimized_aligned` — the `eyeSizeRatio` /
+    /// `VIEW_*_RATIO` the shaders use to map between the two resolutions.
+    view_ratio_aligned: Vec2,
+    center_size_aligned: Vec2,
+    center_shift_aligned: Vec2,
+    edge_ratio: Vec2,
+}
+
+fn foveation_aligned(
+    expanded_view_resolution: UVec2,
+    config: FoveatedEncodingConfig,
+) -> FoveationAligned {
+    let view_resolution = expanded_view_resolution.as_vec2();
+
+    let center_size = glam::vec2(config.center_size_x, config.center_size_y);
+    let center_shift = glam::vec2(config.center_shift_x, config.center_shift_y);
+    let edge_ratio = glam::vec2(config.edge_ratio_x, config.edge_ratio_y);
+
+    let edge_size = view_resolution - center_size * view_resolution;
+    let center_size_aligned =
+        1. - (edge_size / (edge_ratio * 2.)).ceil() * (edge_ratio * 2.) / view_resolution;
+
+    let edge_size_aligned = view_resolution - center_size_aligned * view_resolution;
+    let center_shift_aligned = (center_shift * edge_size_aligned / (edge_ratio * 2.)).ceil()
+        * (edge_ratio * 2.)
+        / edge_size_aligned;
+
+    let foveation_scale = center_size_aligned + (1. - center_size_aligned) / edge_ratio;
+
+    let optimized_view_resolution = foveation_scale * view_resolution;
+
+    let optimized_view_resolution_aligned =
+        optimized_view_resolution.map(|v| (v / 32.).ceil() * 32.);
+
+    let view_ratio_aligned = optimized_view_resolution / optimized_view_resolution_aligned;
+
+    FoveationAligned {
+        optimized_aligned: optimized_view_resolution_aligned.as_uvec2(),
+        view_ratio_aligned,
+        center_size_aligned,
+        center_shift_aligned,
+        edge_ratio,
+    }
+}
+
+/// Compress-side foveation spec constants — the inverse of the de-foveation
+/// driven by [`foveated_encoding_shader_constants`]. These are the eight
+/// specialization constants the encoder's `ffr.comp` compute shader consumes
+/// (`eyeSizeRatio`, `centerSize`, `centerShift`, `edgeRatio`), matching the
+/// OpenVR `FFR.cpp::CalculateFoveationVars`. `optimized_view_resolution` is the
+/// 32-aligned foveated per-eye resolution the encoder must size to; it is the
+/// same value [`foveated_encoding_shader_constants`] returns for the same
+/// inputs (both go through [`foveation_aligned`]), so encode and decode agree.
+pub struct FoveationCompressVars {
+    pub optimized_view_resolution: UVec2,
+    pub eye_size_ratio: [f32; 2],
+    pub center_size: [f32; 2],
+    pub center_shift: [f32; 2],
+    pub edge_ratio: [f32; 2],
+}
+
+pub fn foveation_compress_vars(
+    expanded_view_resolution: UVec2,
+    config: FoveatedEncodingConfig,
+) -> FoveationCompressVars {
+    let aligned = foveation_aligned(expanded_view_resolution, config);
+    FoveationCompressVars {
+        optimized_view_resolution: aligned.optimized_aligned,
+        eye_size_ratio: aligned.view_ratio_aligned.to_array(),
+        center_size: aligned.center_size_aligned.to_array(),
+        center_shift: aligned.center_shift_aligned.to_array(),
+        edge_ratio: aligned.edge_ratio.to_array(),
+    }
+}
+
+/// Canonical foveated-encoding math. Given a full per-eye resolution and a
+/// [`FoveatedEncodingConfig`], returns the 32-aligned *encoded* (compressed)
+/// per-eye resolution plus the shader constants that drive the client's
+/// de-foveation pass.
+///
+/// Lives in `alvr_session` (rather than `alvr_graphics`) so both the wgpu
+/// client renderer and the wgpu-free OpenXR-mode encoder bridge can reach the
+/// shared [`foveation_aligned`] math — the server's compressed image only
+/// de-foveates correctly on the client if both sides agree on the resolution
+/// and ratios computed there.
+pub fn foveated_encoding_shader_constants(
+    expanded_view_resolution: UVec2,
+    config: FoveatedEncodingConfig,
+) -> (UVec2, Vec<(&'static str, f64)>) {
+    let FoveationAligned {
+        optimized_aligned,
+        view_ratio_aligned,
+        center_size_aligned,
+        center_shift_aligned,
+        edge_ratio,
+    } = foveation_aligned(expanded_view_resolution, config);
+
+    let c0 = (1. - center_size_aligned) * 0.5;
+    let c1 = (edge_ratio - 1.) * c0 * (center_shift_aligned + 1.) / edge_ratio;
+    let c2 = (edge_ratio - 1.) * center_size_aligned + 1.;
+
+    let lo_bound = c0 * (center_shift_aligned + 1.);
+    let hi_bound = c0 * (center_shift_aligned - 1.) + 1.;
+    let lo_bound_c = c0 * (center_shift_aligned + 1.) / c2;
+    let hi_bound_c = c0 * (center_shift_aligned - 1.) / c2 + 1.;
+
+    let a_left = c2 * (1. - edge_ratio) / (edge_ratio * lo_bound_c);
+    let b_left = (c1 + c2 * lo_bound_c) / lo_bound_c;
+
+    let a_right = c2 * (edge_ratio - 1.) / (edge_ratio * (1. - hi_bound_c));
+    let b_right = (c2 - edge_ratio * c1 - 2. * edge_ratio * c2
+        + c2 * edge_ratio * (1. - hi_bound_c)
+        + edge_ratio)
+        / (edge_ratio * (1. - hi_bound_c));
+    let c_right = (c2 * edge_ratio - c2) * (c1 - hi_bound_c + c2 * hi_bound_c)
+        / (edge_ratio * (1. - hi_bound_c) * (1. - hi_bound_c));
+
+    let constants = [
+        ("ENABLE_FFE", 1.),
+        ("VIEW_WIDTH_RATIO", view_ratio_aligned.x),
+        ("VIEW_HEIGHT_RATIO", view_ratio_aligned.y),
+        ("EDGE_X_RATIO", edge_ratio.x),
+        ("EDGE_Y_RATIO", edge_ratio.y),
+        ("C1_X", c1.x),
+        ("C1_Y", c1.y),
+        ("C2_X", c2.x),
+        ("C2_Y", c2.y),
+        ("LO_BOUND_X", lo_bound.x),
+        ("LO_BOUND_Y", lo_bound.y),
+        ("HI_BOUND_X", hi_bound.x),
+        ("HI_BOUND_Y", hi_bound.y),
+        ("A_LEFT_X", a_left.x),
+        ("A_LEFT_Y", a_left.y),
+        ("B_LEFT_X", b_left.x),
+        ("B_LEFT_Y", b_left.y),
+        ("A_RIGHT_X", a_right.x),
+        ("A_RIGHT_Y", a_right.y),
+        ("B_RIGHT_X", b_right.x),
+        ("B_RIGHT_Y", b_right.y),
+        ("C_RIGHT_X", c_right.x),
+        ("C_RIGHT_Y", c_right.y),
+    ]
+    .iter()
+    .map(|(k, v)| (*k, *v as f64))
+    .collect();
+
+    (optimized_aligned, constants)
 }
 
 #[repr(C)]
@@ -1552,6 +1742,28 @@ pub struct LoggingConfig {
     pub debug_groups: DebugGroupsConfig,
 }
 
+/// Runtime backend used on the PC side. ALVR can either drive SteamVR via the
+/// legacy OpenVR driver (`alvr_server_openvr`) or the new Monado-based OpenXR
+/// path (`alvr_server_openxr`). The Steamvr variant is the default and matches
+/// historical behaviour; selecting Openxr is currently scaffolding only and
+/// shows a friendly "under development" message until Phase 3 of
+/// openxr-migration.md lands.
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[schema(gui = "button_group")]
+pub enum RuntimeMode {
+    #[schema(strings(
+        display_name = "SteamVR (OpenVR)",
+        help = "Stream to a SteamVR driver. Default — unchanged behaviour."
+    ))]
+    Steamvr,
+    #[schema(strings(
+        display_name = "Monado (OpenXR) — preview",
+        help = "Stream to a Monado-based OpenXR runtime. Scaffolding only; no \
+                frames are encoded yet. Use SteamVR for production."
+    ))]
+    Openxr,
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct SteamvrLauncher {
     #[schema(strings(
@@ -1675,6 +1887,14 @@ pub struct MetricsExportConfig {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct ExtraConfig {
+    #[schema(strings(
+        display_name = "Runtime",
+        help = "Selects the PC-side runtime ALVR streams to. SteamVR is the \
+                default. Monado (OpenXR) is preview-only — see \
+                docs/monado-notes/INTEGRATION_NOTES.md."
+    ))]
+    pub runtime: RuntimeMode,
+
     #[schema(strings(display_name = "SteamVR Launcher"))]
     pub steamvr_launcher: SteamvrLauncher,
     pub capture: CaptureConfig,
@@ -1980,6 +2200,15 @@ pub fn session_settings_default() -> SettingsDefault {
                     center_shift_y: 0.1,
                     edge_ratio_x: 4.,
                     edge_ratio_y: 5.,
+                    per_view_eye_tracked: SwitchDefault {
+                        enabled: false,
+                        content: PerViewFoveationConfigDefault {
+                            gui_collapsed: true,
+                            update_rate_hz: 10.0,
+                            max_offset_normalized: 0.25,
+                            confidence_floor: 0.5,
+                        },
+                    },
                 },
             },
             clientside_foveation: SwitchDefault {
@@ -2309,6 +2538,9 @@ pub fn session_settings_default() -> SettingsDefault {
             statistics_history_size: 256,
         },
         extra: ExtraConfigDefault {
+            runtime: RuntimeModeDefault {
+                variant: RuntimeModeDefaultVariant::Steamvr,
+            },
             logging: LoggingConfigDefault {
                 client_log_report_level: SwitchDefault {
                     enabled: true,
@@ -2398,5 +2630,66 @@ pub fn session_settings_default() -> SettingsDefault {
             },
             extended_headset_telemetry: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod foveation_tests {
+    use super::*;
+
+    fn sample_config() -> FoveatedEncodingConfig {
+        FoveatedEncodingConfig {
+            force_enable: false,
+            center_size_x: 0.45,
+            center_size_y: 0.4,
+            center_shift_x: 0.4,
+            center_shift_y: 0.1,
+            edge_ratio_x: 4.0,
+            edge_ratio_y: 5.0,
+            per_view_eye_tracked: Switch::Disabled,
+        }
+    }
+
+    // The whole point of routing both builders through `foveation_aligned`:
+    // the foveated resolution the encoder sizes to (compress side) must equal
+    // the resolution the client decodes/de-foveates from (decompress side).
+    // If these ever diverge the headset image warps, so pin it.
+    #[test]
+    fn compress_and_decompress_resolutions_agree() {
+        let full = UVec2::new(2144, 2144);
+        let decode_res = foveated_encoding_shader_constants(full, sample_config()).0;
+        let encode_res = foveation_compress_vars(full, sample_config()).optimized_view_resolution;
+        assert_eq!(encode_res, decode_res);
+    }
+
+    #[test]
+    fn compress_resolution_is_32_aligned_and_smaller() {
+        let full = UVec2::new(2144, 2144);
+        let vars = foveation_compress_vars(full, sample_config());
+        assert_eq!(vars.optimized_view_resolution.x % 32, 0);
+        assert_eq!(vars.optimized_view_resolution.y % 32, 0);
+        assert!(vars.optimized_view_resolution.x <= full.x);
+        assert!(vars.optimized_view_resolution.y <= full.y);
+    }
+
+    // `eyeSizeRatio` (compress) and `VIEW_*_RATIO` (decompress) are the same
+    // aligned ratio; `edgeRatio` passes through raw on both sides. Confirm the
+    // two builders expose consistent values.
+    #[test]
+    fn compress_ratios_match_decompress_constants() {
+        let full = UVec2::new(2144, 2144);
+        let vars = foveation_compress_vars(full, sample_config());
+        let constants = foveated_encoding_shader_constants(full, sample_config()).1;
+        let get = |name: &str| {
+            constants
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("missing constant {name}"))
+        };
+        assert!((f64::from(vars.eye_size_ratio[0]) - get("VIEW_WIDTH_RATIO")).abs() < 1e-9);
+        assert!((f64::from(vars.eye_size_ratio[1]) - get("VIEW_HEIGHT_RATIO")).abs() < 1e-9);
+        assert!((f64::from(vars.edge_ratio[0]) - get("EDGE_X_RATIO")).abs() < 1e-9);
+        assert!((f64::from(vars.edge_ratio[1]) - get("EDGE_Y_RATIO")).abs() < 1e-9);
     }
 }

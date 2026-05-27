@@ -1,0 +1,15 @@
+[package]
+name = "alvr_oxr_overlay_smoke"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "oxr_overlay_smoke"
+path = "src/main.rs"
+
+[dependencies]
+ash = "0.38"
+openxr = "0.21"

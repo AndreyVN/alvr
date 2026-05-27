@@ -1,0 +1,740 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: alvr-org <maintainers@alvr-org>
+Date: 2026-05-20 00:00:00 +0000
+Subject: [PATCH] Add ALVR driver + fake compositor + target builder
+
+Phase 2 scaffolding from the ALVR OpenXR-mode integration.
+Source: alvr-org/ALVR (openxr branch, this commit's parent ALVR repo).
+Built against Monado 25.1.0.
+
+Files are wholly additive; nothing in upstream Monado 25.1.0 is touched
+by this patch. The companion edits to drivers/CMakeLists.txt,
+compositor/CMakeLists.txt, targets/common/target_lists.c, and the
+top-level CMakeLists.txt are documented in PHASE2_MANIFEST.md and must
+be added on the fork's alvr branch alongside this patch.
+---
+diff --git a/src/xrt/drivers/alvr/CMakeLists.txt b/src/xrt/drivers/alvr/CMakeLists.txt
+new file mode 100644
+index 00000000..4336eac9
+--- /dev/null
++++ b/src/xrt/drivers/alvr/CMakeLists.txt
+@@ -0,0 +1,52 @@
++# Copyright 2026, alvr-org.
++# SPDX-License-Identifier: BSL-1.0
++
++if(NOT XRT_BUILD_DRIVER_ALVR)
++	return()
++endif()
++
++# Path to alvr_server_openxr's bridge header. Override at configure time via
++# -DALVR_BRIDGE_HEADER_DIR=... when the crate is built somewhere unusual.
++if(NOT DEFINED ALVR_BRIDGE_HEADER_DIR)
++	set(ALVR_BRIDGE_HEADER_DIR "${CMAKE_SOURCE_DIR}/../alvr/server_openxr/include")
++endif()
++
++if(NOT EXISTS "${ALVR_BRIDGE_HEADER_DIR}/alvr_runtime_bridge.h")
++	message(
++		FATAL_ERROR
++		"alvr_runtime_bridge.h not found at ${ALVR_BRIDGE_HEADER_DIR}. "
++		"Build the alvr_server_openxr crate first (cargo build -p alvr_server_openxr) "
++		"or pass -DALVR_BRIDGE_HEADER_DIR=<dir>."
++	)
++endif()
++
++add_library(drv_alvr STATIC
++	alvr_interface.h
++	alvr_internal.h
++	alvr_hub.c
++	alvr_hmd.c
++	alvr_controller.c
++)
++
++target_include_directories(drv_alvr
++	PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
++	PRIVATE ${ALVR_BRIDGE_HEADER_DIR}
++)
++
++target_link_libraries(drv_alvr
++	PRIVATE
++		aux_util
++		aux_math
++		xrt-interfaces
++)
++
++# The cdylib produced by `cargo build -p alvr_server_openxr`. Located at
++# target/{debug,release}/alvr_server_openxr.{dll,so,dylib}. The Monado build is
++# expected to find it via the standard library search path at link / load time.
++target_link_libraries(drv_alvr PRIVATE alvr_server_openxr)
++
++# Search hint for the cdylib if it has not been installed system-wide.
++if(NOT DEFINED ALVR_SERVER_OPENXR_LIB_DIR)
++	set(ALVR_SERVER_OPENXR_LIB_DIR "${CMAKE_SOURCE_DIR}/../target/debug")
++endif()
++target_link_directories(drv_alvr PRIVATE ${ALVR_SERVER_OPENXR_LIB_DIR})
+diff --git a/src/xrt/drivers/alvr/alvr_controller.c b/src/xrt/drivers/alvr/alvr_controller.c
+new file mode 100644
+index 00000000..98cfc7a8
+--- /dev/null
++++ b/src/xrt/drivers/alvr/alvr_controller.c
+@@ -0,0 +1,109 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  xrt_device implementation for ALVR-streamed controllers.
++ * @ingroup drv_alvr
++ *
++ * Scaffolding stage: returns identity poses and ignores haptics. Real input
++ * routing and bindings live in Phase 3 of openxr-migration.md.
++ */
++
++#include "alvr_internal.h"
++
++#include "util/u_device.h"
++#include "util/u_misc.h"
++
++#include <stdio.h>
++#include <string.h>
++
++
++static void
++alvr_controller_destroy(struct xrt_device *xdev)
++{
++	struct alvr_controller *ctrl = (struct alvr_controller *)xdev;
++	ALVR_DEBUG("Destroying ALVR controller (side=%d)", (int)ctrl->side);
++	u_device_free(&ctrl->base);
++}
++
++static xrt_result_t
++alvr_controller_update_inputs(struct xrt_device *xdev)
++{
++	(void)xdev;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++alvr_controller_get_tracked_pose(struct xrt_device *xdev,
++                                 enum xrt_input_name name,
++                                 int64_t at_timestamp_ns,
++                                 struct xrt_space_relation *out_relation)
++{
++	struct alvr_controller *ctrl = (struct alvr_controller *)xdev;
++	(void)name;
++
++	AlvrOxrControllerState state = {0};
++	(void)alvr_oxr_get_controller_state(ctrl->side, at_timestamp_ns, &state);
++
++	out_relation->pose.position.x = state.pose.position[0];
++	out_relation->pose.position.y = state.pose.position[1];
++	out_relation->pose.position.z = state.pose.position[2];
++	out_relation->pose.orientation.x = state.pose.orientation[0];
++	out_relation->pose.orientation.y = state.pose.orientation[1];
++	out_relation->pose.orientation.z = state.pose.orientation[2];
++	out_relation->pose.orientation.w = state.pose.orientation[3];
++	out_relation->relation_flags = XRT_SPACE_RELATION_BITMASK_NONE; // until Phase 3
++
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++alvr_controller_set_output(struct xrt_device *xdev,
++                           enum xrt_output_name name,
++                           const struct xrt_output_value *value)
++{
++	struct alvr_controller *ctrl = (struct alvr_controller *)xdev;
++	(void)name;
++
++	AlvrOxrHaptic params = {
++	    .duration_ns = value->vibration.duration_ns,
++	    .frequency_hz = value->vibration.frequency,
++	    .amplitude = value->vibration.amplitude,
++	};
++	(void)alvr_oxr_set_haptic(ctrl->side, &params);
++	return XRT_SUCCESS;
++}
++
++struct xrt_device *
++alvr_controller_create(AlvrOxrSide side)
++{
++	enum u_device_alloc_flags flags = U_DEVICE_ALLOC_TRACKING_NONE;
++	struct alvr_controller *ctrl = U_DEVICE_ALLOCATE(struct alvr_controller, flags, 1, 1);
++	if (ctrl == NULL) {
++		return NULL;
++	}
++
++	ctrl->side = side;
++	ctrl->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
++	ctrl->base.device_type = (side == ALVR_OXR_SIDE_LEFT)
++	                             ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER
++	                             : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
++	ctrl->base.update_inputs = alvr_controller_update_inputs;
++	ctrl->base.get_tracked_pose = alvr_controller_get_tracked_pose;
++	ctrl->base.set_output = alvr_controller_set_output;
++	ctrl->base.destroy = alvr_controller_destroy;
++
++	ctrl->base.inputs[0].name = XRT_INPUT_TOUCH_GRIP_POSE;
++	ctrl->base.outputs[0].name = XRT_OUTPUT_NAME_TOUCH_HAPTIC;
++
++	const char *suffix = (side == ALVR_OXR_SIDE_LEFT) ? "L" : "R";
++	snprintf(ctrl->base.str, XRT_DEVICE_NAME_LEN, "ALVR Streamed Controller (%s)", suffix);
++	snprintf(ctrl->base.serial, XRT_DEVICE_NAME_LEN, "ALVR-CTRL-%s", suffix);
++
++	alvr_oxr_get_controller_info(side, ctrl->base.serial, XRT_DEVICE_NAME_LEN);
++
++	ctrl->base.supported.orientation_tracking = true;
++	ctrl->base.supported.position_tracking = true;
++
++	return &ctrl->base;
++}
+diff --git a/src/xrt/drivers/alvr/alvr_hmd.c b/src/xrt/drivers/alvr/alvr_hmd.c
+new file mode 100644
+index 00000000..709b64d5
+--- /dev/null
++++ b/src/xrt/drivers/alvr/alvr_hmd.c
+@@ -0,0 +1,120 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  xrt_device implementation for the ALVR-streamed HMD.
++ * @ingroup drv_alvr
++ *
++ * Scaffolding stage: device geometry is hard-coded to a reasonable Quest 2-ish
++ * default; tracking calls return XRT_ERROR_NOT_IMPLEMENTED via the bridge.
++ * Phase 3 of openxr-migration.md fills these in from `alvr_packets`.
++ */
++
++#include "alvr_internal.h"
++
++#include "math/m_api.h"
++#include "math/m_space.h"
++#include "util/u_device.h"
++#include "util/u_misc.h"
++
++#include <stdio.h>
++#include <string.h>
++
++
++static void
++alvr_hmd_destroy(struct xrt_device *xdev)
++{
++	struct alvr_hmd *hmd = (struct alvr_hmd *)xdev;
++	ALVR_DEBUG("Destroying ALVR HMD");
++	u_device_free(&hmd->base);
++}
++
++static xrt_result_t
++alvr_hmd_update_inputs(struct xrt_device *xdev)
++{
++	(void)xdev;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++alvr_hmd_get_tracked_pose(struct xrt_device *xdev,
++                          enum xrt_input_name name,
++                          int64_t at_timestamp_ns,
++                          struct xrt_space_relation *out_relation)
++{
++	(void)xdev;
++	(void)name;
++
++	AlvrOxrPose pose = {0};
++	AlvrOxrResult br = alvr_oxr_get_head_pose(at_timestamp_ns, &pose);
++	if (br != ALVR_OXR_RESULT_OK) {
++		// Fall back to identity so the compositor doesn't crash during scaffolding.
++		U_ZERO(out_relation);
++		out_relation->relation_flags = XRT_SPACE_RELATION_BITMASK_NONE;
++		return XRT_SUCCESS;
++	}
++
++	out_relation->pose.position.x = pose.position[0];
++	out_relation->pose.position.y = pose.position[1];
++	out_relation->pose.position.z = pose.position[2];
++	out_relation->pose.orientation.x = pose.orientation[0];
++	out_relation->pose.orientation.y = pose.orientation[1];
++	out_relation->pose.orientation.z = pose.orientation[2];
++	out_relation->pose.orientation.w = pose.orientation[3];
++	out_relation->relation_flags =
++	    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
++	    XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
++
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++alvr_hmd_get_view_poses(struct xrt_device *xdev,
++                        const struct xrt_vec3 *default_eye_relation,
++                        int64_t at_timestamp_ns,
++                        uint32_t view_count,
++                        struct xrt_space_relation *out_head_relation,
++                        struct xrt_fov *out_fovs,
++                        struct xrt_pose *out_poses)
++{
++	(void)xdev;
++	// Default impl in u_device covers identity views — good enough for scaffolding.
++	u_device_get_view_poses(xdev, default_eye_relation, at_timestamp_ns, view_count,
++	                        out_head_relation, out_fovs, out_poses);
++	return XRT_SUCCESS;
++}
++
++struct xrt_device *
++alvr_hmd_create(void)
++{
++	enum u_device_alloc_flags flags = U_DEVICE_ALLOC_HMD | U_DEVICE_ALLOC_TRACKING_NONE;
++	struct alvr_hmd *hmd = U_DEVICE_ALLOCATE(struct alvr_hmd, flags, 1, 0);
++	if (hmd == NULL) {
++		return NULL;
++	}
++
++	hmd->base.name = XRT_DEVICE_GENERIC_HMD;
++	hmd->base.device_type = XRT_DEVICE_TYPE_HMD;
++	hmd->base.update_inputs = alvr_hmd_update_inputs;
++	hmd->base.get_tracked_pose = alvr_hmd_get_tracked_pose;
++	hmd->base.get_view_poses = alvr_hmd_get_view_poses;
++	hmd->base.destroy = alvr_hmd_destroy;
++
++	hmd->base.inputs[0].name = XRT_INPUT_GENERIC_HEAD_POSE;
++
++	snprintf(hmd->base.str, XRT_DEVICE_NAME_LEN, "ALVR Streamed HMD");
++	snprintf(hmd->base.serial, XRT_DEVICE_NAME_LEN, "ALVR-HMD");
++
++	// Query the bridge for the real serial when available (no-op during scaffolding).
++	alvr_oxr_get_hmd_info(hmd->base.serial, XRT_DEVICE_NAME_LEN);
++
++	// Sensible default geometry (Quest 2-ish). Replaced by stream metadata in Phase 3.
++	struct u_extents_2d extents = {.w_pixels = 2064 * 2, .h_pixels = 2208};
++	u_device_setup_split_side_by_side(&hmd->base, &extents);
++	hmd->base.hmd->screens[0].nominal_frame_interval_ns = (int64_t)(1.0e9 / 72.0);
++
++	hmd->base.supported.orientation_tracking = true;
++	hmd->base.supported.position_tracking = true;
++
++	return &hmd->base;
++}
+diff --git a/src/xrt/drivers/alvr/alvr_hub.c b/src/xrt/drivers/alvr/alvr_hub.c
+new file mode 100644
+index 00000000..df8b5524
+--- /dev/null
++++ b/src/xrt/drivers/alvr/alvr_hub.c
+@@ -0,0 +1,78 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  ALVR driver entry point; creates the streamed HMD + controllers.
++ * @ingroup drv_alvr
++ */
++
++#include "alvr_interface.h"
++#include "alvr_internal.h"
++
++#include "xrt/xrt_device.h"
++#include "xrt/xrt_results.h"
++#include "xrt/xrt_system.h"
++#include "util/u_debug.h"
++#include "util/u_misc.h"
++#include "util/u_system_helpers.h"
++#include "util/u_space_overseer.h"
++
++#include <stdlib.h>
++
++
++DEBUG_GET_ONCE_LOG_OPTION(alvr_log, "ALVR_LOG", U_LOGGING_INFO)
++
++enum u_logging_level
++alvr_log_level(void)
++{
++	return debug_get_log_option_alvr_log();
++}
++
++xrt_result_t
++alvr_create_devices(struct xrt_session_event_sink *broadcast,
++                    struct xrt_system_devices **out_xsysd,
++                    struct xrt_space_overseer **out_xso)
++{
++	ALVR_INFO("Creating ALVR system devices (scaffolding stage; bridge is stubbed)");
++
++	(void)broadcast;
++
++	if (out_xsysd == NULL || out_xso == NULL) {
++		ALVR_ERROR("out_xsysd / out_xso must be non-NULL");
++		return XRT_ERROR_ALLOCATION;
++	}
++
++	AlvrOxrResult init_res = alvr_oxr_init();
++	if (init_res != ALVR_OXR_RESULT_OK) {
++		ALVR_ERROR("alvr_oxr_init failed: %d", (int)init_res);
++		return XRT_ERROR_DEVICE_CREATION_FAILED;
++	}
++
++	struct u_system_devices_static *usysds = u_system_devices_static_allocate();
++	struct xrt_system_devices *xsysd = &usysds->base.base;
++
++	struct xrt_device *hmd = alvr_hmd_create();
++	if (hmd == NULL) {
++		u_system_devices_destroy(&xsysd);
++		alvr_oxr_shutdown();
++		return XRT_ERROR_DEVICE_CREATION_FAILED;
++	}
++	xsysd->xdevs[xsysd->xdev_count++] = hmd;
++	xsysd->static_roles.head = hmd;
++
++	struct xrt_device *left = alvr_controller_create(ALVR_OXR_SIDE_LEFT);
++	struct xrt_device *right = alvr_controller_create(ALVR_OXR_SIDE_RIGHT);
++
++	if (left != NULL) {
++		xsysd->xdevs[xsysd->xdev_count++] = left;
++	}
++	if (right != NULL) {
++		xsysd->xdevs[xsysd->xdev_count++] = right;
++	}
++
++	*out_xsysd = xsysd;
++	*out_xso = u_space_overseer_create(broadcast);
++
++	ALVR_INFO("ALVR driver scaffolding ready (%u devices)", (unsigned)xsysd->xdev_count);
++	return XRT_SUCCESS;
++}
+diff --git a/src/xrt/drivers/alvr/alvr_interface.h b/src/xrt/drivers/alvr/alvr_interface.h
+new file mode 100644
+index 00000000..e971b1c3
+--- /dev/null
++++ b/src/xrt/drivers/alvr/alvr_interface.h
+@@ -0,0 +1,63 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Public interface for the ALVR Monado driver.
++ * @ingroup drv_alvr
++ *
++ * The ALVR driver presents the streamed headset + controllers (received from
++ * the Android client over UDP via `alvr/server_openxr`) as xrt_devices, so
++ * Monado can expose them to any OpenXR app.
++ *
++ * Built only when `XRT_BUILD_DRIVER_ALVR=ON`. At this scaffolding stage all
++ * device callbacks return XRT_ERROR_NOT_IMPLEMENTED — the actual streaming
++ * wiring is Phase 3 of openxr-migration.md.
++ */
++
++#pragma once
++
++#include "xrt/xrt_compiler.h"
++#include "xrt/xrt_defines.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct xrt_session_event_sink;
++struct xrt_system_devices;
++struct xrt_space_overseer;
++
++/*!
++ * @defgroup drv_alvr ALVR streaming driver
++ * @ingroup drv
++ *
++ * Devices exposed by this driver are populated from packets received by the
++ * ALVR PC server (see crate `alvr_server_openxr`). The driver is the symmetric
++ * counterpart of `alvr/server_openvr`, which presents the same stream as a
++ * SteamVR driver.
++ */
++
++/*!
++ * @dir drivers/alvr
++ *
++ * @brief @ref drv_alvr files.
++ */
++
++/*!
++ * Create the ALVR-streamed system: one HMD + left/right controllers.
++ *
++ * @param[in]  broadcast Event sink used for cross-session events (e.g. focus
++ *                       loss when the headset connection drops).
++ * @param[out] out_xsysd System-devices set populated with the streamed devices.
++ * @param[out] out_xso   Space overseer (default u_space_overseer is fine).
++ *
++ * @ingroup drv_alvr
++ */
++xrt_result_t
++alvr_create_devices(struct xrt_session_event_sink *broadcast,
++                    struct xrt_system_devices **out_xsysd,
++                    struct xrt_space_overseer **out_xso);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/xrt/drivers/alvr/alvr_internal.h b/src/xrt/drivers/alvr/alvr_internal.h
+new file mode 100644
+index 00000000..cf0fa3b1
+--- /dev/null
++++ b/src/xrt/drivers/alvr/alvr_internal.h
+@@ -0,0 +1,61 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Internal types shared by the ALVR driver files.
++ * @ingroup drv_alvr
++ */
++
++#pragma once
++
++#include "xrt/xrt_device.h"
++#include "util/u_logging.h"
++
++#include "alvr_runtime_bridge.h" // generated/maintained in alvr/server_openxr/include
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*!
++ * Driver-wide logging level (controlled by env ALVR_LOG, default INFO).
++ */
++enum u_logging_level
++alvr_log_level(void);
++
++#define ALVR_TRACE(...) U_LOG_IFL_T(alvr_log_level(), __VA_ARGS__)
++#define ALVR_DEBUG(...) U_LOG_IFL_D(alvr_log_level(), __VA_ARGS__)
++#define ALVR_INFO(...)  U_LOG_IFL_I(alvr_log_level(), __VA_ARGS__)
++#define ALVR_WARN(...)  U_LOG_IFL_W(alvr_log_level(), __VA_ARGS__)
++#define ALVR_ERROR(...) U_LOG_IFL_E(alvr_log_level(), __VA_ARGS__)
++
++/*!
++ * Concrete xrt_device implementation for the ALVR-streamed HMD.
++ *
++ * @extends xrt_device
++ */
++struct alvr_hmd
++{
++	struct xrt_device base;
++};
++
++/*!
++ * Concrete xrt_device implementation for one ALVR-streamed controller.
++ *
++ * @extends xrt_device
++ */
++struct alvr_controller
++{
++	struct xrt_device base;
++	AlvrOxrSide side;
++};
++
++struct xrt_device *
++alvr_hmd_create(void);
++
++struct xrt_device *
++alvr_controller_create(AlvrOxrSide side);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/xrt/compositor/alvr/CMakeLists.txt b/src/xrt/compositor/alvr/CMakeLists.txt
+new file mode 100644
+index 00000000..27dfed7d
+--- /dev/null
++++ b/src/xrt/compositor/alvr/CMakeLists.txt
+@@ -0,0 +1,21 @@
++# Copyright 2026, alvr-org.
++# SPDX-License-Identifier: BSL-1.0
++
++if(NOT XRT_FEATURE_COMP_ALVR)
++	return()
++endif()
++
++add_library(comp_alvr STATIC
++	comp_alvr.h
++	comp_alvr.c
++)
++
++target_include_directories(comp_alvr
++	PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
++)
++
++target_link_libraries(comp_alvr
++	PRIVATE
++		aux_util
++		xrt-interfaces
++)
+diff --git a/src/xrt/compositor/alvr/comp_alvr.c b/src/xrt/compositor/alvr/comp_alvr.c
+new file mode 100644
+index 00000000..431a125e
+--- /dev/null
++++ b/src/xrt/compositor/alvr/comp_alvr.c
+@@ -0,0 +1,33 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Scaffolding for the ALVR fake compositor.
++ * @ingroup comp_alvr
++ *
++ * Real implementation will extend `comp_base` to inherit xrt_compositor_native
++ * boilerplate (swapchain creation via comp_swapchain, sync helpers, etc.) and
++ * override `layer_commit` to package per-layer data and call
++ * alvr_oxr_submit_layers.
++ *
++ * For Phase 2 we ship a stub that builds and warns. Anything that actually
++ * tries to create a session through this compositor will see ERROR_NOT_IMPL.
++ */
++
++#include "comp_alvr.h"
++
++#include "xrt/xrt_results.h"
++#include "util/u_logging.h"
++
++
++xrt_result_t
++comp_alvr_create_system_compositor(struct xrt_device *xdev, struct xrt_system_compositor **out_xsysc)
++{
++	(void)xdev;
++	(void)out_xsysc;
++
++	U_LOG_W("comp_alvr: scaffolding stub — frame submission is not yet wired up. "
++	        "See Phase 3 of openxr-migration.md.");
++
++	return XRT_ERROR_NOT_IMPLEMENTED;
++}
+diff --git a/src/xrt/compositor/alvr/comp_alvr.h b/src/xrt/compositor/alvr/comp_alvr.h
+new file mode 100644
+index 00000000..97bc2917
+--- /dev/null
++++ b/src/xrt/compositor/alvr/comp_alvr.h
+@@ -0,0 +1,38 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Public interface for the ALVR "fake" compositor.
++ * @ingroup comp_alvr
++ *
++ * Produces an xrt_system_compositor that accepts OpenXR layers and forwards
++ * them to ALVR's encoder through alvr_oxr_submit_layers, instead of presenting
++ * them to a real display.
++ *
++ * Built only when XRT_FEATURE_COMP_ALVR is enabled (default OFF).
++ */
++
++#pragma once
++
++#include "xrt/xrt_compositor.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct xrt_device;
++
++/*!
++ * Create the ALVR system compositor.
++ *
++ * @param[in]  xdev      The head device (ALVR streamed HMD).
++ * @param[out] out_xsysc Created system compositor.
++ *
++ * @ingroup comp_alvr
++ */
++xrt_result_t
++comp_alvr_create_system_compositor(struct xrt_device *xdev, struct xrt_system_compositor **out_xsysc);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/xrt/targets/common/target_builder_alvr.c b/src/xrt/targets/common/target_builder_alvr.c
+new file mode 100644
+index 00000000..41746318
+--- /dev/null
++++ b/src/xrt/targets/common/target_builder_alvr.c
+@@ -0,0 +1,90 @@
++// Copyright 2026, alvr-org.
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Target builder that wires the ALVR driver into Monado's prober.
++ * @ingroup drv_alvr
++ *
++ * Built only when XRT_BUILD_DRIVER_ALVR is on. Inserts itself near the top of
++ * target_builder_list[] (after qwerty / remote) so it overrides hardware drivers
++ * when a stream is being received.
++ */
++
++#include "xrt/xrt_config_drivers.h"
++#include "xrt/xrt_prober.h"
++#include "xrt/xrt_results.h"
++#include "util/u_builders.h"
++#include "util/u_logging.h"
++
++#ifdef XRT_BUILD_DRIVER_ALVR
++#include "alvr/alvr_interface.h"
++#endif
++
++#include "target_builder_interface.h"
++
++
++static const char *driver_list[] = {
++    "alvr",
++};
++
++static xrt_result_t
++alvr_estimate_system(struct xrt_builder *xb,
++                     cJSON *config,
++                     struct xrt_prober *xp,
++                     struct xrt_builder_estimate *estimate)
++{
++	(void)xb;
++	(void)config;
++	(void)xp;
++
++	estimate->certain.head = false;
++	estimate->maybe.head = true;
++	estimate->maybe.left = true;
++	estimate->maybe.right = true;
++
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++alvr_open_system(struct xrt_builder *xb,
++                 cJSON *config,
++                 struct xrt_prober *xp,
++                 struct xrt_session_event_sink *broadcast,
++                 struct xrt_system_devices **out_xsysd,
++                 struct xrt_space_overseer **out_xso)
++{
++	(void)xb;
++	(void)config;
++	(void)xp;
++
++#ifdef XRT_BUILD_DRIVER_ALVR
++	return alvr_create_devices(broadcast, out_xsysd, out_xso);
++#else
++	(void)broadcast;
++	(void)out_xsysd;
++	(void)out_xso;
++	U_LOG_E("target_builder_alvr called but XRT_BUILD_DRIVER_ALVR is off");
++	return XRT_ERROR_DEVICE_CREATION_FAILED;
++#endif
++}
++
++static void
++alvr_destroy(struct xrt_builder *xb)
++{
++	free(xb);
++}
++
++struct xrt_builder *
++t_builder_alvr_create(void)
++{
++	struct xrt_builder *xb = U_TYPED_CALLOC(struct xrt_builder);
++	xb->estimate_system = alvr_estimate_system;
++	xb->open_system = alvr_open_system;
++	xb->destroy = alvr_destroy;
++	xb->identifier = "alvr";
++	xb->name = "ALVR (streamed)";
++	xb->driver_identifiers = driver_list;
++	xb->driver_identifier_count = ARRAY_SIZE(driver_list);
++
++	return xb;
++}

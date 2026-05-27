@@ -142,9 +142,7 @@ impl HardwareKind {
             Self::Gpu
         } else if id == "/motherboard" || id.starts_with("/lpc/") {
             Self::Mainboard
-        } else if id.starts_with("/nvme/")
-            || id.starts_with("/hdd/")
-            || id.starts_with("/storage/")
+        } else if id.starts_with("/nvme/") || id.starts_with("/hdd/") || id.starts_with("/storage/")
         {
             Self::Storage
         } else if id.starts_with("/memory/dimm/") {
@@ -178,7 +176,13 @@ fn classify(root: &Node) -> LhmReadings {
     let mut gpu = GpuSensors::default();
     let mut scratch = Scratch::default();
 
-    walk(root, &mut cpu, &mut gpu, &mut scratch, HardwareKind::Unknown);
+    walk(
+        root,
+        &mut cpu,
+        &mut gpu,
+        &mut scratch,
+        HardwareKind::Unknown,
+    );
 
     // AMD Ryzen exposes per-core power but no aggregate "Cores" rail;
     // derive cores_power_w from the per-core readings so the dashboard
@@ -220,10 +224,8 @@ fn walk(
         HardwareKind::Unknown => kind,
         other => {
             match other {
-                HardwareKind::Gpu => {
-                    if gpu.name.is_none() && !node.text.is_empty() {
-                        gpu.name = Some(node.text.clone());
-                    }
+                HardwareKind::Gpu if gpu.name.is_none() && !node.text.is_empty() => {
+                    gpu.name = Some(node.text.clone());
                 }
                 HardwareKind::Storage => {
                     // Open a new bucket for this device; leaves inside this
@@ -345,11 +347,13 @@ fn apply_leaf(
             }
             _ => {}
         },
-        "Control" if matches!(kind, HardwareKind::Gpu) => {
+        "Control"
+            if matches!(kind, HardwareKind::Gpu)
+                && name_l.contains("fan")
+                && gpu.fan_pct.is_none() =>
+        {
             // GPU fan duty cycle (0–100). LHM exposes this as a Control leaf.
-            if name_l.contains("fan") && gpu.fan_pct.is_none() {
-                gpu.fan_pct = Some(value);
-            }
+            gpu.fan_pct = Some(value);
         }
         "Load" if matches!(kind, HardwareKind::Gpu) => {
             // Primary GPU activity. LHM exposes one "GPU Core" Load sensor
@@ -473,18 +477,23 @@ fn apply_cpu_temperature(name_l: &str, value: f32, cpu: &mut CpuSensors) {
     let is_per_core_intel = name_l.contains("core #");
     let is_intel_package = name_l.contains("package");
     let is_amd_chiplet = name_l.contains("ccd");
-    let is_amd_overall =
-        (name_l.contains("tctl") || name_l.contains("tdie")) && !is_amd_chiplet;
+    let is_amd_overall = (name_l.contains("tctl") || name_l.contains("tdie")) && !is_amd_chiplet;
     let is_aggregate =
         name_l.contains("max") || name_l.contains("average") || name_l.contains("avg");
 
+    // Precedence note: the OR'd branch consumes the value for any of three
+    // mutually-distinguishable sources. The first sub-condition (Intel package
+    // or AMD overall) is the authoritative one and overwrites whatever's
+    // there; the second/third are best-effort fallbacks that only fire if no
+    // authoritative reading has landed yet. Clippy's identical-blocks lint
+    // doesn't model the `cpu.package_temp_c.is_none()` short-circuit, so
+    // collapsing into a single arm reads cleaner anyway.
     if is_per_core_intel {
         cpu.per_core_temp_c.push(value);
-    } else if is_intel_package || is_amd_overall {
-        cpu.package_temp_c = Some(value);
-    } else if is_amd_chiplet && cpu.package_temp_c.is_none() {
-        cpu.package_temp_c = Some(value);
-    } else if !is_aggregate && cpu.package_temp_c.is_none() && name_l.contains("cpu") {
+    } else if (is_intel_package || is_amd_overall)
+        || (is_amd_chiplet && cpu.package_temp_c.is_none())
+        || (!is_aggregate && cpu.package_temp_c.is_none() && name_l.contains("cpu"))
+    {
         cpu.package_temp_c = Some(value);
     }
 }

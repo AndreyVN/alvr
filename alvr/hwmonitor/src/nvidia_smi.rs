@@ -110,23 +110,24 @@ fn parse_line(line: &str) -> Option<GpuSample> {
     if parts.len() < 15 {
         return None;
     }
-    let mut s = GpuSample::default();
-    s.name = parse_string(parts[0]);
-    s.util_pct = parse_f32(parts[1]);
-    s.encoder_util_pct = parse_f32(parts[2]);
-    s.decoder_util_pct = parse_f32(parts[3]);
-    s.mem_used_mb = parse_u32(parts[4]);
-    s.mem_total_mb = parse_u32(parts[5]);
-    s.temp_c = parse_f32(parts[6]);
-    s.power_w = parse_f32(parts[7]);
-    s.power_limit_w = parse_f32(parts[8]);
-    s.clock_graphics_mhz = parse_u32(parts[9]);
-    s.clock_memory_mhz = parse_u32(parts[10]);
-    s.clock_video_mhz = parse_u32(parts[11]);
-    s.throttle_reasons = parse_throttle_mask(parts[12]);
-    s.pstate = parse_string(parts[13]);
-    s.fan_pct = parse_f32(parts[14]);
-    Some(s)
+    Some(GpuSample {
+        name: parse_string(parts[0]),
+        util_pct: parse_f32(parts[1]),
+        encoder_util_pct: parse_f32(parts[2]),
+        decoder_util_pct: parse_f32(parts[3]),
+        mem_used_mb: parse_u32(parts[4]),
+        mem_total_mb: parse_u32(parts[5]),
+        temp_c: parse_f32(parts[6]),
+        power_w: parse_f32(parts[7]),
+        power_limit_w: parse_f32(parts[8]),
+        clock_graphics_mhz: parse_u32(parts[9]),
+        clock_memory_mhz: parse_u32(parts[10]),
+        clock_video_mhz: parse_u32(parts[11]),
+        throttle_reasons: parse_throttle_mask(parts[12]),
+        pstate: parse_string(parts[13]),
+        fan_pct: parse_f32(parts[14]),
+        ..Default::default()
+    })
 }
 
 fn parse_string(s: &str) -> Option<String> {

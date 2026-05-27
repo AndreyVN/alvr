@@ -24,7 +24,12 @@ enum PopupType {
     #[default]
     None,
     DeleteInstallation(String),
-    EditVersion(String),
+    EditVersion {
+        version: String,
+        // Schema variant currently shown in the runtime ComboBox. `None` when
+        // session.json is missing or doesn't expose the field (older versions).
+        runtime_selection: Option<String>,
+    },
     AddVersion {
         version_selection: Version,
         session_version_selection: Option<String>,
@@ -220,13 +225,44 @@ impl Launcher {
         }
     }
 
-    fn edit_popup(&self, ctx: &Context, version: String) -> PopupType {
+    fn edit_popup(
+        &mut self,
+        ctx: &Context,
+        version: String,
+        mut runtime_selection: Option<String>,
+    ) -> PopupType {
         let mut delete_version = false;
+        let runtime_selection_in = runtime_selection.clone();
+
         let response = alvr_gui_common::modal(
             ctx,
             "Edit version",
             Some(|ui: &mut Ui| {
                 ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
+                    // Runtime selector — only when the installation actually
+                    // exposes the field. Older versions pre-dating RuntimeMode
+                    // return `None`; in that case we hide the selector rather
+                    // than synthesising a default (the dashboard is still the
+                    // canonical place to bring an older session up to date).
+                    if let Some(current) = runtime_selection.as_mut() {
+                        ui.horizontal(|ui| {
+                            ui.label("Runtime:");
+                            ComboBox::from_id_salt("runtime_mode")
+                                .selected_text(runtime_label(current))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        current,
+                                        actions::RUNTIME_MODE_STEAMVR.into(),
+                                        runtime_label(actions::RUNTIME_MODE_STEAMVR),
+                                    );
+                                    ui.selectable_value(
+                                        current,
+                                        actions::RUNTIME_MODE_OPENXR.into(),
+                                        runtime_label(actions::RUNTIME_MODE_OPENXR),
+                                    );
+                                });
+                        });
+                    }
                     delete_version = ui.button("Delete version").clicked();
                 });
             }),
@@ -234,12 +270,31 @@ impl Launcher {
             None,
         );
 
+        // Detect a real change versus the in-value, then persist.
+        if runtime_selection != runtime_selection_in
+            && let Some(new_variant) = runtime_selection.as_deref()
+        {
+            let installation_dir = actions::installations_dir().join(&version);
+            match actions::write_runtime_mode(&installation_dir, new_variant) {
+                Ok(()) => {
+                    // Re-fetch so the per-installation badge picks up the new value.
+                    self.installations = actions::get_installations();
+                }
+                Err(e) => {
+                    self.state = State::Error(format!("Failed to save runtime mode: {e}"));
+                }
+            }
+        }
+
         if delete_version {
             PopupType::DeleteInstallation(version)
         } else if matches!(response, Some(ModalButton::Close)) {
             PopupType::None
         } else {
-            PopupType::EditVersion(version)
+            PopupType::EditVersion {
+                version,
+                runtime_selection,
+            }
         }
     }
 
@@ -275,6 +330,17 @@ impl Launcher {
             }
             _ => PopupType::DeleteInstallation(version),
         }
+    }
+}
+
+/// Human-friendly label for a schema variant. Falls back to the raw variant
+/// for forward-compat with values the launcher doesn't yet know about
+/// (e.g. a future "OpenXR (Linux)" added on the server side).
+fn runtime_label(variant: &str) -> &str {
+    match variant {
+        v if v == actions::RUNTIME_MODE_STEAMVR => "SteamVR (OpenVR)",
+        v if v == actions::RUNTIME_MODE_OPENXR => "Monado (OpenXR) — preview",
+        other => other,
     }
 }
 
@@ -314,12 +380,26 @@ impl eframe::App for Launcher {
                                 Grid::new(&installation.version)
                                     .num_columns(2)
                                     .show(ui, |ui| {
-                                        ui.label(&installation.version);
+                                        ui.horizontal(|ui| {
+                                            ui.label(&installation.version);
+                                            if let Some(variant) = &installation.runtime_mode {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "[{}]",
+                                                        runtime_label(variant)
+                                                    ))
+                                                    .weak(),
+                                                );
+                                            }
+                                        });
                                         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                                             if ui.button("Edit").clicked() {
-                                                self.popup = PopupType::EditVersion(
-                                                    installation.version.clone(),
-                                                );
+                                                self.popup = PopupType::EditVersion {
+                                                    version: installation.version.clone(),
+                                                    runtime_selection: installation
+                                                        .runtime_mode
+                                                        .clone(),
+                                                };
                                             }
 
                                             if ui.button("Open directory").clicked() {
@@ -401,7 +481,10 @@ impl eframe::App for Launcher {
                             version_selection,
                             session_version_selection,
                         } => self.version_popup(ui, version_selection, session_version_selection),
-                        PopupType::EditVersion(version) => self.edit_popup(ui, version),
+                        PopupType::EditVersion {
+                            version,
+                            runtime_selection,
+                        } => self.edit_popup(ui, version, runtime_selection),
                         PopupType::DeleteInstallation(version) => self.delete_popup(ui, version),
                         PopupType::None => PopupType::None,
                     };
