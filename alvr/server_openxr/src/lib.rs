@@ -311,6 +311,13 @@ fn event_loop(
                     LATEST_POLL_TIMESTAMP_NS
                         .store(poll_timestamp.as_nanos() as u64, Ordering::Relaxed);
                 }
+                ServerCoreEvent::RequestIDR => {
+                    // The client (or server_core) needs a keyframe; force the
+                    // next encoded frame to be an IDR. Mirrors the OpenVR driver's
+                    // `RequestIDR()`. Without this the client never recovers a
+                    // reference frame and decodes nothing. See encoder_bridge::insert_idr.
+                    encoder_bridge::insert_idr();
+                }
                 // Other events are drained but not yet routed.
                 //   - SetOpenvrProperty:  irrelevant in OpenXR mode.
                 //   - RefreshRate:        no upstream ServerCoreEvent variant
@@ -1246,6 +1253,7 @@ mod encoder_bridge {
         fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
         fn alvr_vk_encoder_destroy(handle: *mut c_void);
         fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
+        fn alvr_vk_encoder_insert_idr(handle: *mut c_void);
         fn alvr_vk_encoder_get_seq_params(handle: *mut c_void, out_buf: *mut u8, cap: i32) -> i32;
         fn alvr_vk_encoder_submit(
             handle: *mut c_void,
@@ -1535,6 +1543,19 @@ mod encoder_bridge {
         }
     }
 
+    // Force the next encoded frame to be an IDR. Driven by
+    // `ServerCoreEvent::RequestIDR` — the client asks for a keyframe whenever it
+    // has no valid reference (initial connect, packet loss). Without this the
+    // client only ever receives P-frames after the one IDR at stream start, so
+    // if its decoder wasn't ready for that IDR it never gets another → the
+    // Qualcomm decoder rejects every P-frame ("Unsupported input buffer") → black.
+    pub fn insert_idr() {
+        if let Some(handle) = ENCODER.lock().as_ref() {
+            // # Safety: handle came from create and is valid for the lock's hold.
+            unsafe { alvr_vk_encoder_insert_idr(handle.0) };
+        }
+    }
+
     pub fn submit(layer: &AlvrOxrLayer, sync_handle: u64, monado_display_time_ns: u64) -> bool {
         let guard = ENCODER.lock();
         let Some(handle) = guard.as_ref() else {
@@ -1677,6 +1698,7 @@ mod encoder_bridge {
 
     pub fn start() {}
     pub fn stop() {}
+    pub fn insert_idr() {}
     pub fn submit(_layer: &AlvrOxrLayer, _sync_handle: u64, _target_timestamp_ns: u64) -> bool {
         false
     }
