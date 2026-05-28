@@ -1162,7 +1162,9 @@ fn connection_pipeline(
         move || {
             while is_streaming(&client_hostname) {
                 if let Err(e) = control_sender.lock().send(&ServerControlPacket::KeepAlive) {
-                    info!("Client disconnected. Cause: {e:?}");
+                    info!(
+                        "Client disconnected [keepalive_thread: KeepAlive send failed]. Cause: {e:?}"
+                    );
 
                     disconnect_notif.notify_one();
 
@@ -1209,14 +1211,18 @@ fn connection_pipeline(
                     Ok(packet) => packet,
                     Err(ConnectionError::TryAgain(_)) => {
                         if Instant::now() > disconnection_deadline {
-                            info!("Client disconnected. Timeout");
+                            info!(
+                                "Client disconnected [control_receive_thread: KEEPALIVE_TIMEOUT exceeded]"
+                            );
                             break;
                         } else {
                             continue;
                         }
                     }
                     Err(e) => {
-                        info!("Client disconnected. Cause: {e}");
+                        info!(
+                            "Client disconnected [control_receive_thread: recv error]. Cause: {e}"
+                        );
                         break;
                     }
                 };
@@ -1362,7 +1368,9 @@ fn connection_pipeline(
                     Ok(()) => (),
                     Err(ConnectionError::TryAgain(_)) => continue,
                     Err(e) => {
-                        info!("Client disconnected. Cause: {e}");
+                        info!(
+                            "Client disconnected [stream_receive_thread: stream_socket recv error]. Cause: {e}"
+                        );
 
                         disconnect_notif.notify_one();
 
@@ -1387,6 +1395,13 @@ fn connection_pipeline(
                 thread::sleep(STREAMING_RECV_TIMEOUT);
             }
 
+            // Cause: either the client moved off Streaming (e.g. session_manager
+            // toggled trust off / removed it) or the server lifecycle left
+            // Resumed (shutdown requested). Label so future disconnects don't
+            // get mistaken for socket-error / keepalive paths.
+            info!(
+                "Client disconnected [lifecycle_check_thread: client !Streaming or lifecycle !Resumed]"
+            );
             disconnect_notif.notify_one()
         }
     });
