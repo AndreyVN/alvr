@@ -305,6 +305,155 @@ fn main() -> Result<(), Box<dyn Error>> {
     let proj_h = view_configs[0].recommended_image_rect_height;
     println!("Projection view dims: {}x{}", proj_w, proj_h);
 
+    // High-frequency checkerboard pattern uploaded into each projection swapchain
+    // image so the FFR pass has detail to compress. Without this the smoke just
+    // clears to a solid colour and the foveation boundary is invisible (Gate H).
+    // Pattern is built once at startup; same buffer is copied into every acquired
+    // proj image each frame (the cycling colour is preserved only on the quad).
+    let pattern_size_bytes = (proj_w as vk::DeviceSize) * (proj_h as vk::DeviceSize) * 4;
+    let pattern_buffer = unsafe {
+        vk_device.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(pattern_size_bytes)
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE),
+            None,
+        )?
+    };
+    let pattern_mem_reqs = unsafe { vk_device.get_buffer_memory_requirements(pattern_buffer) };
+    let mem_props = unsafe { vk_instance.get_physical_device_memory_properties(physical_device) };
+    let host_visible =
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+    let pattern_mem_type = (0..mem_props.memory_type_count)
+        .find(|&i| {
+            (pattern_mem_reqs.memory_type_bits & (1u32 << i)) != 0
+                && mem_props.memory_types[i as usize]
+                    .property_flags
+                    .contains(host_visible)
+        })
+        .ok_or("no host-visible memory type")?;
+    let pattern_memory = unsafe {
+        vk_device.allocate_memory(
+            &vk::MemoryAllocateInfo::default()
+                .allocation_size(pattern_mem_reqs.size)
+                .memory_type_index(pattern_mem_type),
+            None,
+        )?
+    };
+    unsafe { vk_device.bind_buffer_memory(pattern_buffer, pattern_memory, 0)? };
+
+    // Fill: 8-pixel-cell checkerboard, black + white, alpha 255. SRGB swapchain
+    // format treats 0/255 as black/white so no gamma conversion needed here.
+    unsafe {
+        let mapped = vk_device.map_memory(
+            pattern_memory,
+            0,
+            pattern_mem_reqs.size,
+            vk::MemoryMapFlags::empty(),
+        )?;
+        let dst = std::slice::from_raw_parts_mut(mapped as *mut u8, pattern_size_bytes as usize);
+        let cell: u32 = 8;
+        for y in 0..proj_h {
+            for x in 0..proj_w {
+                let on = (((x / cell) ^ (y / cell)) & 1) == 0;
+                let off = ((y * proj_w + x) * 4) as usize;
+                let v: u8 = if on { 255 } else { 0 };
+                dst[off] = v;
+                dst[off + 1] = v;
+                dst[off + 2] = v;
+                dst[off + 3] = 255;
+            }
+        }
+        vk_device.unmap_memory(pattern_memory);
+    }
+    println!(
+        "Pattern staging buffer ready: {}x{} checkerboard ({} bytes)",
+        proj_w, proj_h, pattern_size_bytes
+    );
+
+    // Same barrier pattern as clear_image, but the middle step is a
+    // CopyBufferToImage from the pre-filled staging buffer instead of a
+    // ClearColorImage.
+    let pattern_image = |image: vk::Image| -> Result<(), Box<dyn std::error::Error>> {
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        unsafe {
+            vk_device.reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())?;
+            vk_device.begin_command_buffer(
+                cmd_buf,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            let to_dst = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range);
+            vk_device.cmd_pipeline_barrier(
+                cmd_buf,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_dst],
+            );
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D {
+                    width: proj_w,
+                    height: proj_h,
+                    depth: 1,
+                });
+            vk_device.cmd_copy_buffer_to_image(
+                cmd_buf,
+                pattern_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+            let to_color = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range);
+            vk_device.cmd_pipeline_barrier(
+                cmd_buf,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_color],
+            );
+            vk_device.end_command_buffer(cmd_buf)?;
+            let cbs = [cmd_buf];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            vk_device.queue_submit(vk_queue, &[submit], vk::Fence::null())?;
+            vk_device.queue_wait_idle(vk_queue)?;
+        }
+        Ok(())
+    };
+
     // Pick an sRGB swapchain format.
     let formats = session.enumerate_swapchain_formats()?;
     println!("Swapchain formats: {:?}", formats);
@@ -444,7 +593,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         for (v, sc) in proj_swapchains.iter_mut().enumerate() {
             let idx = sc.acquire_image()?;
             sc.wait_image(xr::Duration::INFINITE)?;
-            clear_image(proj_images[v][idx as usize], proj_color)?;
+            // proj_color stays computed for the quad below; projection gets
+            // the static checkerboard so the FFR pass has detail to compress
+            // and Gate H can visually distinguish per-eye centre divergence.
+            let _ = proj_color;
+            pattern_image(proj_images[v][idx as usize])?;
             sc.release_image()?;
         }
         let qidx = quad_swapchain.acquire_image()?;
