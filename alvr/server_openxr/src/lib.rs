@@ -1073,16 +1073,32 @@ pub struct AlvrOxrFoveationVars {
     pub edge_ratio: [f32; 2],
 }
 
-/// Per-eye foveated compress vars derived from the negotiated `openvr_config`,
-/// or `None` when foveated encoding is disabled. Single source of truth for the
-/// foveated resolution + spec constants, shared by the bridge
-/// [`alvr_oxr_get_foveation_vars`] (what `comp_alvr`'s FFR pass targets) and the
-/// encoder's `build_config` (what the NVENC frame is sized to) so the two can't
-/// drift — a mismatch would misalign the per-view copy into the encoded frame.
+/// Per-eye foveated compress vars derived from session settings + the
+/// negotiated `openvr_config` eye resolution, or `None` when foveated encoding
+/// is disabled in settings. Single source of truth for the foveated resolution
+/// shared by the bridge [`alvr_oxr_get_foveation_vars`] (what `comp_alvr`'s
+/// FFR pass targets at boot) and the encoder's `build_config` (what the NVENC
+/// frame is sized to on ClientConnected) so the two can't drift — a mismatch
+/// would misalign the per-view copy into the encoded frame, or worse, fail
+/// NVENC init at >4096-wide H.264 frames when the encoder treats
+/// `enable_foveated_encoding=false` as "encode full eye res stereo".
+///
+/// The gate deliberately reads `settings().video.foveated_encoding` rather
+/// than `oc.enable_foveated_encoding`. The latter folds in the client's
+/// `streaming_caps.foveated_encoding` at *connection* time — so at
+/// `comp_alvr` *boot* time (before any client is connected) it carries the
+/// previous connection's value, which can disagree with what the next
+/// connection negotiates. Reading the user-persistent setting avoids that
+/// race entirely. Foveation params (`center_size_*` / `edge_ratio_*`) still
+/// come from `oc` because `connection.rs` copies them out of settings on each
+/// connect, so they match what the client decoded with.
 fn foveation_compress_vars_from_config(
     oc: &alvr_session::OpenvrConfig,
 ) -> Option<alvr_session::FoveationCompressVars> {
-    if !oc.enable_foveated_encoding {
+    if !matches!(
+        alvr_server_core::settings().video.foveated_encoding,
+        Switch::Enabled(_)
+    ) {
         return None;
     }
     let config = FoveatedEncodingConfig {
@@ -1186,7 +1202,7 @@ pub struct AlvrOxrLayer {
 #[cfg(target_os = "windows")]
 mod encoder_bridge {
     use super::{AlvrOxrLayer, HEAD_ID, LOCAL_VIEW_PARAMS, SERVER_CORE_CONTEXT};
-    use alvr_common::{ViewParams, warn};
+    use alvr_common::{ViewParams, info, warn};
     use alvr_session::{CodecType, OpenvrConfig};
     use std::{
         ffi::{CStr, c_char, c_void},
@@ -1378,10 +1394,18 @@ mod encoder_bridge {
         // go through `foveation_compress_vars_from_config`) — the encoder copies
         // each per-view image into a `2 * per_eye_w`-wide NVENC frame, so a
         // size mismatch would misalign / partially fill the encoded frame.
-        let (per_eye_w, per_eye_h) = match super::foveation_compress_vars_from_config(oc) {
-            Some(v) => (v.optimized_view_resolution.x, v.optimized_view_resolution.y),
-            None => (oc.eye_resolution_width, oc.eye_resolution_height),
+        let (per_eye_w, per_eye_h, ffr_on) = match super::foveation_compress_vars_from_config(oc) {
+            Some(v) => (v.optimized_view_resolution.x, v.optimized_view_resolution.y, true),
+            None => (oc.eye_resolution_width, oc.eye_resolution_height, false),
         };
+        info!(
+            "OpenXR encoder build_config: ffr={ffr_on} per_eye={per_eye_w}x{per_eye_h} \
+             encoder_frame={}x{per_eye_h} eye_resolution={}x{} codec={}",
+            per_eye_w * 2,
+            oc.eye_resolution_width,
+            oc.eye_resolution_height,
+            oc.codec,
+        );
         VkNvencConfig {
             codec: oc.codec as i32,
             refresh_rate: oc.refresh_rate as i32,
