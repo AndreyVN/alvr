@@ -25,7 +25,15 @@ use interaction::{InteractionContext, InteractionSourcesConfig};
 use lobby::Lobby;
 use openxr as xr;
 use passthrough::PassthroughLayer;
-use std::{collections::HashSet, ffi::CStr, path::Path, rc::Rc, sync::Arc, thread, time::Duration};
+use std::{
+    collections::HashSet,
+    ffi::CStr,
+    path::Path,
+    rc::Rc,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 use stream::StreamContext;
 
 fn from_xr_vec3(v: xr::Vector3f) -> Vec3 {
@@ -387,6 +395,16 @@ pub fn entry_point() {
         let mut stream_context = None::<StreamContext>;
         let mut passthrough_layer = None;
 
+        // Debounce window for an OpenXR SessionState=STOPPING that may be
+        // followed by READY within a short blip (proximity sensor, brief focus
+        // loss, system event). Without this, every transient STOPPING tears
+        // down the ALVR control TCP via core_context.pause() and we eat a
+        // ~30 s reconnect cycle. With this, STOPPING ends the xrSession promptly
+        // (required by spec) but defers core_context.pause(); if READY arrives
+        // within the window, we skip the pause/resume cycle entirely.
+        const STOPPING_DEBOUNCE: Duration = Duration::from_secs(2);
+        let mut pending_pause_deadline: Option<Instant> = None;
+
         let mut event_storage = xr::EventDataBuffer::new();
         let mut headset_is_worn = true;
         'render_loop: loop {
@@ -402,7 +420,16 @@ pub fn entry_point() {
                                 .begin(xr::ViewConfigurationType::PRIMARY_STEREO)
                                 .unwrap();
 
-                            core_context.resume();
+                            // If a STOPPING-induced pause was pending but READY
+                            // beat the debounce, we never actually called
+                            // pause() — skip resume() too. Otherwise we did
+                            // pause (either the debounce expired or this is a
+                            // fresh session), so resume the ALVR connection.
+                            if pending_pause_deadline.take().is_some() {
+                                info!("STOPPING debounced — kept ALVR connection alive");
+                            } else {
+                                core_context.resume();
+                            }
 
                             passthrough_layer = PassthroughLayer::new(&xr_session, platform).ok();
 
@@ -413,9 +440,15 @@ pub fn entry_point() {
 
                             passthrough_layer = None;
 
-                            core_context.pause();
-
+                            // Spec-mandated: end the xrSession promptly.
                             xr_session.end().ok();
+
+                            // Defer the ALVR-side pause() (which would tear
+                            // down the control TCP). If READY arrives within
+                            // STOPPING_DEBOUNCE, the deadline gets cleared
+                            // there and we skip pause() entirely. Otherwise
+                            // the per-iteration check below applies pause().
+                            pending_pause_deadline = Some(Instant::now() + STOPPING_DEBOUNCE);
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
                             break 'render_loop;
@@ -455,6 +488,16 @@ pub fn entry_point() {
                     }
                     _ => (),
                 }
+            }
+
+            // Apply the deferred ALVR pause if the STOPPING debounce window
+            // has expired without a READY transition cancelling it.
+            if let Some(deadline) = pending_pause_deadline
+                && Instant::now() > deadline
+            {
+                info!("STOPPING debounce expired ({STOPPING_DEBOUNCE:?}) — pausing ALVR");
+                core_context.pause();
+                pending_pause_deadline = None;
             }
 
             if !session_running {
