@@ -4,13 +4,13 @@ use super::{
 use crate::LOCAL_IP;
 use alvr_common::{ConResult, HandleTryAgain, ToCon, anyhow::Result};
 use alvr_session::{DscpTos, SocketBufferConfig};
-use socket2::{MaybeUninitSlice, Socket};
+use socket2::{Domain, MaybeUninitSlice, Socket, Type};
 use std::ffi::c_int;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     mem::{self, MaybeUninit},
-    net::{IpAddr, UdpSocket},
+    net::{IpAddr, SocketAddr, UdpSocket},
     ptr,
     time::Duration,
 };
@@ -35,14 +35,25 @@ fn socket_peek(socket: &mut Socket, buffer: &mut [u8]) -> ConResult<usize> {
         .0)
 }
 
-// Create tokio socket, convert to socket2, apply settings, convert back to tokio. This is done to
-// let tokio set all the internal parameters it needs from the start.
+// Build the socket via socket2 so SO_REUSEADDR is set *before* bind. On Windows
+// an abruptly-killed server can leave a phantom UDP socket bound to the stream
+// port: `OwningProcess` points at a dead PID, `Get-Process`/`taskkill` say it's
+// gone, but the kernel still rejects rebind with WSAEADDRINUSE (10048) until
+// reboot. SO_REUSEADDR on both the dying and the next socket lets the new
+// server take the port over (Linux: orphaned/TIME_WAIT reuse; Windows: shared
+// binding, harmless here because only one server runs at a time).
 pub fn bind(
     port: u16,
     dscp: Option<DscpTos>,
     buffer_config: SocketBufferConfig,
 ) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind((LOCAL_IP, port))?.into();
+    let domain = match LOCAL_IP {
+        IpAddr::V4(_) => Domain::IPV4,
+        IpAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::DGRAM, None)?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::new(LOCAL_IP, port).into())?;
 
     crate::set_socket_buffers(&socket, buffer_config).ok();
     crate::set_dscp(&socket, dscp);
