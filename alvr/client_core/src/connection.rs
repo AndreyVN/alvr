@@ -531,6 +531,18 @@ fn connection_pipeline(
                 }
             }
 
+            // Loop exited because is_streaming() went false OR lifecycle moved
+            // off Resumed (alvr_pause()). The latter is THE source of the silent
+            // "Quest closed the control TCP" idle-disconnect — Quest's OpenXR
+            // app calls pause() on SessionState=STOPPING and the disconnect
+            // chain here was previously unlogged. Tag it so the next mirror
+            // capture identifies the cause.
+            let why = if *lifecycle_state.read() != LifecycleState::Resumed {
+                "lifecycle off Resumed (alvr_pause)"
+            } else {
+                "is_streaming() went false"
+            };
+            info!("Client disconnected [control_send_thread exit]: {why}");
             disconnect_notif.notify_one();
         }
     });
