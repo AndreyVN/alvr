@@ -1075,30 +1075,39 @@ pub struct AlvrOxrFoveationVars {
 
 /// Per-eye foveated compress vars derived from session settings + the
 /// negotiated `openvr_config` eye resolution, or `None` when foveated encoding
-/// is disabled in settings. Single source of truth for the foveated resolution
-/// shared by the bridge [`alvr_oxr_get_foveation_vars`] (what `comp_alvr`'s
-/// FFR pass targets at boot) and the encoder's `build_config` (what the NVENC
-/// frame is sized to on ClientConnected) so the two can't drift — a mismatch
-/// would misalign the per-view copy into the encoded frame, or worse, fail
-/// NVENC init at >4096-wide H.264 frames when the encoder treats
-/// `enable_foveated_encoding=false` as "encode full eye res stereo".
+/// is disabled in settings *or* the negotiated `oc.enable_foveated_encoding`
+/// is false. Shared by the bridge [`alvr_oxr_get_foveation_vars`] (what
+/// `comp_alvr`'s FFR pass targets at boot) and the encoder's `build_config`
+/// (what the NVENC frame is sized to on ClientConnected) so the two can't
+/// drift — a mismatch would misalign the per-view copy into the encoded
+/// frame, or worse, fail NVENC init at >4096-wide H.264 frames when the
+/// encoder treats `enable_foveated_encoding=false` as "encode full eye res
+/// stereo".
 ///
-/// The gate deliberately reads `settings().video.foveated_encoding` rather
-/// than `oc.enable_foveated_encoding`. The latter folds in the client's
-/// `streaming_caps.foveated_encoding` at *connection* time — so at
-/// `comp_alvr` *boot* time (before any client is connected) it carries the
-/// previous connection's value, which can disagree with what the next
-/// connection negotiates. Reading the user-persistent setting avoids that
-/// race entirely. Foveation params (`center_size_*` / `edge_ratio_*`) still
-/// come from `oc` because `connection.rs` copies them out of settings on each
-/// connect, so they match what the client decoded with.
+/// The gate ANDs the persistent setting (`settings().video.foveated_encoding`)
+/// with the negotiated `oc.enable_foveated_encoding`:
+///
+/// * `settings()` is read so that when the user has FFR enabled, `comp_alvr`'s
+///   boot-time call still resolves to "FFR on" even though `oc` carries the
+///   previous connection's value — the original race the encoder/comp_alvr
+///   disagreement came from.
+/// * `oc.enable_foveated_encoding` is kept so that when the connected client
+///   advertises `streaming_caps.foveated_encoding=false` (third-party C-ABI
+///   client, unknown headset platform), `connection.rs` clamps `oc` to false
+///   and the encoder honours it — otherwise NVENC would produce foveated
+///   frames a client with no de-foveation pass can't decode.
+///
+/// Foveation params (`center_size_*` / `edge_ratio_*`) come from `oc` because
+/// `connection.rs` copies them out of settings on each connect, so they match
+/// what the client decoded with.
 fn foveation_compress_vars_from_config(
     oc: &alvr_session::OpenvrConfig,
 ) -> Option<alvr_session::FoveationCompressVars> {
     if !matches!(
         alvr_server_core::settings().video.foveated_encoding,
         Switch::Enabled(_)
-    ) {
+    ) || !oc.enable_foveated_encoding
+    {
         return None;
     }
     let config = FoveatedEncodingConfig {
