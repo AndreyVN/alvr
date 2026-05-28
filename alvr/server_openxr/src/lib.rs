@@ -1464,6 +1464,33 @@ mod encoder_bridge {
         }
         let nal = raw[off..].to_vec();
 
+        // ALVR bitstream-size diagnostic: log cumulative NAL bytes + count +
+        // IDR count every `BITSTREAM_DIAG_WINDOW` packets. Distinguishes
+        // "encoder consuming black input" (avg per-frame bytes near the
+        // motion-estimation floor) from "encoder producing real content"
+        // (avg in the tens of KB for 30 Mbps target). Single source of truth
+        // for "is the encoder seeing anything" at the bridge boundary.
+        {
+            use std::sync::atomic::AtomicU64;
+            static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
+            static TOTAL_PACKETS: AtomicU64 = AtomicU64::new(0);
+            static IDR_PACKETS: AtomicU64 = AtomicU64::new(0);
+            const BITSTREAM_DIAG_WINDOW: u64 = 150;
+            let total = TOTAL_BYTES.fetch_add(nal.len() as u64, std::sync::atomic::Ordering::Relaxed) + nal.len() as u64;
+            let count = TOTAL_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let idrs = if is_idr {
+                IDR_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+            } else {
+                IDR_PACKETS.load(std::sync::atomic::Ordering::Relaxed)
+            };
+            if count.is_multiple_of(BITSTREAM_DIAG_WINDOW) {
+                let avg = total as f64 / count as f64;
+                info!(
+                    "OpenXR encoder bitstream diag: packets={count} idrs={idrs} total_bytes={total} avg_bytes_per_packet={avg:.1}"
+                );
+            }
+        }
+
         if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
             // The client reprojects the decoded frame using these per-eye view
             // params, so they must be GLOBAL (world-space): head_pose × the
