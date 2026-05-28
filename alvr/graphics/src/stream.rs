@@ -117,7 +117,36 @@ impl StreamRenderer {
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
+                // The shader unconditionally declares @group(0) @binding(2) for
+                // the FFE_RUNTIME path's `ffe_rt` uniform. WGSL doesn't gate
+                // resource declarations by override constants, so even when the
+                // static path runs (FFE_RUNTIME=false) wgpu validates the
+                // shader's full binding set against the pipeline layout — and
+                // it panics if binding 2 is missing. Include it here with a
+                // dummy buffer so the static path's pipeline layout matches
+                // what the shader declares. (The FFE_RUNTIME pipeline at
+                // build_ffe_runtime_pipeline has its own layout that binds the
+                // real per-view center_shift uniform.)
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
+        });
+
+        // Dummy uniform satisfying binding 2 on the static path. Never read by
+        // the shader when FFE_RUNTIME=false. One buffer shared across all views.
+        let static_path_dummy_ffe_uniform = device.create_buffer(&BufferDescriptor {
+            label: Some("stream_static_dummy_ffe_uniform"),
+            size: FFE_RUNTIME_UNIFORM_SIZE,
+            usage: BufferUsages::UNIFORM,
+            mapped_at_creation: false,
         });
 
         let shader_module = device.create_shader_module(include_wgsl!("../resources/stream.wgsl"));
@@ -237,6 +266,10 @@ impl StreamRenderer {
                     BindGroupEntry {
                         binding: 1,
                         resource: BindingResource::Sampler(&sampler),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: static_path_dummy_ffe_uniform.as_entire_binding(),
                     },
                 ],
             });
