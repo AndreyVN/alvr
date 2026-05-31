@@ -295,7 +295,18 @@ impl TrackingManager {
                         }
                     }
 
-                    (best_timestamp_diff != Duration::MAX).then_some(*best_motion_ref)
+                    // When no sample is at or after the requested time, fall back to
+                    // the most recent sample (best_motion_ref defaults to the front)
+                    // instead of returning None. This is exactly the OpenXR/Monado
+                    // case: Monado requests a FUTURE predicted-display timestamp that
+                    // is newer than every received tracking sample, so every sample is
+                    // `Ordering::Less` and the old code returned None — yielding an
+                    // untracked head pose (flags=NONE) that makes OpenXR clients
+                    // (UE5/AK) render black. Extrapolating from the latest sample
+                    // mirrors get_hand_skeleton, which always serves the newest sample.
+                    // OpenVR-mode in-history requests are unaffected (they still match
+                    // an at-or-after sample and return it as before).
+                    Some(*best_motion_ref)
                 } else {
                     None
                 }
