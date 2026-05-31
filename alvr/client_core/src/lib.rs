@@ -225,19 +225,7 @@ impl ClientCoreContext {
         dbg_client_core!("send_tracking");
 
         if let Some(sender) = &mut *self.connection_context.tracking_sender.lock() {
-            // ALVR_TRACKING_SEND_DIAG (AK-black tracking-feed probe): the UDP
-            // tracking send error was previously swallowed by `.ok()`. Surface it
-            // (throttled) so a failing client->server stream leg (e.g. os error
-            // 10057 "no address supplied on sendto") becomes visible. Remove once
-            // root-caused.
-            if let Err(e) = sender.send_header(&data) {
-                use std::sync::atomic::{AtomicU32, Ordering};
-                static N: AtomicU32 = AtomicU32::new(0);
-                let n = N.fetch_add(1, Ordering::Relaxed);
-                if n < 32 {
-                    warn!("ALVR_TRACKING_SEND_DIAG send_header err n={n}: {e:?}");
-                }
-            }
+            sender.send_header(&data).ok();
 
             if let Some(stats) = &mut *self.connection_context.statistics_manager.lock() {
                 stats.report_input_acquired(data.poll_timestamp);

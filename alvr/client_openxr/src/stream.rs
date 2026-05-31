@@ -534,19 +534,7 @@ fn stream_input_loop(
 
     let mut deadline = Instant::now();
     let frame_interval = Duration::from_secs_f32(1.0 / refresh_rate);
-    // ALVR_STREAMINPUT_DIAG (AK-black tracking-feed probe): does this loop run and
-    // reach send_tracking, or bail at get_head_data? Summary logged ~1/sec. Remove
-    // once root-caused.
-    let mut diag_iters: u32 = 0;
-    let mut diag_head_none: u32 = 0;
-    let mut diag_sent: u32 = 0;
     while running.value() {
-        diag_iters += 1;
-        if diag_iters % 72 == 0 {
-            alvr_common::warn!(
-                "ALVR_STREAMINPUT_DIAG iters={diag_iters} head_none={diag_head_none} sent={diag_sent}"
-            );
-        }
         let int_ctx_lock = interaction_ctx.read();
         let int_ctx = &*int_ctx_lock;
         // Streaming related inputs are updated here. Make sure every input poll is done in this
@@ -573,7 +561,6 @@ fn stream_input_loop(
             target_time,
             &last_view_params,
         ) else {
-            diag_head_none += 1;
             continue;
         };
 
@@ -672,7 +659,6 @@ fn stream_input_loop(
             body,
             markers,
         });
-        diag_sent += 1;
 
         let button_entries =
             interaction::update_buttons(&xr_session, &interaction_ctx.read().button_actions);

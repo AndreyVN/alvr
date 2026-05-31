@@ -715,53 +715,28 @@ pub fn get_head_data(
 ) -> Option<(DeviceMotion, Option<[ViewParams; 2]>)> {
     let xr_time = crate::to_xr_time(time);
 
-    // ALVR_HEADDATA_DIAG (AK-black tracking-feed probe): tag which branch makes
-    // get_head_data return None, so the client tracking-send break is pinpointed.
-    // Throttled to the first 32 occurrences. Remove once root-caused.
-    fn head_none_diag(reason: &str) {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        if n < 32 {
-            alvr_common::warn!("ALVR_HEADDATA_DIAG None n={n} reason={reason}");
-        }
-    }
-
-    let (head_location, head_velocity) =
-        match view_reference_space.relate(stage_reference_space, xr_time) {
-            Ok(v) => v,
-            Err(e) => {
-                head_none_diag("relate_err");
-                alvr_common::warn!("ALVR_HEADDATA_DIAG relate_err detail={e}");
-                return None;
-            }
-        };
+    let (head_location, head_velocity) = view_reference_space
+        .relate(stage_reference_space, xr_time)
+        .ok()?;
 
     if !head_location
         .location_flags
         .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
     {
-        head_none_diag("orientation_invalid");
         return None;
     }
 
-    let (view_flags, views) = match xr_session.locate_views(
-        xr::ViewConfigurationType::PRIMARY_STEREO,
-        xr_time,
-        stage_reference_space,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            head_none_diag("locate_views_err");
-            alvr_common::warn!("ALVR_HEADDATA_DIAG locate_views_err detail={e}");
-            return None;
-        }
-    };
+    let (view_flags, views) = xr_session
+        .locate_views(
+            xr::ViewConfigurationType::PRIMARY_STEREO,
+            xr_time,
+            stage_reference_space,
+        )
+        .ok()?;
 
     if !view_flags.contains(xr::ViewStateFlags::POSITION_VALID)
         || !view_flags.contains(xr::ViewStateFlags::ORIENTATION_VALID)
     {
-        head_none_diag("view_flags_invalid");
         return None;
     }
 
