@@ -44,6 +44,23 @@ struct CudaApi {
     CUresult(CUDAAPI* cuMipmappedArrayDestroy)(CUmipmappedArray) = nullptr;
     CUresult(CUDAAPI* cuGetErrorString)(CUresult, const char**) = nullptr;
 
+    // B1 (semaphore handoff): a real stream so the array->linear copies can be
+    // ordered after a GPU-side wait on comp_alvr's squash/FFR timeline semaphore
+    // (imported via cuImportExternalSemaphore) instead of relying on the
+    // compositor's CPU vkQueueWaitIdle. cuMemcpy2DAsync replaces the synchronous
+    // null-stream cuMemcpy2D so the wait actually gates the copy.
+    CUresult(CUDAAPI* cuStreamCreate)(CUstream*, unsigned int) = nullptr;
+    CUresult(CUDAAPI* cuStreamSynchronize)(CUstream) = nullptr;
+    CUresult(CUDAAPI* cuStreamDestroy)(CUstream) = nullptr;
+    CUresult(CUDAAPI* cuMemcpy2DAsync)(const CUDA_MEMCPY2D*, CUstream) = nullptr;
+    CUresult(CUDAAPI*
+                 cuImportExternalSemaphore)(CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC*)
+        = nullptr;
+    CUresult(CUDAAPI*
+                 cuWaitExternalSemaphoresAsync)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS*, unsigned int, CUstream)
+        = nullptr;
+    CUresult(CUDAAPI* cuDestroyExternalSemaphore)(CUexternalSemaphore) = nullptr;
+
     // Resolve every entry point. Returns false (and leaves the struct partially
     // filled) if nvcuda.dll is absent or any symbol is missing — the caller
     // treats that as "NVENC/CUDA unavailable on this host".
@@ -80,6 +97,16 @@ struct CudaApi {
         resolve(cuMipmappedArrayGetLevel, "cuMipmappedArrayGetLevel");
         resolve(cuMipmappedArrayDestroy, "cuMipmappedArrayDestroy");
         resolve(cuGetErrorString, "cuGetErrorString");
+
+        // B1: stream + external-semaphore entry points. Versioned exports carry
+        // a _v2 suffix (cuStreamDestroy_v2, cuMemcpy2DAsync_v2) like the others.
+        resolve(cuStreamCreate, "cuStreamCreate");
+        resolve(cuStreamSynchronize, "cuStreamSynchronize");
+        resolve(cuStreamDestroy, "cuStreamDestroy_v2");
+        resolve(cuMemcpy2DAsync, "cuMemcpy2DAsync_v2");
+        resolve(cuImportExternalSemaphore, "cuImportExternalSemaphore");
+        resolve(cuWaitExternalSemaphoresAsync, "cuWaitExternalSemaphoresAsync");
+        resolve(cuDestroyExternalSemaphore, "cuDestroyExternalSemaphore");
 
         return ok;
     }

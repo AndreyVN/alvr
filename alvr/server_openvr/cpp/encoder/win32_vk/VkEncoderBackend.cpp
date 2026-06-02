@@ -133,6 +133,17 @@ struct VkEncoderBackend::Impl {
     NvencConfig cfg = {};
     std::atomic<bool> insertIdr { false };
 
+    // B1 (semaphore handoff): a dedicated stream the per-view copies run on, and
+    // the imported squash/FFR timeline semaphore (comp_alvr's, ABI v9) the stream
+    // waits on before copying. forwardSemHandle caches the native handle so the
+    // session-stable semaphore is imported once, not per frame.
+    CUstream stream = nullptr;
+    CUexternalSemaphore forwardSem = nullptr;
+    uint64_t forwardSemHandle = 0;
+    // Latches a failed import so the "couldn't import; relying on comp_alvr's CPU
+    // wait" warning logs once per handle rather than every frame.
+    bool forwardSemImportFailed = false;
+
     // Import one view's OPAQUE_WIN32 image, map it as a CUDA array, and copy it
     // into the [view] half of the combined NVENC input frame. CUDA context must
     // already be current. Returns false on any CUDA failure.
@@ -190,8 +201,11 @@ struct VkEncoderBackend::Impl {
             copy.dstXInBytes = static_cast<size_t>(view) * desc.imageWidth * 4;
             copy.WidthInBytes = static_cast<size_t>(desc.imageWidth) * 4;
             copy.Height = desc.imageHeight;
-            if (cuda.cuMemcpy2D(&copy) != CUDA_SUCCESS) {
-                trace("cuMemcpy2D failed\n");
+            // B1: async on our stream so a preceding cuWaitExternalSemaphoresAsync
+            // (enqueued in Submit) actually gates this copy on the squash/FFR GPU
+            // work. Submit's cuStreamSynchronize bounds it before NVENC reads.
+            if (cuda.cuMemcpy2DAsync(&copy, stream) != CUDA_SUCCESS) {
+                trace("cuMemcpy2DAsync failed\n");
                 ok = false;
             }
         }
@@ -201,6 +215,56 @@ struct VkEncoderBackend::Impl {
         }
         cuda.cuDestroyExternalMemory(extMem);
         return ok;
+    }
+
+    // Import comp_alvr's exported squash/FFR timeline semaphore (handle from the
+    // bridge, ABI v9) so the stream can wait on it. Cached by handle — imported
+    // once for a session-stable semaphore, re-imported if the handle changes
+    // (reconnect rebuilds comp_alvr). Probes D3D12_FENCE first (Monado's Windows
+    // preference in vk_get_timeline_semaphore_handle_type) then the OPAQUE_WIN32
+    // timeline type. On failure, leaves forwardSem null and latches a one-shot
+    // warning: the wait is skipped and correctness falls back to comp_alvr's CPU
+    // vkQueueWaitIdle, which Slice A keeps authoritative. Returns true if a
+    // semaphore is available to wait on.
+    bool ensureForwardSemaphore(uint64_t handle) {
+        if (handle == 0) {
+            return false;
+        }
+        if (handle == forwardSemHandle) {
+            return forwardSem != nullptr;
+        }
+
+        // Handle changed: drop any prior import before re-importing the new one.
+        if (forwardSem) {
+            cuda.cuDestroyExternalSemaphore(forwardSem);
+            forwardSem = nullptr;
+        }
+        forwardSemHandle = handle;
+        forwardSemImportFailed = false;
+
+        const CUexternalSemaphoreHandleType types[2] = {
+            CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE,
+            CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32,
+        };
+        for (CUexternalSemaphoreHandleType type : types) {
+            CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC semDesc = {};
+            semDesc.type = type;
+            semDesc.handle.win32.handle
+                = reinterpret_cast<void*>(static_cast<uintptr_t>(handle));
+            semDesc.flags = 0;
+            if (cuda.cuImportExternalSemaphore(&forwardSem, &semDesc) == CUDA_SUCCESS) {
+                trace(type == CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE
+                          ? "VkEncoderBackend: imported forward semaphore as D3D12_FENCE\n"
+                          : "VkEncoderBackend: imported forward semaphore as TIMELINE_WIN32\n");
+                return true;
+            }
+            forwardSem = nullptr;
+        }
+
+        forwardSemImportFailed = true;
+        trace("VkEncoderBackend: cuImportExternalSemaphore failed for both handle "
+              "types; falling back to comp_alvr's CPU wait\n");
+        return false;
     }
 };
 
@@ -228,6 +292,15 @@ std::unique_ptr<VkEncoderBackend> VkEncoderBackend::Create(const NvencConfig& cf
     // session open + input-buffer allocation below require.
     if (cuda.cuCtxCreate(&impl->ctx, 0, device) != CUDA_SUCCESS) {
         trace("VkEncoderBackend: cuCtxCreate failed\n");
+        return nullptr;
+    }
+
+    // B1: dedicated non-blocking stream for the input copies + forward-semaphore
+    // wait. CU_STREAM_NON_BLOCKING keeps it independent of the legacy null stream.
+    if (cuda.cuStreamCreate(&impl->stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS) {
+        trace("VkEncoderBackend: cuStreamCreate failed\n");
+        cuda.cuCtxDestroy(impl->ctx);
+        impl->ctx = nullptr;
         return nullptr;
     }
 
@@ -272,6 +345,22 @@ void VkEncoderBackend::Shutdown() {
         m_impl->cuda.cuCtxPopCurrent(&popped);
     }
     if (m_impl->ctx) {
+        // B1: free the CUDA stream + imported semaphore while the context is
+        // current. cuDestroyExternalSemaphore only releases CUDA's import; the
+        // underlying native handle stays owned by comp_alvr's Vulkan semaphore,
+        // so we do not CloseHandle it here.
+        m_impl->cuda.cuCtxPushCurrent(m_impl->ctx);
+        if (m_impl->forwardSem) {
+            m_impl->cuda.cuDestroyExternalSemaphore(m_impl->forwardSem);
+            m_impl->forwardSem = nullptr;
+        }
+        if (m_impl->stream) {
+            m_impl->cuda.cuStreamDestroy(m_impl->stream);
+            m_impl->stream = nullptr;
+        }
+        CUcontext popped = nullptr;
+        m_impl->cuda.cuCtxPopCurrent(&popped);
+
         m_impl->cuda.cuCtxDestroy(m_impl->ctx);
         m_impl->ctx = nullptr;
     }
@@ -317,6 +406,23 @@ bool VkEncoderBackend::Submit(const SubmitDesc& desc, PacketCallback onPacket, v
         CUdeviceptr dst = reinterpret_cast<CUdeviceptr>(inputFrame->inputPtr);
         size_t dstPitch = inputFrame->pitch;
 
+        // B1: gate the copies on comp_alvr's squash/FFR timeline semaphore by
+        // enqueuing the wait on the stream before the (async) copies below. In
+        // Slice A comp_alvr still CPU-waits (vkQueueWaitIdle) before handing us
+        // the frame, so the value is already signalled and this returns at once;
+        // it becomes load-bearing once Slice B removes that CPU wait. With no
+        // semaphore available the copies just proceed under comp_alvr's CPU wait.
+        if (m_impl->ensureForwardSemaphore(desc.syncSemaphoreHandle)) {
+            CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS waitParams = {};
+            waitParams.params.fence.value = desc.syncSemaphoreValue;
+            waitParams.flags = 0;
+            if (cuda.cuWaitExternalSemaphoresAsync(
+                    &m_impl->forwardSem, &waitParams, 1, m_impl->stream)
+                != CUDA_SUCCESS) {
+                trace("cuWaitExternalSemaphoresAsync failed\n");
+            }
+        }
+
         ok = m_impl->importViewToInput(
             desc, 0, desc.imageHandleLeft, desc.imageSizeLeft, dst, dstPitch
         );
@@ -327,9 +433,10 @@ bool VkEncoderBackend::Submit(const SubmitDesc& desc, PacketCallback onPacket, v
         }
 
         if (ok) {
-            // Both array->linear copies are async on the null stream; make sure
-            // they finish before NVENC reads the input.
-            cuda.cuCtxSynchronize();
+            // B1: both copies are async on our stream (ordered after the optional
+            // semaphore wait); block here until they finish before NVENC reads the
+            // input. Slice B moves this synchronize off the compositor thread.
+            cuda.cuStreamSynchronize(m_impl->stream);
 
             bool idr = m_impl->insertIdr.exchange(false);
             NV_ENC_PIC_PARAMS picParams = {};
