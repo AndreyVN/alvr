@@ -56,7 +56,18 @@ Two stalls remain on the compositor thread: **(A)** the squash/FFR CPU waits
 > Quest 3): streamer survived 120 frames with no crash, import OK, client decoded
 > + rendered, headset image clean. comp_alvr's squash `vkQueueWaitIdle` is
 > untouched, so the squash-completion wait still sits on the compositor thread —
-> only the encode moved off. `oxr_pacing` SUBMIT delta **not yet measured**.
+> only the encode moved off.
+>
+> **Pacing measured 2026-06-03 (RTX 3090, avg over 300 frames @ 2560×1184):**
+> `bridge_call_us=740` (copy+enqueue, still on the compositor thread) +
+> `encode_us=2657` (now on the worker, off-thread). So the bridge call dropped
+> from ~3.4 ms (copy+encode) to ~0.74 ms — **partial removed ~2.66 ms/frame**
+> (~24% of the 11.1 ms @90 Hz budget) from the compositor thread. `encode_us` ≪
+> frame interval, so the worker keeps up and drop-newest rarely fires.
+> **Still on the compositor thread:** comp_alvr's squash `vkQueueWaitIdle`
+> (`cpu_us`, not yet instrumented — submodule) — that is what **full** targets.
+> Decide on full by measuring `cpu_us`: if the squash-wait is small, partial may
+> be enough; if large, full's reverse-wait complexity is justified.
 
 Compositor thread keeps the scratch interaction (so the ring is consumed before
 it returns → **no reuse hazard, reverse semaphore unused**); only `EncodeFrame`

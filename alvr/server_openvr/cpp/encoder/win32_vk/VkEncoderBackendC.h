@@ -45,6 +45,9 @@ const char* alvr_vk_encoder_last_error();
 // One-shot semaphore-import diagnostic (empty until the first submit). Never null.
 const char* alvr_vk_encoder_import_diag();
 
+// Average EncodeFrame microseconds since the last call (resets). 0 if idle.
+double alvr_vk_encoder_take_avg_encode_us();
+
 // Create the encoder from `cfg`. Returns an opaque handle, or null if CUDA/NVENC
 // is unavailable or initialization failed.
 void* alvr_vk_encoder_create(const NvencConfig* cfg);

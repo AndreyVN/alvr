@@ -1313,6 +1313,7 @@ mod encoder_bridge {
     unsafe extern "C" {
         fn alvr_vk_encoder_last_error() -> *const c_char;
         fn alvr_vk_encoder_import_diag() -> *const c_char;
+        fn alvr_vk_encoder_take_avg_encode_us() -> f64;
         fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
         fn alvr_vk_encoder_destroy(handle: *mut c_void);
         fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
@@ -1660,8 +1661,31 @@ mod encoder_bridge {
             target_timestamp_ns: stamp_ns,
         };
         // # Safety: handle valid for the lock's duration; desc outlives the call;
-        // on_packet is a valid extern "C" fn.
+        // on_packet is a valid extern "C" fn. Time the bridge call: with
+        // B2.2b-partial this is the copy+enqueue cost left on the compositor
+        // thread (the encode itself runs on the worker).
+        let bridge_start = std::time::Instant::now();
         let ok = unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) };
+        let bridge_us = bridge_start.elapsed().as_micros() as u64;
+
+        // Periodic pacing log (every PACING_WINDOW frames): the bridge-call cost
+        // still on the compositor thread vs the EncodeFrame cost now off it.
+        const PACING_WINDOW: u64 = 300;
+        static PACING_SUM_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static PACING_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        PACING_SUM_US.fetch_add(bridge_us, std::sync::atomic::Ordering::Relaxed);
+        let n = PACING_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if n % PACING_WINDOW == 0 {
+            let sum = PACING_SUM_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            PACING_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+            let avg_bridge_us = sum as f64 / PACING_WINDOW as f64;
+            // # Safety: takes no args, returns a plain f64.
+            let avg_encode_us = unsafe { alvr_vk_encoder_take_avg_encode_us() };
+            info!(
+                "OpenXR encoder pacing (avg over {PACING_WINDOW}): bridge_call_us={avg_bridge_us:.0} \
+                 (copy+enqueue, compositor thread), encode_us={avg_encode_us:.0} (worker, off-thread)"
+            );
+        }
 
         // One-shot bring-up log: surface the encoder's semaphore-import result the
         // first time it's available (B2.2a's import success is otherwise invisible —

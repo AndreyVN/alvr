@@ -35,6 +35,10 @@ const char* VkEncoderBackendLastError();
 // bridge log, once, whether the timeline semaphores imported on real hardware.
 const char* VkEncoderBackendImportDiag();
 
+// B2.2b-partial perf: average EncodeFrame microseconds since the last call (and
+// resets) — the encode cost now running on the worker, off the compositor thread.
+double VkEncoderBackendTakeAvgEncodeUs();
+
 class VkEncoderBackend : public IEncoderBackend {
 public:
     // Per-frame submit payload. Mirrors the relevant fields of AlvrOxrLayer

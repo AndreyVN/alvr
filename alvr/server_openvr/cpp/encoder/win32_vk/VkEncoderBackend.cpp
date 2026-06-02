@@ -1,5 +1,7 @@
 #include "VkEncoderBackend.h"
 
+#include <atomic>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -11,9 +13,21 @@ std::string g_vk_encoder_last_error = "no error recorded";
 // the Rust bridge can log, once, whether the forward + reverse timeline
 // semaphores imported and with which CUDA handle type. Empty until then.
 std::string g_vk_encoder_import_diag = "";
+// B2.2b-partial perf: the worker accumulates EncodeFrame wall time here (the
+// cost moved off the compositor thread). Single encoder instance, so file-global.
+std::atomic<uint64_t> g_vk_encoder_encode_sum_ns { 0 };
+std::atomic<uint64_t> g_vk_encoder_encode_count { 0 };
 }
 const char* VkEncoderBackendLastError() { return g_vk_encoder_last_error.c_str(); }
 const char* VkEncoderBackendImportDiag() { return g_vk_encoder_import_diag.c_str(); }
+
+// Average EncodeFrame microseconds since the last call; resets the accumulators.
+// Returns 0 if no frames encoded in the window.
+double VkEncoderBackendTakeAvgEncodeUs() {
+    uint64_t n = g_vk_encoder_encode_count.exchange(0);
+    uint64_t s = g_vk_encoder_encode_sum_ns.exchange(0);
+    return n ? static_cast<double>(s) / static_cast<double>(n) / 1000.0 : 0.0;
+}
 
 // 3.3b-2 implements the real CUDA-interop NVENC encoder when the CUDA Toolkit is
 // present at build time (build.rs defines ALVR_OXR_HAVE_CUDA). Without it — CI's
@@ -32,6 +46,7 @@ const char* VkEncoderBackendImportDiag() { return g_vk_encoder_import_diag.c_str
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -360,7 +375,13 @@ struct VkEncoderBackend::Impl {
                 picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
             }
             std::vector<std::vector<uint8_t>> packets;
+            auto encodeStart = std::chrono::steady_clock::now();
             encoder->EncodeFrame(packets, &picParams);
+            auto encodeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - encodeStart)
+                                .count();
+            g_vk_encoder_encode_sum_ns += static_cast<uint64_t>(encodeNs);
+            g_vk_encoder_encode_count++;
             for (std::vector<uint8_t>& packet : packets) {
                 uint8_t* buf = packet.data();
                 int len = static_cast<int>(packet.size());

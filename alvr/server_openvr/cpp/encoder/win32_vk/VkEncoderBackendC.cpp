@@ -8,6 +8,8 @@ const char* alvr_vk_encoder_last_error() { return VkEncoderBackendLastError(); }
 
 const char* alvr_vk_encoder_import_diag() { return VkEncoderBackendImportDiag(); }
 
+double alvr_vk_encoder_take_avg_encode_us() { return VkEncoderBackendTakeAvgEncodeUs(); }
+
 void* alvr_vk_encoder_create(const NvencConfig* cfg) {
     if (!cfg) {
         return nullptr;
