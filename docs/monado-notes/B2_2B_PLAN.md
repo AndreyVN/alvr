@@ -93,6 +93,15 @@ moves to a worker.
 
 ### B2.2b-full — moves the whole handoff off-thread (uses B2.2a's reverse semaphore)
 
+> **DECLINED 2026-06-03 — not worth it (measured).** comp_alvr `cpu_us=492` on
+> the RTX 3090 (the squash compose + `vkQueueWaitIdle` + FFR), i.e. full would
+> remove only ~0.49 ms/frame, vs the ~2.66 ms partial already moved off. That
+> 0.49 ms is the *single highest-risk* code in the feature (per-ring-slot
+> reverse-wait state machine + cross-queue FFR wait + drop-consistency / deadlock
+> risk). The squash cost is resolution-bound, not scene-bound, so it won't
+> balloon with heavier content. **Stop at partial.** Revisit only if a future
+> profile on real game content shows `cpu_us` is materially larger.
+
 Compositor returns right after `vkQueueSubmit`; the worker does forward-wait +
 copy + reverse-signal + encode. Removes **both** stalls. Requires the
 scratch-reuse state machine:
