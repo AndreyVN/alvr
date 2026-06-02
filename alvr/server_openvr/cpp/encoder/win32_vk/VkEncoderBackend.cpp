@@ -32,8 +32,12 @@ const char* VkEncoderBackendImportDiag() { return g_vk_encoder_import_diag.c_str
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <queue>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -306,6 +310,104 @@ struct VkEncoderBackend::Impl {
         }
         return consumedSem != nullptr;
     }
+
+    // B2.2b-partial: staging pool + single worker thread. The compositor copies
+    // the scratch into a staging buffer (fully consumed before Submit returns, so
+    // comp_alvr can reuse the scratch ring slot with no hazard) and hands the slot
+    // to the worker, which copies staging -> NVENC input and runs the (expensive)
+    // EncodeFrame off the compositor thread. All NVENC calls stay on the one
+    // worker — NVENC sessions are single-threaded. Backpressure is drop-newest: if
+    // no staging slot is free the frame is dropped rather than blocking the
+    // compositor.
+    static constexpr int kStagingSlots = 3;
+    CUdeviceptr staging[kStagingSlots] = {};
+    size_t stagingPitch = 0;
+    struct WorkItem {
+        int slot;
+        bool idr;
+        uint64_t targetTimestampNs;
+        PacketCallback onPacket;
+        void* cbCtx;
+    };
+    std::thread worker;
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::queue<int> freeSlots;
+    std::queue<WorkItem> work;
+    bool workerStop = false;
+    uint64_t droppedFrames = 0;
+
+    // Copy one staged slot into NVENC's input and encode it. Runs on the worker
+    // thread with the CUDA context already current.
+    void encodeStagedSlot(const WorkItem& item) {
+        try {
+            const NvEncInputFrame* inputFrame = encoder->GetNextInputFrame();
+            CUDA_MEMCPY2D copy = {};
+            copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+            copy.srcDevice = staging[item.slot];
+            copy.srcPitch = stagingPitch;
+            copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+            copy.dstDevice = reinterpret_cast<CUdeviceptr>(inputFrame->inputPtr);
+            copy.dstPitch = inputFrame->pitch;
+            copy.WidthInBytes = static_cast<size_t>(cfg.renderWidth) * 4;
+            copy.Height = cfg.renderHeight;
+            if (cuda.cuMemcpy2D(&copy) != CUDA_SUCCESS) {
+                trace("worker: staging->input cuMemcpy2D failed\n");
+            }
+
+            NV_ENC_PIC_PARAMS picParams = {};
+            if (item.idr) {
+                picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
+            }
+            std::vector<std::vector<uint8_t>> packets;
+            encoder->EncodeFrame(packets, &picParams);
+            for (std::vector<uint8_t>& packet : packets) {
+                uint8_t* buf = packet.data();
+                int len = static_cast<int>(packet.size());
+                // NVENC's AV1 output is IVF-wrapped; strip to the OBUs.
+                if (cfg.codec == NVENC_CODEC_AV1) {
+                    const uint8_t ivf_magic[4] = { 0x44, 0x4B, 0x49, 0x46 };
+                    if (len >= 4 && !memcmp(buf, ivf_magic, 4)) {
+                        buf += 32;
+                        len -= 32;
+                    }
+                    if (len <= 12) {
+                        continue;
+                    }
+                    buf += 12;
+                    len -= 12;
+                }
+                if (len > 0 && item.onPacket) {
+                    item.onPacket(item.cbCtx, buf, len, item.idr, item.targetTimestampNs);
+                }
+            }
+        } catch (...) {
+            trace("worker: EncodeFrame threw\n");
+        }
+    }
+
+    void workerLoop() {
+        cuda.cuCtxPushCurrent(ctx);
+        for (;;) {
+            WorkItem item;
+            {
+                std::unique_lock<std::mutex> lk(mtx);
+                cv.wait(lk, [this] { return workerStop || !work.empty(); });
+                if (work.empty()) {
+                    break; // only reached when stopping with the queue drained
+                }
+                item = work.front();
+                work.pop();
+            }
+            encodeStagedSlot(item);
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                freeSlots.push(item.slot);
+            }
+        }
+        CUcontext popped = nullptr;
+        cuda.cuCtxPopCurrent(&popped);
+    }
 };
 
 VkEncoderBackend::VkEncoderBackend() = default;
@@ -364,6 +466,47 @@ std::unique_ptr<VkEncoderBackend> VkEncoderBackend::Create(const NvencConfig& cf
         return nullptr;
     }
 
+    // B2.2b-partial: staging pool (combined L|R frame, matching the NVENC input
+    // dims) + the encode worker. Allocated with the context current (cuCtxCreate
+    // left it current on this thread).
+    bool stagingOk = true;
+    for (int i = 0; i < Impl::kStagingSlots; i++) {
+        CUdeviceptr p = 0;
+        size_t pitch = 0;
+        if (cuda.cuMemAllocPitch(&p, &pitch, static_cast<size_t>(cfg.renderWidth) * 4,
+                                 cfg.renderHeight, 16)
+            != CUDA_SUCCESS) {
+            stagingOk = false;
+            break;
+        }
+        impl->staging[i] = p;
+        if (impl->stagingPitch == 0) {
+            impl->stagingPitch = pitch;
+        }
+        impl->freeSlots.push(i);
+    }
+    if (!stagingOk) {
+        trace("VkEncoderBackend: staging cuMemAllocPitch failed\n");
+        for (int i = 0; i < Impl::kStagingSlots; i++) {
+            if (impl->staging[i]) {
+                cuda.cuMemFree(impl->staging[i]);
+                impl->staging[i] = 0;
+            }
+        }
+        try {
+            impl->encoder->DestroyEncoder();
+        } catch (...) { }
+        impl->encoder.reset();
+        cuda.cuStreamDestroy(impl->stream);
+        impl->stream = nullptr;
+        cuda.cuCtxDestroy(impl->ctx);
+        impl->ctx = nullptr;
+        return nullptr;
+    }
+    // The worker owns the Impl pointer for its lifetime; the object is heap-stable
+    // across the std::move below (only ownership of the unique_ptr transfers).
+    impl->worker = std::thread([imp = impl.get()] { imp->workerLoop(); });
+
     auto backend = std::unique_ptr<VkEncoderBackend>(new VkEncoderBackend());
     backend->m_impl = std::move(impl);
     return backend;
@@ -372,6 +515,16 @@ std::unique_ptr<VkEncoderBackend> VkEncoderBackend::Create(const NvencConfig& cf
 void VkEncoderBackend::Shutdown() {
     if (!m_impl) {
         return;
+    }
+    // B2.2b-partial: stop + drain the worker before tearing down the encoder it
+    // uses. The worker finishes any queued frames then exits.
+    if (m_impl->worker.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(m_impl->mtx);
+            m_impl->workerStop = true;
+        }
+        m_impl->cv.notify_all();
+        m_impl->worker.join();
     }
     if (m_impl->encoder) {
         m_impl->cuda.cuCtxPushCurrent(m_impl->ctx);
@@ -401,6 +554,12 @@ void VkEncoderBackend::Shutdown() {
         if (m_impl->stream) {
             m_impl->cuda.cuStreamDestroy(m_impl->stream);
             m_impl->stream = nullptr;
+        }
+        for (int i = 0; i < Impl::kStagingSlots; i++) {
+            if (m_impl->staging[i]) {
+                m_impl->cuda.cuMemFree(m_impl->staging[i]);
+                m_impl->staging[i] = 0;
+            }
         }
         CUcontext popped = nullptr;
         m_impl->cuda.cuCtxPopCurrent(&popped);
@@ -445,119 +604,117 @@ bool VkEncoderBackend::Submit(const SubmitDesc& desc, PacketCallback onPacket, v
     cuda.cuCtxPushCurrent(m_impl->ctx);
 
     bool ok = true;
+    int slot = -1;
     try {
-        const NvEncInputFrame* inputFrame = m_impl->encoder->GetNextInputFrame();
-        CUdeviceptr dst = reinterpret_cast<CUdeviceptr>(inputFrame->inputPtr);
-        size_t dstPitch = inputFrame->pitch;
-
-        // B1: gate the copies on comp_alvr's squash/FFR timeline semaphore by
-        // enqueuing the wait on the stream before the (async) copies below. In
-        // Slice A comp_alvr still CPU-waits (vkQueueWaitIdle) before handing us
-        // the frame, so the value is already signalled and this returns at once;
-        // it becomes load-bearing once Slice B removes that CPU wait. With no
-        // semaphore available the copies just proceed under comp_alvr's CPU wait.
-        if (m_impl->ensureForwardSemaphore(desc.syncSemaphoreHandle, desc.syncSemaphoreHandleType)) {
-            CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS waitParams = {};
-            waitParams.params.fence.value = desc.syncSemaphoreValue;
-            waitParams.flags = 0;
-            if (cuda.cuWaitExternalSemaphoresAsync(
-                    &m_impl->forwardSem, &waitParams, 1, m_impl->stream)
-                != CUDA_SUCCESS) {
-                trace("cuWaitExternalSemaphoresAsync failed\n");
+        // B2.2b-partial: reserve a staging slot; drop-newest if the worker is
+        // backed up so the compositor thread never blocks on the encode.
+        {
+            std::lock_guard<std::mutex> lk(m_impl->mtx);
+            if (!m_impl->freeSlots.empty()) {
+                slot = m_impl->freeSlots.front();
+                m_impl->freeSlots.pop();
             }
         }
+        if (slot < 0) {
+            m_impl->droppedFrames++;
+            trace("VkEncoderBackend: staging pool full; dropping frame\n");
+            ok = false;
+        } else {
+            CUdeviceptr dst = m_impl->staging[slot];
+            size_t dstPitch = m_impl->stagingPitch;
 
-        ok = m_impl->importViewToInput(
-            desc, 0, desc.imageHandleLeft, desc.imageSizeLeft, dst, dstPitch
-        );
-        if (ok && desc.imageHandleRight != 0) {
-            ok = m_impl->importViewToInput(
-                desc, 1, desc.imageHandleRight, desc.imageSizeRight, dst, dstPitch
-            );
-        }
-
-        if (ok) {
-            // B2.2a: signal the reverse "consumed" semaphore on the stream after
-            // the copies, so comp_alvr (B2.2b) can free the scratch ring slot once
-            // it lands. Inert until comp_alvr waits on it — it still CPU-waits and
-            // ignores this. Same value as the forward wait keeps both timelines on
-            // one monotonic sequence.
-            bool haveConsumed = m_impl->ensureConsumedSemaphore(
-                desc.consumedSemaphoreHandle, desc.syncSemaphoreHandleType);
-
-            // One-shot bring-up diagnostic: record whether each timeline semaphore
-            // imported, and with which CUDA handle type. Surfaced once through the
-            // Rust bridge (B2.2a's import success is otherwise invisible — the CPU
-            // wait masks it and trace() only goes to OutputDebugString).
-            if (!m_impl->importDiagDone) {
-                m_impl->importDiagDone = true;
-                const char* typeName =
-                    desc.syncSemaphoreHandleType == kSemHandleTypeD3d12Fence    ? "D3D12_FENCE"
-                    : desc.syncSemaphoreHandleType == kSemHandleTypeOpaqueWin32 ? "TIMELINE_WIN32"
-                                                                               : "PROBE";
-                auto state = [](uint64_t handle, CUexternalSemaphore sem) {
-                    return handle == 0 ? "none" : (sem ? "OK" : "FAILED");
-                };
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                         "semaphore import: type=%s forward=%s consumed=%s", typeName,
-                         state(desc.syncSemaphoreHandle, m_impl->forwardSem),
-                         state(desc.consumedSemaphoreHandle, m_impl->consumedSem));
-                g_vk_encoder_import_diag = buf;
-            }
-
-            if (haveConsumed) {
-                CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS sigParams = {};
-                sigParams.params.fence.value = desc.syncSemaphoreValue;
-                sigParams.flags = 0;
-                if (cuda.cuSignalExternalSemaphoresAsync(
-                        &m_impl->consumedSem, &sigParams, 1, m_impl->stream)
+            // B1: gate the copy on comp_alvr's squash/FFR timeline semaphore. In
+            // B2.2b-partial comp_alvr still CPU-waits (vkQueueWaitIdle) before
+            // handing us the frame, so this is already signalled and returns at
+            // once; it becomes load-bearing once B2.2b-full drops that CPU wait.
+            if (m_impl->ensureForwardSemaphore(desc.syncSemaphoreHandle, desc.syncSemaphoreHandleType)) {
+                CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS waitParams = {};
+                waitParams.params.fence.value = desc.syncSemaphoreValue;
+                waitParams.flags = 0;
+                if (cuda.cuWaitExternalSemaphoresAsync(
+                        &m_impl->forwardSem, &waitParams, 1, m_impl->stream)
                     != CUDA_SUCCESS) {
-                    trace("cuSignalExternalSemaphoresAsync failed\n");
+                    trace("cuWaitExternalSemaphoresAsync failed\n");
                 }
             }
 
-            // B1: both copies are async on our stream (ordered after the optional
-            // semaphore wait); block here until they finish before NVENC reads the
-            // input. Slice B2.2b moves this synchronize off the compositor thread.
-            cuda.cuStreamSynchronize(m_impl->stream);
-
-            bool idr = m_impl->insertIdr.exchange(false);
-            NV_ENC_PIC_PARAMS picParams = {};
-            if (idr) {
-                picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
+            // Copy the scratch into the staging slot (not NVENC's input — the
+            // worker does that). Once cuStreamSynchronize below returns, the
+            // scratch is fully consumed and comp_alvr may reuse the ring slot.
+            ok = m_impl->importViewToInput(
+                desc, 0, desc.imageHandleLeft, desc.imageSizeLeft, dst, dstPitch
+            );
+            if (ok && desc.imageHandleRight != 0) {
+                ok = m_impl->importViewToInput(
+                    desc, 1, desc.imageHandleRight, desc.imageSizeRight, dst, dstPitch
+                );
             }
 
-            std::vector<std::vector<uint8_t>> packets;
-            m_impl->encoder->EncodeFrame(packets, &picParams);
+            if (ok) {
+                // B2.2a: signal the reverse "consumed" semaphore on the stream
+                // after the copy. Inert until B2.2b-full waits on it.
+                bool haveConsumed = m_impl->ensureConsumedSemaphore(
+                    desc.consumedSemaphoreHandle, desc.syncSemaphoreHandleType);
 
-            for (std::vector<uint8_t>& packet : packets) {
-                uint8_t* buf = packet.data();
-                int len = static_cast<int>(packet.size());
-
-                // NVENC's AV1 output is IVF-wrapped; strip to the OBUs. Mirrors
-                // VideoEncoderNVENC::Transmit.
-                if (m_impl->cfg.codec == NVENC_CODEC_AV1) {
-                    const uint8_t ivf_magic[4] = { 0x44, 0x4B, 0x49, 0x46 };
-                    if (len >= 4 && !memcmp(buf, ivf_magic, 4)) {
-                        buf += 32;
-                        len -= 32;
-                    }
-                    if (len <= 12) {
-                        continue;
-                    }
-                    buf += 12;
-                    len -= 12;
+                // One-shot import diagnostic (see B2.2a), surfaced via the bridge.
+                if (!m_impl->importDiagDone) {
+                    m_impl->importDiagDone = true;
+                    const char* typeName =
+                        desc.syncSemaphoreHandleType == kSemHandleTypeD3d12Fence    ? "D3D12_FENCE"
+                        : desc.syncSemaphoreHandleType == kSemHandleTypeOpaqueWin32 ? "TIMELINE_WIN32"
+                                                                                   : "PROBE";
+                    auto state = [](uint64_t handle, CUexternalSemaphore sem) {
+                        return handle == 0 ? "none" : (sem ? "OK" : "FAILED");
+                    };
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                             "semaphore import: type=%s forward=%s consumed=%s", typeName,
+                             state(desc.syncSemaphoreHandle, m_impl->forwardSem),
+                             state(desc.consumedSemaphoreHandle, m_impl->consumedSem));
+                    g_vk_encoder_import_diag = buf;
                 }
 
-                if (len > 0 && onPacket) {
-                    onPacket(ctx, buf, len, idr, desc.targetTimestampNs);
+                if (haveConsumed) {
+                    CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS sigParams = {};
+                    sigParams.params.fence.value = desc.syncSemaphoreValue;
+                    sigParams.flags = 0;
+                    if (cuda.cuSignalExternalSemaphoresAsync(
+                            &m_impl->consumedSem, &sigParams, 1, m_impl->stream)
+                        != CUDA_SUCCESS) {
+                        trace("cuSignalExternalSemaphoresAsync failed\n");
+                    }
                 }
+
+                // Block only until the scratch->staging copy lands — fast, since
+                // comp_alvr already CPU-waited the squash. The expensive encode is
+                // then handed to the worker below.
+                cuda.cuStreamSynchronize(m_impl->stream);
+
+                // Hand the staged frame to the worker; EncodeFrame runs off the
+                // compositor thread. Ownership of the slot transfers to the worker.
+                Impl::WorkItem item;
+                item.slot = slot;
+                item.idr = m_impl->insertIdr.exchange(false);
+                item.targetTimestampNs = desc.targetTimestampNs;
+                item.onPacket = onPacket;
+                item.cbCtx = ctx;
+                {
+                    std::lock_guard<std::mutex> lk(m_impl->mtx);
+                    m_impl->work.push(item);
+                }
+                m_impl->cv.notify_one();
+                slot = -1;
             }
         }
     } catch (...) {
         trace("VkEncoderBackend::Submit threw\n");
         ok = false;
+    }
+
+    // If we reserved a slot but didn't hand it off (drop/error), return it.
+    if (slot >= 0) {
+        std::lock_guard<std::mutex> lk(m_impl->mtx);
+        m_impl->freeSlots.push(slot);
     }
 
     CUcontext popped = nullptr;
