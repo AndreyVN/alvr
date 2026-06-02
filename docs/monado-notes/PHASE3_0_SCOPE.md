@@ -151,12 +151,12 @@ The hard one. Pure refactor — no new behavior. Broken into sub-slices so each 
 
 ---
 
-**Verification gate (after each Slice-2 sub-slice).** Run a controlled A/B against `master`:
-- Same headset, same SteamVR app, same Settings.video.
-- Capture 60s of encoded bitstream both ways via `dump_video_to_file`-style probe.
-- Diff byte-for-byte. **Identical** is the bar.
+**Verification gate (after each Slice-2 sub-slice).** ⚠️ **Revised 2026-06-02 — the live byte-diff A/B originally drafted here is UNSOUND; don't build it.** The original plan ("run two SteamVR sessions, dump 60 s of NALs each, `cmp` byte-for-byte, *identical* is the bar") cannot work: two live sessions never share input frames (poses, frame timing, and BitrateManager rate-control state diverge from frame 1), and NVENC/AMF are not bit-deterministic even on identical input. The `cmp` would always differ — telling you nothing about whether the refactor changed behaviour. The sound verification for a **purely-extractive** refactor is:
+- **Code-level inspection (the real gate, met):** Slice 2 is mechanical — `VideoEncoder*`/`NvEncoder*` relocated unchanged (2.1); `D3d11EncoderBackend::Create` carries the AMF→NVENC→VPL→SW selection + exception-message shape verbatim from `CEncoder::Initialize` (2.2); the `IDRScheduler` moved into the backend but is consulted once per `Transmit` at the same logical point (2.3). `CEncoder` now just `Create`s once, `Transmit`s in its worker loop, and forwards `OnStreamStart`/`InsertIDR`/`Shutdown`. No backend logic changed.
+- **Functional SteamVR smoke (cheap, covers the residual runtime risk):** `cargo xtask build-streamer` → a real SteamVR session streams correctly on the NVENC/AMF path. This is implicitly satisfied — OpenVR mode is the shipped default on `master`.
+- If a regression is ever *suspected*, the only meaningful byte-level test is **deterministic offline**: feed a fixed, recorded input-texture sequence through a pre- vs post-refactor build of the *same* encoder and diff — and even that fights hardware-encoder non-determinism, so prefer a SW-backend (`--gpl`, `m_force_sw_encoding`) run where output is reproducible.
 
-**Exit:** Side-by-side bitstream comparison shows zero diff after Sub-slice 2.3. CI green. `cargo xtask build-streamer` produces a driver that loads cleanly into SteamVR. Sub-slice 2.4 deferred per note above.
+**Exit (met):** code inspection confirms the extraction is behaviour-preserving; CI green; `cargo xtask build-streamer` loads cleanly into SteamVR and streams. Sub-slice 2.4 deferred per note above.
 
 ### Slice 3 — Windows OpenXR backend (NEW)
 
@@ -208,4 +208,4 @@ After this scope doc, in order:
 | --- | --- | --- |
 | W3 | Linux move (Slice 1) before or after Windows interface extraction (Slice 2)? | Linux first — lower risk, lower scope, teaches us where the cross-runtime boundary sits before tackling Windows. |
 | W4 | Slice 3 in this Phase 3.0 or in Phase 3.1? | If Slice 1+2 stay on budget, do Slice 3 in 3.0 — it unblocks 3.1. Otherwise punt. |
-| W5 | Bitstream-diff verification harness — write fresh or reuse existing? | Write fresh, small (~200 lines): two driver processes side-by-side, both dump encoded NALs to file, `cmp` the files. Throwaway after Slice 2. |
+| W5 | Bitstream-diff verification harness — write fresh or reuse existing? | ~~Write fresh: two driver processes side-by-side, dump NALs, `cmp`.~~ **REJECTED 2026-06-02 — unsound (see the revised Verification gate above):** live sessions don't share input frames and hardware encoders aren't bit-deterministic, so the `cmp` can never pass. Verify Slice 2 by code inspection + a functional SteamVR smoke instead; no harness built. |
