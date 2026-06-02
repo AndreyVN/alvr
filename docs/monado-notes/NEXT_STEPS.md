@@ -1,6 +1,6 @@
 # OpenXR-mode integration — next steps
 
-Pick-up doc for future sessions. Pairs with the master plan at [`/openxr-migration.md`](../../openxr-migration.md). When the two disagree, the migration plan is authoritative and this file is wrong.
+Pick-up doc for future sessions. Pairs with the master plan at [`docs/openxr-migration.md`](../openxr-migration.md). When the two disagree, the migration plan is authoritative and this file is wrong.
 
 ## Where we are
 
@@ -227,7 +227,7 @@ Note: this was reached via the `oxr_overlay_smoke` path rather than `hello_xr` s
 
 ## Files a future session should read first
 
-1. `/openxr-migration.md` — master plan with phase breakdown and risk list
+1. `docs/openxr-migration.md` — master plan with phase breakdown and risk list
 2. `/docs/monado-notes/NEXT_STEPS.md` — **this file**
 3. `/docs/monado-notes/SUBMODULE_PIN.md` — exact `git submodule` migration commands
 4. `/docs/monado-notes/XRT_INTERFACES.md` — the Monado contracts the new code implements

@@ -66,4 +66,4 @@ For Meta Store builds the package id is rewritten — see `cargo xtask package-c
 
 ## Before touching this scope
 
-Read `ARCHITECTURE.md` for the "Tracking Flow" (client → server) and "Video Pipeline" (server → client) sections so you can see which named thread you're modifying on the client side.
+Read `docs/ARCHITECTURE.md` for the "Tracking Flow" (client → server) and "Video Pipeline" (server → client) sections so you can see which named thread you're modifying on the client side.

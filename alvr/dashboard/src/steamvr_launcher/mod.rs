@@ -117,7 +117,7 @@ impl Launcher {
         // Respect the runtime selector. When the OpenXR (Monado) mode is active
         // we must NOT auto-start SteamVR — the user expects the new runtime path.
         // OpenXR mode is scaffolding-only today: log and bail out instead of
-        // launching anything. Phase 4 of openxr-migration.md replaces this with
+        // launching anything. Phase 4 of docs/openxr-migration.md replaces this with
         // a real launch of monado-service / the libopenxr_monado runtime.
         if matches!(
             data_sources::get_read_only_local_session()

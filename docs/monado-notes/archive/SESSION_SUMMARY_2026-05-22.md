@@ -2,7 +2,7 @@
 
 Operations / verification wrap. No new code surface added to the streamer or the bridge; instead this session built up a real-GPU verification environment for the OpenXR-mode work that landed in the 2026-05-21 session, wired Monado's existing CTest into CI, and surfaced a long-standing hosting blocker that had silently kept every previous `openxr.yml` run red.
 
-Pairs with [`NEXT_STEPS.md`](NEXT_STEPS.md) (per-phase status) and the prior [`SESSION_SUMMARY_2026-05-21.md`](SESSION_SUMMARY_2026-05-21.md).
+Pairs with [`NEXT_STEPS.md`](../NEXT_STEPS.md) (per-phase status) and the prior [`SESSION_SUMMARY_2026-05-21.md`](SESSION_SUMMARY_2026-05-21.md).
 
 ## What landed
 

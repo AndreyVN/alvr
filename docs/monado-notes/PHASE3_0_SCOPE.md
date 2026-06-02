@@ -2,7 +2,7 @@
 
 > **STATUS 2026-06-02 — ✅ ESSENTIALLY COMPLETE.** The refactor (Option C, adapter pattern) shipped: Slice 1 (Linux relocation), Slice 2.1–2.3 (Windows `IEncoderBackend` extraction + `D3d11EncoderBackend` + IDR-scheduler hoist), and Slice 3.1–3.3 (`VkEncoderBackend` + the CUDA-interop NVENC `Submit` body wired to `alvr_oxr_submit_layers`, **landed 2026-05-27**, proven e2e on RTX 3090 + Quest 3). Both runtimes share `cpp/encoder/`. **Remaining tails are optional cleanup, not blockers:** sub-slice 2.4 (Linux `EncodePipeline` → `IEncoderBackend`); `FfiDynamicEncoderParams` unification; Linux `FrameRender` ↔ `protocol.h` decoupling. **Verification debt:** the W5 OpenVR byte-diff A/B harness was never written (Slice-2 "bit-identical" exit gate is trusted-on-review, not proven) and the Slice-1 Linux `--gpl` byte-diff is Linux-host-gated. Slice/decision detail below is preserved as the historical record; where a slice says "DEFERRED" check the inline status notes — Slice 3.3 in particular landed despite its heading.
 
-Pre-implementation plan for the encoder refactor blocker called out in [`NEXT_STEPS.md`](NEXT_STEPS.md) §"Phase 3 — 3.0". Read [`/openxr-migration.md`](../../openxr-migration.md) §Phase 3 first.
+Pre-implementation plan for the encoder refactor blocker called out in [`NEXT_STEPS.md`](NEXT_STEPS.md) §"Phase 3 — 3.0". Read [`docs/openxr-migration.md`](../openxr-migration.md) §Phase 3 first.
 
 ## Constraint (from CLAUDE.md rule §"How to not break the existing OpenVR mode")
 

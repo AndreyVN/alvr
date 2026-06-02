@@ -13,7 +13,7 @@ Today `openxr/` is a vendored snapshot of [Monado](https://gitlab.freedesktop.or
 
 ## Architectural conflict to resolve first
 
-The Monado-side ALVR driver and the Monado-side ALVR compositor (added under Phase 2 — see [`openxr-migration.md`](../../openxr-migration.md)) currently live INSIDE `openxr/`:
+The Monado-side ALVR driver and the Monado-side ALVR compositor (added under Phase 2 — see [`openxr-migration.md`](../openxr-migration.md)) currently live INSIDE `openxr/`:
 
 ```
 openxr/src/xrt/drivers/alvr/                   ← ALVR-specific code

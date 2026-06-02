@@ -55,4 +55,4 @@ For wire-protocol changes, the only realistic integration test is **streamer + c
 
 ## Before touching this scope
 
-Read `ARCHITECTURE.md` — specifically the "Tracking Flow" and "Video Pipeline" sections — because a change here lands inside the loops described there.
+Read `docs/ARCHITECTURE.md` — specifically the "Tracking Flow" and "Video Pipeline" sections — because a change here lands inside the loops described there.

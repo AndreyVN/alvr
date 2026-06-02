@@ -64,4 +64,4 @@ When the dashboard can't reach the streamer, check that port `9943/tcp` (control
 
 ## Before touching this scope
 
-Read `ARCHITECTURE.md` for the "Video Pipeline" section — it names the per-stream threads (`video_send_thread`, `tracking_receive_thread`, `statistics_thread`, ...) so you can locate them in `alvr/server_core/src/connection.rs`.
+Read `docs/ARCHITECTURE.md` for the "Video Pipeline" section — it names the per-stream threads (`video_send_thread`, `tracking_receive_thread`, `statistics_thread`, ...) so you can locate them in `alvr/server_core/src/connection.rs`.

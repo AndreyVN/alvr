@@ -62,8 +62,8 @@ if [[ -n "$(git submodule status openxr 2>/dev/null)" ]]; then
 fi
 
 # Step 1 — make sure docs and migration plan are committed first.
-if ! git diff --quiet -- docs/monado-notes/ openxr-migration.md 2>/dev/null; then
-  echo "WARN: docs/monado-notes/ or openxr-migration.md have uncommitted changes."
+if ! git diff --quiet -- docs/monado-notes/ docs/openxr-migration.md 2>/dev/null; then
+  echo "WARN: docs/monado-notes/ or docs/openxr-migration.md have uncommitted changes."
   echo "Commit them before continuing so they survive the conversion cleanly."
   read -r -p "Continue anyway? [y/N] " resp
   [[ "$resp" =~ ^[Yy]$ ]] || exit 1

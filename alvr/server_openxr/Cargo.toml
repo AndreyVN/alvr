@@ -12,7 +12,7 @@ license = "MIT"
 #
 # At this scaffolding stage all bridge functions return XRT_ERROR_NOT_IMPLEMENTED
 # / log a warning. Wiring them up to alvr_server_core is Phase 3 of
-# openxr-migration.md.
+# docs/openxr-migration.md.
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -6,7 +6,7 @@
 //! `openxr/src/xrt/drivers/alvr/` loads this cdylib and calls into the
 //! functions declared here.
 //!
-//! ## Current status (Phase 3.1.5 of openxr-migration.md)
+//! ## Current status (Phase 3.1.5 of docs/openxr-migration.md)
 //!
 //! Live:
 //!   - [`alvr_oxr_init`] / [`alvr_oxr_shutdown`] — construct/drop a real

@@ -441,7 +441,7 @@ fn publish_active_runtime_manifest(build_dir: &Path) {
 /// Detect a live SteamVR `vrserver` process. Mirrors the check in
 /// `alvr/dashboard/src/steamvr_launcher/mod.rs` so the two modes share the
 /// same "is the other runtime busy?" signal. Used by [`register_openxr_runtime`]
-/// for mutual exclusion (Phase 4 §3 of openxr-migration.md).
+/// for mutual exclusion (Phase 4 §3 of docs/openxr-migration.md).
 fn is_steamvr_running() -> bool {
     System::new_all()
         .processes_by_name(OsStr::new(&afs::exec_fname("vrserver")))

@@ -2,7 +2,7 @@
 
 Wrap of a multi-slice session that closed Phases 3.3, 5, 6, and Phase 7 Slice 1 of the OpenXR-mode integration, plus the XrSessionStateChanged plumbing item from Phase 7 stretch. Bridge ABI went from v1 → v3. The session also caught two latent bugs not previously surfaced and shipped 16 unit tests covering the new paths.
 
-Pairs with [`NEXT_STEPS.md`](NEXT_STEPS.md) (per-phase status) and [`/openxr-migration.md`](../../openxr-migration.md) (master plan).
+Pairs with [`NEXT_STEPS.md`](../NEXT_STEPS.md) (per-phase status) and [`docs/openxr-migration.md`](../../openxr-migration.md) (master plan).
 
 ## What landed
 

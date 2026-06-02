@@ -1747,7 +1747,7 @@ pub struct LoggingConfig {
 /// path (`alvr_server_openxr`). The Steamvr variant is the default and matches
 /// historical behaviour; selecting Openxr is currently scaffolding only and
 /// shows a friendly "under development" message until Phase 3 of
-/// openxr-migration.md lands.
+/// docs/openxr-migration.md lands.
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[schema(gui = "button_group")]
 pub enum RuntimeMode {
