@@ -156,11 +156,18 @@ Environment / deploy (per [[openxr_mode_quirks_windows]]):
       `connect-quest` skill if `adb devices` is empty.
 
 Functional bring-up (in order):
-- [ ] **Import succeeds**: boot log shows the forward + reverse
-      `cuImportExternalSemaphore` succeeding with the **reported** handle type
-      (confirm which: D3D12_FENCE vs TIMELINE_WIN32). If both fail → the wait is
-      skipped and you silently fall back to the (now-removed) CPU wait → expect
-      corruption; fix the type before proceeding.
+- [x] **Handle type confirmed (2026-06-03, RTX 3090)**: boot log of the deployed
+      B2.2a build reports `exported (handle type 1)` = `OPAQUE_WIN32`;
+      `vk_print_external_handles_info` shows `OPAQUE_WIN32_BIT(timeline): true`,
+      `D3D12_FENCE_BIT(timeline): false`. Encoder imports as
+      `TIMELINE_SEMAPHORE_WIN32`. (Doc's earlier "D3D12_FENCE preferred" was wrong
+      for this driver — it isn't exportable here.)
+- [ ] **Import succeeds**: with a streaming client running, confirm the forward +
+      reverse `cuImportExternalSemaphore` actually succeed (no "import failed"
+      trace; frames flow). The 2026-06-03 boot check confirmed the *exported* type
+      only — `Submit` (hence the import) never ran without a client. If import
+      fails → the wait is skipped and you silently fall back to the (now-removed)
+      CPU wait → expect corruption; fix before proceeding.
 - [ ] **Steady-state video**: `layer_commit diag` counters
       (`submit_ok` climbing, `submit_failed`/`submit_no_encoder` flat); STATS/FPS
       hold vs the pre-B2.2b baseline.

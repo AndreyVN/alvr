@@ -94,6 +94,17 @@ type across the bridge** as a small enum field so the encoder picks correctly an
 the design survives a different host. That field is the likely reason Slice B
 bumps **ABI v9 → v10**.
 
+**RESOLVED 2026-06-03 on TESTHOST (RTX 3090, NVIDIA Vulkan).** Boot log from the
+deployed B2.2a build: `compositor_init_render_resources … exported (handle type
+1)` (= `OPAQUE_WIN32`), and `vk_print_external_handles_info` reports
+`…D3D12_FENCE_BIT(timeline): false` / `…OPAQUE_WIN32_BIT(timeline): true`. So on
+this driver timeline semaphores export **only** as OPAQUE_WIN32 — D3D12_FENCE is
+not even supported, the opposite of the preference assumed above. The encoder
+must import as `CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32`, which
+is exactly what B2.2a's type reporting drives. (This confirms the *exported* type;
+the encoder's `cuImportExternalSemaphore` **success** is a separate gate — it
+needs a streaming client to run `Submit`, not exercised here.)
+
 ## Work breakdown
 
 ### comp_alvr (`openxr/`)
