@@ -49,6 +49,15 @@ Two stalls remain on the compositor thread: **(A)** the squash/FFR CPU waits
 
 ### B2.2b-partial (recommended first flip) — moves only EncodeFrame off-thread
 
+> **LANDED + headset-verified 2026-06-03** (master `567dd3ac`, encoder-only, no
+> ABI/comp_alvr change). `VkEncoderBackend::Submit` copies the scratch into a
+> 3-slot staging pool (drop-newest) and a single worker thread does
+> staging→NVENC-input + `EncodeFrame` + packet callback. On TESTHOST (RTX 3090 +
+> Quest 3): streamer survived 120 frames with no crash, import OK, client decoded
+> + rendered, headset image clean. comp_alvr's squash `vkQueueWaitIdle` is
+> untouched, so the squash-completion wait still sits on the compositor thread —
+> only the encode moved off. `oxr_pacing` SUBMIT delta **not yet measured**.
+
 Compositor thread keeps the scratch interaction (so the ring is consumed before
 it returns → **no reuse hazard, reverse semaphore unused**); only `EncodeFrame`
 moves to a worker.
