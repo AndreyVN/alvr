@@ -156,6 +156,15 @@ enum AlvrOxrResult
    * The OpenXR mode has not been initialised yet.
    */
   ALVR_OXR_RESULT_NOT_INITIALISED = -3,
+  /**
+   * The video encoder isn't running (NVENC failed to initialise, or no
+   * client is connected yet), so this frame can't be encoded. Distinct from
+   * [`Failed`](Self::Failed) (a transient per-frame encode/import error) so a
+   * caller can tell a persistent "encoder down" condition from an occasional
+   * dropped frame — e.g. count it separately instead of inflating a generic
+   * failure tally.
+   */
+  ALVR_OXR_RESULT_ENCODER_UNAVAILABLE = -4,
 };
 #ifndef __cplusplus
 typedef int32_t AlvrOxrResult;
@@ -576,8 +585,12 @@ AlvrOxrResult alvr_oxr_get_foveation_vars(struct AlvrOxrFoveationVars *out_vars)
  * the projection image by `comp_alvr` before this call, so only `layers[0]` is
  * read here.
  *
- * Returns `Ok` when the frame was encoded, `Failed` when it was dropped (e.g.
- * the encoder isn't up or the external-memory import failed). Never
+ * Returns `Ok` when the frame was encoded, `EncoderUnavailable` when the
+ * encoder isn't running at all (NVENC init failed / no client yet), and
+ * `Failed` when the encoder is up but this frame was dropped (e.g. the
+ * external-memory import failed). The encoder-down vs frame-dropped split lets
+ * `comp_alvr` count a persistent "no encoder" condition separately from the
+ * occasional drop instead of inflating one failure tally. Never
  * `NotImplemented` now that the body is wired.
  *
  * `display_time_ns` is the frame's predicted display time (Monado-monotonic
@@ -666,13 +679,13 @@ AlvrOxrResult alvr_oxr_poll_session_event(struct AlvrOxrEvent *out_event);
 
 extern const char *alvr_vk_encoder_last_error(void);
 
-extern const char *alvr_vk_encoder_submit_diag(void);
-
 extern void *alvr_vk_encoder_create(const struct VkNvencConfig *cfg);
 
 extern void alvr_vk_encoder_destroy(void *handle);
 
 extern void alvr_vk_encoder_on_stream_start(void *handle);
+
+extern void alvr_vk_encoder_insert_idr(void *handle);
 
 extern int32_t alvr_vk_encoder_get_seq_params(void *handle, uint8_t *out_buf, int32_t cap);
 

@@ -455,6 +455,13 @@ pub enum AlvrOxrResult {
     Failed = -2,
     /// The OpenXR mode has not been initialised yet.
     NotInitialised = -3,
+    /// The video encoder isn't running (NVENC failed to initialise, or no
+    /// client is connected yet), so this frame can't be encoded. Distinct from
+    /// [`Failed`](Self::Failed) (a transient per-frame encode/import error) so a
+    /// caller can tell a persistent "encoder down" condition from an occasional
+    /// dropped frame — e.g. count it separately instead of inflating a generic
+    /// failure tally.
+    EncoderUnavailable = -4,
 }
 
 /// Per-side identifier for hand/controller bridge calls.
@@ -1405,7 +1412,11 @@ mod encoder_bridge {
         // each per-view image into a `2 * per_eye_w`-wide NVENC frame, so a
         // size mismatch would misalign / partially fill the encoded frame.
         let (per_eye_w, per_eye_h, ffr_on) = match super::foveation_compress_vars_from_config(oc) {
-            Some(v) => (v.optimized_view_resolution.x, v.optimized_view_resolution.y, true),
+            Some(v) => (
+                v.optimized_view_resolution.x,
+                v.optimized_view_resolution.y,
+                true,
+            ),
             None => (oc.eye_resolution_width, oc.eye_resolution_height, false),
         };
         info!(
@@ -1563,6 +1574,14 @@ mod encoder_bridge {
         }
     }
 
+    /// Whether the encoder is up (created + init succeeded). `false` means
+    /// `start()` either hasn't run or bailed because `alvr_vk_encoder_create`
+    /// returned null (e.g. NVENC init failed). Lets `alvr_oxr_submit_layers`
+    /// report `EncoderUnavailable` distinctly from a per-frame encode failure.
+    pub fn is_active() -> bool {
+        ENCODER.lock().is_some()
+    }
+
     pub fn submit(layer: &AlvrOxrLayer, sync_handle: u64, monado_display_time_ns: u64) -> bool {
         let guard = ENCODER.lock();
         let Some(handle) = guard.as_ref() else {
@@ -1694,6 +1713,9 @@ mod encoder_bridge {
     pub fn start() {}
     pub fn stop() {}
     pub fn insert_idr() {}
+    pub fn is_active() -> bool {
+        false
+    }
     pub fn submit(_layer: &AlvrOxrLayer, _sync_handle: u64, _target_timestamp_ns: u64) -> bool {
         false
     }
@@ -1707,8 +1729,12 @@ mod encoder_bridge {
 /// the projection image by `comp_alvr` before this call, so only `layers[0]` is
 /// read here.
 ///
-/// Returns `Ok` when the frame was encoded, `Failed` when it was dropped (e.g.
-/// the encoder isn't up or the external-memory import failed). Never
+/// Returns `Ok` when the frame was encoded, `EncoderUnavailable` when the
+/// encoder isn't running at all (NVENC init failed / no client yet), and
+/// `Failed` when the encoder is up but this frame was dropped (e.g. the
+/// external-memory import failed). The encoder-down vs frame-dropped split lets
+/// `comp_alvr` count a persistent "no encoder" condition separately from the
+/// occasional drop instead of inflating one failure tally. Never
 /// `NotImplemented` now that the body is wired.
 ///
 /// `display_time_ns` is the frame's predicted display time (Monado-monotonic
@@ -1738,6 +1764,14 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
     // Monado-monotonic ns; clamp the (always-positive) predicted display time
     // into the u64 the encoder/send_video_nal path uses.
     let target_timestamp_ns = display_time_ns.max(0) as u64;
+
+    // Distinguish "encoder isn't up" (persistent — NVENC init failed / no client)
+    // from "this frame's encode failed" (transient) so the caller's counters and
+    // logs don't conflate the two. Without this split, a silently-uninitialised
+    // encoder would surface only as a generic per-frame failure.
+    if !encoder_bridge::is_active() {
+        return AlvrOxrResult::EncoderUnavailable;
+    }
 
     if encoder_bridge::submit(layer, sync_handle, target_timestamp_ns) {
         AlvrOxrResult::Ok
