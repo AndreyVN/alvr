@@ -9,7 +9,7 @@ When a test passes, move it to a "Verified on … with … on YYYY-MM-DD" line a
 1. **alvr repo** cloned with submodules — `git clone --recurse-submodules` or `git submodule update --init --recursive` after a non-recursive clone. The `openxr/` directory must contain Monado source pinned at the fork's `alvr` branch.
 2. **Toolchain audit** per `install.txt` (Windows) or the Monado upstream `BUILDING.md` (Linux). The Monado-side deps Linux needs are listed there; the ALVR-side deps Windows needs are listed in `install.txt`.
 3. **Vulkan SDK 1.4.x** installed and `$VULKAN_SDK` set. The bridge's `cc::Build` only emits a warning if it's missing, but Phase 3.2's real `comp_alvr.c` body and Slice 3.3's Vulkan-input NVENC encoder both need it linked.
-4. **NVENC SDK 12.1+** for Slice 3.3 work specifically. The D3D11 backends already pinned at 12.2 work fine; the Vulkan-input API path needs ≥12.1's `nvEncRegisterResource(NV_ENC_INPUT_RESOURCE_TYPE_VULKAN_IMAGE_HANDLE)`.
+4. **CUDA Toolkit** (for `cuda.h` / `cudaTypedefs.h` at build time) for the OpenXR-mode Vulkan-input encoder. Slice 3.3 shipped via CUDA-interop NVENC, not NVENC's `nvEncRegisterResource` Vulkan-image API, so no NVENC-SDK upgrade is required (the existing 12.2 D3D11 headers suffice); `nvcuda.dll` is loaded dynamically at runtime. See `openxr_nvenc_build_prereqs` memory.
 5. **Headset** that the OpenVR path already supports — Quest 2/3/Pro, Pico 4, etc. The point of these smoke tests is comparing OpenXR mode against OpenVR mode behavior, so the headset must work on the existing SteamVR path first.
 
 ## Gate A — build clean (any host)
@@ -58,7 +58,7 @@ Expected:
 - View poses on the headset track real motion (head + controllers), not identity.
 - Trigger / grip / thumbstick / A-B-X-Y all surface in `hello_xr`'s input dump.
 - A haptic pulse fires on the headset side when the sample triggers it.
-- ❌ Video stream itself is **not** expected to work until Phase 3.2 + Slice 3.3 land — `alvr_oxr_submit_layers` is still a stub, so `hello_xr`'s rendered cube doesn't reach the headset display.
+- ✅ Video reaches the headset (since 2026-05-27): `comp_alvr` squashes + FFR-compresses the per-view layers and `alvr_oxr_submit_layers` encodes them through the Vulkan-input NVENC backend. `hello_xr`'s rendered cube displays on the headset (verified RTX 3090 + Quest 3).
 
 Cleanup: `cargo xtask unregister-openxr-runtime --release` (or SteamVR mode won't launch — see Phase 4.3 mutual exclusion).
 

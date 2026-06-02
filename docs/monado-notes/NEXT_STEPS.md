@@ -63,18 +63,13 @@ Until step 3 is run, do not run `git submodule add openxr` by hand — it will e
 
 ## Phase 3 — the next real chunk (5–10 days)
 
-Order matters because of the encoder refactor blocker.
+Order mattered because of the encoder refactor blocker (3.0) — now resolved, so 3.1+ are unblocked.
 
-### 3.0 (blocker) — Refactor encoder out of `alvr/server_openvr/cpp/`
+### 3.0 — Refactor encoder out of `alvr/server_openvr/cpp/` — ✅ RESOLVED (scoped + landed 2026-05-20 → 2026-05-27)
 
-Today the NVENC/AMF/VPL paths in `alvr/server_openvr/cpp/` are stitched into SteamVR's `IVRDriverDirectModeComponent` interface. Phase 3 needs them runtime-agnostic.
+Originally the Phase 3 blocker (NVENC/AMF/VPL stitched into SteamVR's `IVRDriverDirectModeComponent`). Scoped in full in [`PHASE3_0_SCOPE.md`](PHASE3_0_SCOPE.md) and shipped as **Option C — the adapter pattern**: a shared `IEncoderBackend` interface (`cpp/encoder/EncoderBackend.h`, lifecycle + IDR scheduling) with two typed families — `D3d11EncoderBackend` (OpenVR, behaviour-unchanged) and `VkEncoderBackend` (OpenXR). The encoder C++ lives in a sibling `alvr/server_openvr/cpp/encoder/{linux,win32_d3d11,win32_vk}/` tree referenced by both crates' `build.rs` (no new crate — decision W2). Slices landed: Linux relocation (1); Windows interface extraction (2.1–2.3); `VkEncoderBackend` skeleton + `server_openxr` `cc::Build` (3.1–3.2); and the **CUDA-interop NVENC `Submit` body** wired to `alvr_oxr_submit_layers` (3.3, 2026-05-27, proven e2e on RTX 3090 + Quest — not the `nvEncRegisterResource` Vulkan-image path the scope doc first anticipated). Both runtimes now share the encoder; OpenXR's submit path runs through the inline `encoder_bridge` module in `server_openxr/src/lib.rs`.
 
-Suggested shape:
-- Extract a `class Encoder` (or similar) whose constructor takes "input: shared VkImage handle + sync object" and emits encoded packets.
-- Both `alvr_server_openvr` and `alvr_server_openxr` instantiate it. The SteamVR-specific glue stays in `server_openvr/cpp` as a wrapper.
-- Consider extracting to a new crate `alvr/encoder/` with a C++ core + a thin Rust ABI.
-
-This refactor must land before 3.5 or both paths duplicate code.
+**Remaining tails are optional cleanup, not blockers** (full table in `PHASE3_0_SCOPE.md`): sub-slice 2.4 (conform Linux `EncodePipeline` to `IEncoderBackend`); `FfiDynamicEncoderParams` unification (Windows polls per-frame, Linux uses `SetParams`); Linux `FrameRender` ↔ `protocol.h` decoupling. Plus verification debt: the Slice-2 OpenVR-output byte-diff A/B (the W5 harness was never written) and the Slice-1 Linux `--gpl` build + byte-diff (Linux-host-gated). Nothing here blocks the rest of Phase 3.
 
 ### 3.1 — Wire `alvr_server_core` into the bridge stubs — LANDED 2026-05-20 (except `submit_layers`)
 

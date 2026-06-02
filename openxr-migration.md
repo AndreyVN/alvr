@@ -1,5 +1,7 @@
 # Plan: integrate ALVR with the OpenXR (Monado) snapshot, analogous to the OpenVR path
 
+> **STATUS 2026-06-02 — this plan is largely EXECUTED.** Phases 0–6 + hand-tracking + per-view foveation merged to `master`; OpenXR mode streams video end-to-end (RTX 3090 + Quest 3) and the Phase 3.4 encoder refactor (the old critical-path blocker) landed. The forward-looking framing below is preserved as the design-of-record; for live state and the remaining optional work see [`docs/monado-notes/NEXT_STEPS.md`](docs/monado-notes/NEXT_STEPS.md) (canonical pickup doc) and [`docs/monado-notes/PHASE3_0_SCOPE.md`](docs/monado-notes/PHASE3_0_SCOPE.md).
+
 ## Framing
 
 Today: `openvr/` is a vendored Valve SDK; `alvr/server_openvr` is a Rust crate that compiles to a SteamVR driver consuming those headers. End state: `openxr/` is a vendored Monado snapshot; a new `alvr/server_openxr` Rust crate plus a new `drivers/alvr/` inside Monado bring up the same PC-side functionality on top of Monado/OpenXR. The headset (`alvr/client_openxr`) does not change — it's already OpenXR. The wire protocol (`alvr_sockets` + `alvr_packets`) does not change.
@@ -87,7 +89,7 @@ Exit criterion: `monado-cli --probe` with `XRT_BUILD_DRIVER_ALVR=ON` and the bri
 | 3.1 | Add `compositor/alvr/comp_alvr.c` — a new `xrt_compositor_native` that extends `comp_base`. Swapchain creation goes through the existing `compositor/util/comp_swapchain.c` (gets us Vulkan images that other GPU APIs can import via shared handles). | `openxr/src/xrt/compositor/alvr/**` |
 | 3.2 | Override `layer_commit`: package the per-layer `xrt_layer_data` + image handles (Win32 NT handle / DMABUF fd) into a struct and call `alvr_oxr_submit_layers`. | same |
 | 3.3 | Add `XRT_FEATURE_COMP_ALVR` cmake option. In `targets/common/target_instance.c:113`, if `XRT_BUILD_DRIVER_ALVR` is active, select this compositor instead of `comp_main` / `comp_null`. | `openxr/src/xrt/targets/common/target_instance.c` |
-| 3.4 | Refactor encoder in `alvr/server_openvr/cpp` so the NVENC/AMF/VPL paths take a runtime-agnostic `Encoder` interface (input: VkImage handle + sync object; output: encoded packet). Currently they're stitched into the SteamVR DirectMode component. **This refactor must land before 3.5 — flag as a blocker.** | `alvr/server_openvr/cpp/**`, possibly a new `alvr/encoder/` shared crate |
+| 3.4 | Refactor encoder in `alvr/server_openvr/cpp` so the NVENC/AMF/VPL paths take a runtime-agnostic `Encoder` interface (input: VkImage handle + sync object; output: encoded packet). Currently they're stitched into the SteamVR DirectMode component. ~~**This refactor must land before 3.5 — flag as a blocker.**~~ **✅ DONE** — shipped as the `IEncoderBackend` adapter pattern (no separate crate); see `docs/monado-notes/PHASE3_0_SCOPE.md`. | `alvr/server_openvr/cpp/encoder/**` |
 | 3.5 | `alvr_server_openxr::handle_submit_layers` walks the layer list: projection layer (left/right view) → into the encoder; quad/cylinder/etc. → either rasterise into the projection layer first (Phase 7) or drop with a warning. | `alvr/server_openxr/src/layers.rs` |
 | 3.6 | Frame pacing: feed `u_pc_mark_point(POINT_SUBMIT_END)` from `comp_alvr.c` so Monado's compositor pacer learns ALVR's actual present cadence. | `openxr/src/xrt/compositor/alvr/comp_alvr.c` |
 
@@ -163,7 +165,7 @@ Touched (small):
 
 ## Risks & dependencies (read this part)
 
-1. **Encoder refactor is on the critical path.** Phase 3.4 must land first, or the OpenXR path will end up duplicating the encoder code. Suggest splitting the encoder into its own crate before phase 3 starts.
+1. **Encoder refactor is on the critical path.** ~~Phase 3.4 must land first~~ **— RESOLVED.** Landed as the `IEncoderBackend` adapter pattern in a sibling `cpp/encoder/` tree (not a separate crate — that idea was evaluated and dropped as boilerplate); both runtimes share it. See `docs/monado-notes/PHASE3_0_SCOPE.md`.
 2. **Wire format may need additions.** If we want hand tracking, per-view fov, or passthrough we need new `alvr_packets` fields, which is a wire-compat event (CLAUDE.md rule 5).
 3. **Upstream Monado ABI drift.** If `xrt_compositor`/`xrt_device` change between snapshots, our driver breaks. Snapshot-pin is the mitigation; treat updates as deliberate.
 4. **Coexistence on Windows.** Both paths grab the headset stream; we need launcher-side mutual exclusion.

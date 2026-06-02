@@ -1,6 +1,8 @@
 # Phase 3.0 — encoder refactor scoping
 
-Pre-implementation plan for the encoder refactor blocker called out in [`NEXT_STEPS.md`](NEXT_STEPS.md) §"Phase 3 — 3.0 (blocker)". Read [`/openxr-migration.md`](../../openxr-migration.md) §Phase 3 first.
+> **STATUS 2026-06-02 — ✅ ESSENTIALLY COMPLETE.** The refactor (Option C, adapter pattern) shipped: Slice 1 (Linux relocation), Slice 2.1–2.3 (Windows `IEncoderBackend` extraction + `D3d11EncoderBackend` + IDR-scheduler hoist), and Slice 3.1–3.3 (`VkEncoderBackend` + the CUDA-interop NVENC `Submit` body wired to `alvr_oxr_submit_layers`, **landed 2026-05-27**, proven e2e on RTX 3090 + Quest 3). Both runtimes share `cpp/encoder/`. **Remaining tails are optional cleanup, not blockers:** sub-slice 2.4 (Linux `EncodePipeline` → `IEncoderBackend`); `FfiDynamicEncoderParams` unification; Linux `FrameRender` ↔ `protocol.h` decoupling. **Verification debt:** the W5 OpenVR byte-diff A/B harness was never written (Slice-2 "bit-identical" exit gate is trusted-on-review, not proven) and the Slice-1 Linux `--gpl` byte-diff is Linux-host-gated. Slice/decision detail below is preserved as the historical record; where a slice says "DEFERRED" check the inline status notes — Slice 3.3 in particular landed despite its heading.
+
+Pre-implementation plan for the encoder refactor blocker called out in [`NEXT_STEPS.md`](NEXT_STEPS.md) §"Phase 3 — 3.0". Read [`/openxr-migration.md`](../../openxr-migration.md) §Phase 3 first.
 
 ## Constraint (from CLAUDE.md rule §"How to not break the existing OpenVR mode")
 
@@ -164,16 +166,11 @@ Three sub-slices. Originally estimated 3 days total in one shot, but the verifia
 
 **Sub-slice 3.2 — LANDED 2026-05-20**: `alvr_server_openxr/build.rs` gains a `cc::Build` step that compiles the `win32_vk/` skeleton on Windows. Vulkan SDK include path picked up from `$VULKAN_SDK` (LunarG installer convention); `vulkan-1.lib` link is deliberately deferred to 3.3 since the skeleton uses opaque uint64_t handles and references no Vulkan symbols. Cross-crate include of `../server_openvr/cpp` resolves the shared `encoder/EncoderBackend.h`. Produces a 178KB `alvr_server_openxr_encoder.lib` bundled into the cdylib. Bridge ABI unchanged.
 
-Still left for the actual Vulkan-input encoder (Sub-slice 3.3):
-1. NVENC SDK 12.1+ headers — currently bundled in `alvr/server_openvr/cpp/encoder/win32_d3d11/NvEncoder.h` etc., but the Vulkan-input API uses different entry points (`nvEncRegisterResource` with `NV_ENC_INPUT_RESOURCE_TYPE_VULKAN_IMAGE_HANDLE`); may need to upgrade or ship the SDK.
-2. C-ABI between `alvr_server_openxr/src/lib.rs` and the new static lib (Rust-side wrapper that constructs/destructs VkEncoderBackend + calls Submit on submitted layers).
-3. Wiring `alvr_oxr_submit_layers` to forward the `AlvrOxrLayer[]` into the backend.
-
-**Sub-slice 3.3 — DEFERRED**: implement `VkEncoderBackend_NVENC::Submit`. External-memory import via `VK_KHR_external_memory_win32`, semaphore wait via `VK_KHR_external_semaphore_win32`, then feed to NVENC's Vulkan-image input. Wire `alvr_oxr_submit_layers` in Rust to construct the SubmitDesc and call into Submit.
+**Sub-slice 3.3 — ✅ LANDED 2026-05-27** (proven e2e on RTX 3090 + Quest 3; see NEXT_STEPS §3.4). Implemented `VkEncoderBackend::Submit` and wired `alvr_oxr_submit_layers`. **Shipped via CUDA-interop, not the originally-anticipated `nvEncRegisterResource` Vulkan-image path:** the submitted per-view Vulkan images (OPAQUE_WIN32 external memory) are imported into CUDA via `VK_KHR_external_memory_win32`, composited into the combined NVENC input frame, and encoded (H.264/HEVC) — the CUDA driver API (`cuda.h`/`cudaTypedefs.h`) is loaded dynamically from `nvcuda.dll` at runtime (`win32_vk/CudaDriverApi.h` + `VkEncoderBackendC.cpp`), so no `cuda.lib` link and no NVENC-SDK-version bump was needed. The C-ABI between `server_openxr/src/lib.rs` and the static lib lives in the inline `encoder_bridge` module. The three "still left" items the earlier draft listed (NVENC SDK Vulkan entry points, the Rust↔lib C-ABI, and the `AlvrOxrLayer[]` forwarding) are all done — the SDK-upgrade item became moot because the CUDA path sidesteps NVENC's Vulkan-image registration entirely.
 
 **Sub-slice 3.4 (Phase 7 stretch)**: AMF + VPL Vulkan input. NVENC-only is the Slice 3 ship target.
 
-**Exit (Slice 3):** OpenXR mode on Windows + NVIDIA GPU streams a frame end-to-end. AMF/Intel/SW users get a "not yet supported" error in OpenXR mode. Not achievable in 3.1 alone — 3.2/3.3 require a real Vulkan + NVENC + Monado verification environment.
+**Exit (Slice 3): ✅ MET 2026-05-27.** OpenXR mode on Windows + NVIDIA streams frames end-to-end (verified RTX 3090 + Quest 3). AMF/Intel/SW in OpenXR mode remain unsupported (Sub-slice 3.4, Phase 7 stretch). 3.2/3.3 were verified on the RTX 3090 test host once the Vulkan + NVENC + Monado stack was in place.
 
 ## Risk register
 
