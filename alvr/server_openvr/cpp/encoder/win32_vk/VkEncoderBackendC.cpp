@@ -57,6 +57,8 @@ bool alvr_vk_encoder_submit(
     d.imageHeight = desc->image_height;
     d.syncSemaphoreHandle = desc->sync_semaphore_handle;
     d.syncSemaphoreValue = desc->sync_semaphore_value;
+    d.syncSemaphoreHandleType = desc->sync_semaphore_handle_type;
+    d.consumedSemaphoreHandle = desc->consumed_semaphore_handle;
     d.presentationTimeNs = desc->presentation_time_ns;
     d.targetTimestampNs = desc->target_timestamp_ns;
     return static_cast<VkEncoderBackend*>(handle)->Submit(d, cb, ctx);

@@ -59,6 +59,11 @@ struct CudaApi {
     CUresult(CUDAAPI*
                  cuWaitExternalSemaphoresAsync)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS*, unsigned int, CUstream)
         = nullptr;
+    // B2.2a: signal the reverse "consumed" semaphore once the input copies land,
+    // so comp_alvr (Slice B2.2b) can wait before reusing the scratch ring slot.
+    CUresult(CUDAAPI*
+                 cuSignalExternalSemaphoresAsync)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS*, unsigned int, CUstream)
+        = nullptr;
     CUresult(CUDAAPI* cuDestroyExternalSemaphore)(CUexternalSemaphore) = nullptr;
 
     // Resolve every entry point. Returns false (and leaves the struct partially
@@ -106,6 +111,7 @@ struct CudaApi {
         resolve(cuMemcpy2DAsync, "cuMemcpy2DAsync_v2");
         resolve(cuImportExternalSemaphore, "cuImportExternalSemaphore");
         resolve(cuWaitExternalSemaphoresAsync, "cuWaitExternalSemaphoresAsync");
+        resolve(cuSignalExternalSemaphoresAsync, "cuSignalExternalSemaphoresAsync");
         resolve(cuDestroyExternalSemaphore, "cuDestroyExternalSemaphore");
 
         return ok;

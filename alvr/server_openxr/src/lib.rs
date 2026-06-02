@@ -409,7 +409,15 @@ fn event_loop(
 ///   Slice B removes the CPU wait and adds the matching CUDA wait. `sync_handle
 ///   == 0` means "no semaphore, the image is already GPU-complete" — the
 ///   fallback when the device can't export a timeline semaphore.
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 9;
+/// - v10: [`alvr_oxr_submit_layers`] gains `sync_handle_type` (the
+///   `ALVR_OXR_SEM_HANDLE_TYPE_*` of the forward + reverse timeline semaphores,
+///   so the encoder imports them without probing) and `consumed_handle` (the
+///   native handle of a second, **reverse** "consumed" timeline semaphore the
+///   encoder signals once it has copied the scratch out — the hook Slice B2.2b
+///   uses to let `comp_alvr` reuse a scratch ring slot without the CPU wait).
+///   In this slice (B2.2a) the encoder imports + signals the reverse semaphore
+///   but `comp_alvr` still CPU-waits and ignores it, so behaviour is unchanged.
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 10;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -706,6 +714,15 @@ pub const ALVR_OXR_DEVICE_KIND_OTHER: i32 = 0;
 pub const ALVR_OXR_DEVICE_KIND_HMD: i32 = 1;
 pub const ALVR_OXR_DEVICE_KIND_LEFT_CONTROLLER: i32 = 2;
 pub const ALVR_OXR_DEVICE_KIND_RIGHT_CONTROLLER: i32 = 3;
+
+/// CUDA-compatible external handle type of the squash/FFR timeline semaphores
+/// (forward + reverse), reported by `comp_alvr` over the bridge (ABI v10) so the
+/// encoder imports them with `cuImportExternalSemaphore` using the exact type
+/// Monado exported rather than probing. Mirrors the choice
+/// `vk_get_timeline_semaphore_handle_type` makes on Windows.
+pub const ALVR_OXR_SEM_HANDLE_TYPE_NONE: u32 = 0;
+pub const ALVR_OXR_SEM_HANDLE_TYPE_OPAQUE_WIN32: u32 = 1;
+pub const ALVR_OXR_SEM_HANDLE_TYPE_D3D12_FENCE: u32 = 2;
 
 /// Resolution of the basis-points gauge encoding in [`encode_battery`]:
 /// `gauge_value ∈ [0.0, 1.0]` becomes `0..=ALVR_OXR_BATTERY_GAUGE_SCALE`.
@@ -1285,6 +1302,8 @@ mod encoder_bridge {
         image_height: u32,
         sync_semaphore_handle: u64,
         sync_semaphore_value: u64,
+        sync_semaphore_handle_type: u32,
+        consumed_semaphore_handle: u64,
         presentation_time_ns: u64,
         target_timestamp_ns: u64,
     }
@@ -1597,6 +1616,8 @@ mod encoder_bridge {
         layer: &AlvrOxrLayer,
         sync_handle: u64,
         sync_value: u64,
+        sync_handle_type: u32,
+        consumed_handle: u64,
         monado_display_time_ns: u64,
     ) -> bool {
         let guard = ENCODER.lock();
@@ -1626,11 +1647,14 @@ mod encoder_bridge {
             image_format: 0,
             image_width: layer.width,
             image_height: layer.height,
-            // ABI v9: the squash/FFR timeline semaphore handle + value (0/0 when
-            // comp_alvr couldn't export one and CPU-waited instead). Carried into
-            // the C++ encoder's already-present sync fields; consumed in Slice B.
+            // ABI v9: the squash/FFR forward timeline semaphore handle + value
+            // (0/0 when comp_alvr couldn't export one and CPU-waited instead).
             sync_semaphore_handle: sync_handle,
             sync_semaphore_value: sync_value,
+            // ABI v10: the CUDA handle type of both semaphores (NONE => probe) and
+            // the reverse "consumed" semaphore handle the encoder signals.
+            sync_semaphore_handle_type: sync_handle_type,
+            consumed_semaphore_handle: consumed_handle,
             presentation_time_ns: 0,
             target_timestamp_ns: stamp_ns,
         };
@@ -1739,6 +1763,8 @@ mod encoder_bridge {
         _layer: &AlvrOxrLayer,
         _sync_handle: u64,
         _sync_value: u64,
+        _sync_handle_type: u32,
+        _consumed_handle: u64,
         _target_timestamp_ns: u64,
     ) -> bool {
         false
@@ -1766,13 +1792,19 @@ mod encoder_bridge {
 /// a tracking pose.
 ///
 /// `sync_handle` + `sync_value` (ABI v9) carry the Monado-side squash/FFR
-/// timeline semaphore: `sync_handle` is the exported native semaphore handle and
-/// `sync_value` is the timeline value that submit signalled. `sync_handle == 0`
-/// means "no semaphore, the image is already GPU-complete" (the fallback when
-/// `comp_alvr` couldn't export a timeline semaphore, in which case it CPU-waited
-/// before this call). The encoder does not consume these yet — Slice B wires the
-/// `cuWaitExternalSemaphoresAsync`; until then `comp_alvr`'s CPU `vkQueueWaitIdle`
-/// is what guarantees the image is ready.
+/// **forward** timeline semaphore: `sync_handle` is the exported native semaphore
+/// handle and `sync_value` is the timeline value that submit signalled.
+/// `sync_handle == 0` means "no semaphore, the image is already GPU-complete"
+/// (the fallback when `comp_alvr` couldn't export a timeline semaphore, in which
+/// case it CPU-waited before this call).
+///
+/// `sync_handle_type` (ABI v10) is the `ALVR_OXR_SEM_HANDLE_TYPE_*` of both
+/// timeline semaphores so the encoder imports them with the exact CUDA handle
+/// type instead of probing (`NONE` ⇒ probe). `consumed_handle` (ABI v10) is the
+/// native handle of the **reverse** "consumed" timeline semaphore: the encoder
+/// signals it (at `sync_value`) once the scratch has been copied into NVENC's
+/// input, the hook Slice B2.2b uses to free the scratch ring slot without a CPU
+/// wait. In Slice B2.2a `comp_alvr` still CPU-waits and ignores it.
 ///
 /// # Safety
 /// `layers` must point to `layer_count` valid `AlvrOxrLayer`s.
@@ -1783,6 +1815,8 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
     layers: *const AlvrOxrLayer,
     sync_handle: u64,
     sync_value: u64,
+    sync_handle_type: u32,
+    consumed_handle: u64,
     display_time_ns: i64,
 ) -> AlvrOxrResult {
     let _ = frame_id;
@@ -1806,7 +1840,14 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
         return AlvrOxrResult::EncoderUnavailable;
     }
 
-    if encoder_bridge::submit(layer, sync_handle, sync_value, target_timestamp_ns) {
+    if encoder_bridge::submit(
+        layer,
+        sync_handle,
+        sync_value,
+        sync_handle_type,
+        consumed_handle,
+        target_timestamp_ns,
+    ) {
         AlvrOxrResult::Ok
     } else {
         AlvrOxrResult::Failed

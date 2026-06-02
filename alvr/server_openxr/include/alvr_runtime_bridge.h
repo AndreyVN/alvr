@@ -84,8 +84,16 @@
  *   Slice B removes the CPU wait and adds the matching CUDA wait. `sync_handle
  *   == 0` means "no semaphore, the image is already GPU-complete" — the
  *   fallback when the device can't export a timeline semaphore.
+ * - v10: [`alvr_oxr_submit_layers`] gains `sync_handle_type` (the
+ *   `ALVR_OXR_SEM_HANDLE_TYPE_*` of the forward + reverse timeline semaphores,
+ *   so the encoder imports them without probing) and `consumed_handle` (the
+ *   native handle of a second, **reverse** "consumed" timeline semaphore the
+ *   encoder signals once it has copied the scratch out — the hook Slice B2.2b
+ *   uses to let `comp_alvr` reuse a scratch ring slot without the CPU wait). In
+ *   Slice B2.2a the encoder imports + signals the reverse semaphore but
+ *   `comp_alvr` still CPU-waits and ignores it, so behaviour is unchanged.
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 9
+#define ALVR_OXR_BRIDGE_ABI_VERSION 10
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -118,6 +126,12 @@
 #define ALVR_OXR_BUTTON_SQUEEZE_CLICK (1 << 14)
 
 #define ALVR_OXR_BUTTON_THUMBREST_TOUCH (1 << 15)
+
+#define ALVR_OXR_SEM_HANDLE_TYPE_NONE 0
+
+#define ALVR_OXR_SEM_HANDLE_TYPE_OPAQUE_WIN32 1
+
+#define ALVR_OXR_SEM_HANDLE_TYPE_D3D12_FENCE 2
 
 #define ALVR_OXR_DEVICE_KIND_OTHER 0
 
@@ -609,13 +623,19 @@ AlvrOxrResult alvr_oxr_get_foveation_vars(struct AlvrOxrFoveationVars *out_vars)
  * a tracking pose.
  *
  * `sync_handle` + `sync_value` (ABI v9) carry the Monado-side squash/FFR
- * timeline semaphore: `sync_handle` is the exported native semaphore handle and
- * `sync_value` is the timeline value that submit signalled. `sync_handle == 0`
- * means "no semaphore, the image is already GPU-complete" (the fallback when
- * `comp_alvr` couldn't export a timeline semaphore, in which case it CPU-waited
- * before this call). The encoder does not consume these yet — Slice B wires the
- * `cuWaitExternalSemaphoresAsync`; until then `comp_alvr`'s CPU `vkQueueWaitIdle`
- * is what guarantees the image is ready.
+ * **forward** timeline semaphore: `sync_handle` is the exported native semaphore
+ * handle and `sync_value` is the timeline value that submit signalled.
+ * `sync_handle == 0` means "no semaphore, the image is already GPU-complete" (the
+ * fallback when `comp_alvr` couldn't export a timeline semaphore, in which case
+ * it CPU-waited before this call).
+ *
+ * `sync_handle_type` (ABI v10) is the `ALVR_OXR_SEM_HANDLE_TYPE_*` of both
+ * timeline semaphores so the encoder imports them with the exact CUDA handle type
+ * instead of probing (`NONE` => probe). `consumed_handle` (ABI v10) is the native
+ * handle of the **reverse** "consumed" timeline semaphore the encoder signals (at
+ * `sync_value`) once the scratch has been copied into NVENC's input — the hook
+ * Slice B2.2b uses to free the scratch ring slot without a CPU wait. In Slice
+ * B2.2a `comp_alvr` still CPU-waits and ignores it.
  *
  * # Safety
  * `layers` must point to `layer_count` valid `AlvrOxrLayer`s.
@@ -625,6 +645,8 @@ AlvrOxrResult alvr_oxr_submit_layers(int64_t frame_id,
                                      const struct AlvrOxrLayer *layers,
                                      uint64_t sync_handle,
                                      uint64_t sync_value,
+                                     uint32_t sync_handle_type,
+                                     uint64_t consumed_handle,
                                      int64_t display_time_ns);
 
 /**

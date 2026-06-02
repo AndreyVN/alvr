@@ -52,13 +52,19 @@ public:
         // so the NVENC session is (2 * imageWidth) x imageHeight.
         uint32_t imageWidth;
         uint32_t imageHeight;
-        // External timeline semaphore the caller signals at submit time. 0 =
-        // "no GPU sync". Currently unused: comp_alvr does a vkQueueWaitIdle
-        // before calling the bridge (Slice 2c.1), so the image is already
-        // GPU-complete. A future slice replaces that CPU stall with a real
-        // semaphore wait here.
+        // Forward timeline semaphore comp_alvr signals after the squash/FFR GPU
+        // work; the encoder waits on it (value syncSemaphoreValue) before reading
+        // the scratch. 0 = "no semaphore, image already GPU-complete" (comp_alvr
+        // CPU-waited). syncSemaphoreHandleType is the ALVR_OXR_SEM_HANDLE_TYPE_*
+        // of both semaphores (0 = unknown => the encoder probes the CUDA type).
         uint64_t syncSemaphoreHandle;
         uint64_t syncSemaphoreValue;
+        uint32_t syncSemaphoreHandleType;
+        // Reverse "consumed" timeline semaphore (ABI v10): the encoder signals it
+        // at syncSemaphoreValue once the scratch has been copied into NVENC's
+        // input, so comp_alvr (Slice B2.2b) can reuse the scratch ring slot
+        // without a CPU wait. 0 = none.
+        uint64_t consumedSemaphoreHandle;
         // Timing metadata, matches Win32-OpenVR's CEncoder convention.
         uint64_t presentationTimeNs;
         uint64_t targetTimestampNs;

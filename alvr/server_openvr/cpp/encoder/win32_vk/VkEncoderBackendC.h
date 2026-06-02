@@ -28,6 +28,8 @@ struct AlvrVkSubmitDesc {
     uint32_t image_height;
     uint64_t sync_semaphore_handle;
     uint64_t sync_semaphore_value;
+    uint32_t sync_semaphore_handle_type;
+    uint64_t consumed_semaphore_handle;
     uint64_t presentation_time_ns;
     uint64_t target_timestamp_ns;
 };
