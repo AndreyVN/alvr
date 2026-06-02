@@ -73,8 +73,19 @@
  *   the client de-foveates with, so the round-trip matches. `enabled = false`
  *   (foveation off session-wide) means "encode at full resolution, skip the
  *   FFR pass" (OpenXR FFR Slice 1).
+ * - v9: [`alvr_oxr_submit_layers`] gains a `sync_value` argument and its
+ *   `sync_handle` argument changes meaning — together they now carry the
+ *   Monado-side squash/FFR **timeline semaphore** (exported native handle +
+ *   the value that submit signalled) instead of the app's per-frame GPU sync
+ *   handle (which the encoder never consumed). Lets the encoder wait on the
+ *   composite GPU-side rather than `comp_alvr` blocking the compositor thread
+ *   on `vkQueueWaitIdle`. Slice A only plumbs and signals the semaphore (the
+ *   CPU wait stays authoritative and the encoder still ignores both fields);
+ *   Slice B removes the CPU wait and adds the matching CUDA wait. `sync_handle
+ *   == 0` means "no semaphore, the image is already GPU-complete" — the
+ *   fallback when the device can't export a timeline semaphore.
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 8
+#define ALVR_OXR_BRIDGE_ABI_VERSION 9
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -597,14 +608,23 @@ AlvrOxrResult alvr_oxr_get_foveation_vars(struct AlvrOxrFoveationVars *out_vars)
  * nanoseconds); the encoded NALs carry it so the client can match the frame to
  * a tracking pose.
  *
+ * `sync_handle` + `sync_value` (ABI v9) carry the Monado-side squash/FFR
+ * timeline semaphore: `sync_handle` is the exported native semaphore handle and
+ * `sync_value` is the timeline value that submit signalled. `sync_handle == 0`
+ * means "no semaphore, the image is already GPU-complete" (the fallback when
+ * `comp_alvr` couldn't export a timeline semaphore, in which case it CPU-waited
+ * before this call). The encoder does not consume these yet — Slice B wires the
+ * `cuWaitExternalSemaphoresAsync`; until then `comp_alvr`'s CPU `vkQueueWaitIdle`
+ * is what guarantees the image is ready.
+ *
  * # Safety
- * `layers` must point to `layer_count` valid `AlvrOxrLayer`s. `sync_handle`
- * may be 0 to indicate "no GPU sync, use a fence".
+ * `layers` must point to `layer_count` valid `AlvrOxrLayer`s.
  */
 AlvrOxrResult alvr_oxr_submit_layers(int64_t frame_id,
                                      uint32_t layer_count,
                                      const struct AlvrOxrLayer *layers,
                                      uint64_t sync_handle,
+                                     uint64_t sync_value,
                                      int64_t display_time_ns);
 
 /**

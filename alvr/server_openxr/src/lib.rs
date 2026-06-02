@@ -398,7 +398,18 @@ fn event_loop(
 ///   the client de-foveates with, so the round-trip matches. `enabled = false`
 ///   (foveation off session-wide) means "encode at full resolution, skip the
 ///   FFR pass" (OpenXR FFR Slice 1).
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 8;
+/// - v9: [`alvr_oxr_submit_layers`] gains a `sync_value` argument and its
+///   `sync_handle` argument changes meaning — together they now carry the
+///   Monado-side squash/FFR **timeline semaphore** (exported native handle +
+///   the value that submit signalled) instead of the app's per-frame GPU sync
+///   handle (which the encoder never consumed). Lets the encoder wait on the
+///   composite GPU-side rather than `comp_alvr` blocking the compositor thread
+///   on `vkQueueWaitIdle`. Slice A only plumbs and signals the semaphore (the
+///   CPU wait stays authoritative and the encoder still ignores both fields);
+///   Slice B removes the CPU wait and adds the matching CUDA wait. `sync_handle
+///   == 0` means "no semaphore, the image is already GPU-complete" — the
+///   fallback when the device can't export a timeline semaphore.
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 9;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -1582,7 +1593,12 @@ mod encoder_bridge {
         ENCODER.lock().is_some()
     }
 
-    pub fn submit(layer: &AlvrOxrLayer, sync_handle: u64, monado_display_time_ns: u64) -> bool {
+    pub fn submit(
+        layer: &AlvrOxrLayer,
+        sync_handle: u64,
+        sync_value: u64,
+        monado_display_time_ns: u64,
+    ) -> bool {
         let guard = ENCODER.lock();
         let Some(handle) = guard.as_ref() else {
             return false;
@@ -1610,8 +1626,11 @@ mod encoder_bridge {
             image_format: 0,
             image_width: layer.width,
             image_height: layer.height,
+            // ABI v9: the squash/FFR timeline semaphore handle + value (0/0 when
+            // comp_alvr couldn't export one and CPU-waited instead). Carried into
+            // the C++ encoder's already-present sync fields; consumed in Slice B.
             sync_semaphore_handle: sync_handle,
-            sync_semaphore_value: 0,
+            sync_semaphore_value: sync_value,
             presentation_time_ns: 0,
             target_timestamp_ns: stamp_ns,
         };
@@ -1716,7 +1735,12 @@ mod encoder_bridge {
     pub fn is_active() -> bool {
         false
     }
-    pub fn submit(_layer: &AlvrOxrLayer, _sync_handle: u64, _target_timestamp_ns: u64) -> bool {
+    pub fn submit(
+        _layer: &AlvrOxrLayer,
+        _sync_handle: u64,
+        _sync_value: u64,
+        _target_timestamp_ns: u64,
+    ) -> bool {
         false
     }
 }
@@ -1741,15 +1765,24 @@ mod encoder_bridge {
 /// nanoseconds); the encoded NALs carry it so the client can match the frame to
 /// a tracking pose.
 ///
+/// `sync_handle` + `sync_value` (ABI v9) carry the Monado-side squash/FFR
+/// timeline semaphore: `sync_handle` is the exported native semaphore handle and
+/// `sync_value` is the timeline value that submit signalled. `sync_handle == 0`
+/// means "no semaphore, the image is already GPU-complete" (the fallback when
+/// `comp_alvr` couldn't export a timeline semaphore, in which case it CPU-waited
+/// before this call). The encoder does not consume these yet — Slice B wires the
+/// `cuWaitExternalSemaphoresAsync`; until then `comp_alvr`'s CPU `vkQueueWaitIdle`
+/// is what guarantees the image is ready.
+///
 /// # Safety
-/// `layers` must point to `layer_count` valid `AlvrOxrLayer`s. `sync_handle`
-/// may be 0 to indicate "no GPU sync, use a fence".
+/// `layers` must point to `layer_count` valid `AlvrOxrLayer`s.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alvr_oxr_submit_layers(
     frame_id: i64,
     layer_count: u32,
     layers: *const AlvrOxrLayer,
     sync_handle: u64,
+    sync_value: u64,
     display_time_ns: i64,
 ) -> AlvrOxrResult {
     let _ = frame_id;
@@ -1773,7 +1806,7 @@ pub unsafe extern "C" fn alvr_oxr_submit_layers(
         return AlvrOxrResult::EncoderUnavailable;
     }
 
-    if encoder_bridge::submit(layer, sync_handle, target_timestamp_ns) {
+    if encoder_bridge::submit(layer, sync_handle, sync_value, target_timestamp_ns) {
         AlvrOxrResult::Ok
     } else {
         AlvrOxrResult::Failed
