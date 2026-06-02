@@ -7,8 +7,13 @@
 // failure point so the Rust bridge can log *why* the encoder didn't come up.
 namespace {
 std::string g_vk_encoder_last_error = "no error recorded";
+// One-shot semaphore-import result (B2.2a bring-up): set on the first Submit so
+// the Rust bridge can log, once, whether the forward + reverse timeline
+// semaphores imported and with which CUDA handle type. Empty until then.
+std::string g_vk_encoder_import_diag = "";
 }
 const char* VkEncoderBackendLastError() { return g_vk_encoder_last_error.c_str(); }
+const char* VkEncoderBackendImportDiag() { return g_vk_encoder_import_diag.c_str(); }
 
 // 3.3b-2 implements the real CUDA-interop NVENC encoder when the CUDA Toolkit is
 // present at build time (build.rs defines ALVR_OXR_HAVE_CUDA). Without it — CI's
@@ -150,6 +155,8 @@ struct VkEncoderBackend::Impl {
     uint64_t forwardSemHandle = 0;
     CUexternalSemaphore consumedSem = nullptr;
     uint64_t consumedSemHandle = 0;
+    // One-shot guard so the import diagnostic is composed on the first frame only.
+    bool importDiagDone = false;
 
     // Import one view's OPAQUE_WIN32 image, map it as a CUDA array, and copy it
     // into the [view] half of the combined NVENC input frame. CUDA context must
@@ -475,8 +482,31 @@ bool VkEncoderBackend::Submit(const SubmitDesc& desc, PacketCallback onPacket, v
             // it lands. Inert until comp_alvr waits on it — it still CPU-waits and
             // ignores this. Same value as the forward wait keeps both timelines on
             // one monotonic sequence.
-            if (m_impl->ensureConsumedSemaphore(
-                    desc.consumedSemaphoreHandle, desc.syncSemaphoreHandleType)) {
+            bool haveConsumed = m_impl->ensureConsumedSemaphore(
+                desc.consumedSemaphoreHandle, desc.syncSemaphoreHandleType);
+
+            // One-shot bring-up diagnostic: record whether each timeline semaphore
+            // imported, and with which CUDA handle type. Surfaced once through the
+            // Rust bridge (B2.2a's import success is otherwise invisible — the CPU
+            // wait masks it and trace() only goes to OutputDebugString).
+            if (!m_impl->importDiagDone) {
+                m_impl->importDiagDone = true;
+                const char* typeName =
+                    desc.syncSemaphoreHandleType == kSemHandleTypeD3d12Fence    ? "D3D12_FENCE"
+                    : desc.syncSemaphoreHandleType == kSemHandleTypeOpaqueWin32 ? "TIMELINE_WIN32"
+                                                                               : "PROBE";
+                auto state = [](uint64_t handle, CUexternalSemaphore sem) {
+                    return handle == 0 ? "none" : (sem ? "OK" : "FAILED");
+                };
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "semaphore import: type=%s forward=%s consumed=%s", typeName,
+                         state(desc.syncSemaphoreHandle, m_impl->forwardSem),
+                         state(desc.consumedSemaphoreHandle, m_impl->consumedSem));
+                g_vk_encoder_import_diag = buf;
+            }
+
+            if (haveConsumed) {
                 CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS sigParams = {};
                 sigParams.params.fence.value = desc.syncSemaphoreValue;
                 sigParams.flags = 0;

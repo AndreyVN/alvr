@@ -30,6 +30,11 @@
 // null. Exposed across the bridge so the Rust side can log it.
 const char* VkEncoderBackendLastError();
 
+// One-shot semaphore-import diagnostic (B2.2a bring-up): empty until the first
+// Submit, then "semaphore import: type=… forward=… consumed=…". Lets the Rust
+// bridge log, once, whether the timeline semaphores imported on real hardware.
+const char* VkEncoderBackendImportDiag();
+
 class VkEncoderBackend : public IEncoderBackend {
 public:
     // Per-frame submit payload. Mirrors the relevant fields of AlvrOxrLayer

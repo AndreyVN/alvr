@@ -6,6 +6,8 @@ extern "C" {
 
 const char* alvr_vk_encoder_last_error() { return VkEncoderBackendLastError(); }
 
+const char* alvr_vk_encoder_import_diag() { return VkEncoderBackendImportDiag(); }
+
 void* alvr_vk_encoder_create(const NvencConfig* cfg) {
     if (!cfg) {
         return nullptr;

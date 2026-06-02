@@ -162,12 +162,15 @@ Functional bring-up (in order):
       `D3D12_FENCE_BIT(timeline): false`. Encoder imports as
       `TIMELINE_SEMAPHORE_WIN32`. (Doc's earlier "D3D12_FENCE preferred" was wrong
       for this driver — it isn't exportable here.)
-- [ ] **Import succeeds**: with a streaming client running, confirm the forward +
-      reverse `cuImportExternalSemaphore` actually succeed (no "import failed"
-      trace; frames flow). The 2026-06-03 boot check confirmed the *exported* type
-      only — `Submit` (hence the import) never ran without a client. If import
-      fails → the wait is skipped and you silently fall back to the (now-removed)
-      CPU wait → expect corruption; fix before proceeding.
+- [x] **Import succeeds (2026-06-03, RTX 3090, full streaming session)**: Quest
+      client connected (encoder `build_config` stood up), `oxr_overlay_smoke`
+      rendered 30 frames through Monado, and the encoder logged
+      `semaphore import: type=TIMELINE_WIN32 forward=OK consumed=OK`. Both the
+      forward and reverse timeline semaphores import via `cuImportExternalSemaphore`
+      as `TIMELINE_SEMAPHORE_WIN32`. The one-shot diagnostic that surfaced this
+      (B2.2a's import success is otherwise invisible — CPU wait masks it) is the
+      `alvr_vk_encoder_import_diag` path logged once by the Rust bridge. So both
+      ABI-v10 semaphore imports are proven on hardware; B2.2b can rely on them.
 - [ ] **Steady-state video**: `layer_commit diag` counters
       (`submit_ok` climbing, `submit_failed`/`submit_no_encoder` flat); STATS/FPS
       hold vs the pre-B2.2b baseline.

@@ -1312,6 +1312,7 @@ mod encoder_bridge {
 
     unsafe extern "C" {
         fn alvr_vk_encoder_last_error() -> *const c_char;
+        fn alvr_vk_encoder_import_diag() -> *const c_char;
         fn alvr_vk_encoder_create(cfg: *const VkNvencConfig) -> *mut c_void;
         fn alvr_vk_encoder_destroy(handle: *mut c_void);
         fn alvr_vk_encoder_on_stream_start(handle: *mut c_void);
@@ -1660,7 +1661,24 @@ mod encoder_bridge {
         };
         // # Safety: handle valid for the lock's duration; desc outlives the call;
         // on_packet is a valid extern "C" fn.
-        unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) }
+        let ok = unsafe { alvr_vk_encoder_submit(handle.0, &desc, on_packet, ptr::null_mut()) };
+
+        // One-shot bring-up log: surface the encoder's semaphore-import result the
+        // first time it's available (B2.2a's import success is otherwise invisible —
+        // the CPU wait masks it). The C side sets the diag on the first encoded
+        // frame; log it once the string is non-empty so an early dropped frame
+        // doesn't consume the one shot.
+        static IMPORT_DIAG_LOGGED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !IMPORT_DIAG_LOGGED.load(std::sync::atomic::Ordering::Relaxed) {
+            // # Safety: the C side returns a valid NUL-terminated static string.
+            let diag = unsafe { CStr::from_ptr(alvr_vk_encoder_import_diag()) }.to_string_lossy();
+            if !diag.is_empty() {
+                info!("OpenXR encoder {diag}");
+                IMPORT_DIAG_LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        ok
     }
 
     #[cfg(test)]
