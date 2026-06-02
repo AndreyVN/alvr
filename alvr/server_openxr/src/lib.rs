@@ -125,26 +125,6 @@ static SESSION_EVENTS_RX: Mutex<Option<mpsc::Receiver<AlvrOxrEvent>>> = Mutex::n
 static EVENT_THREAD: Mutex<Option<thread::JoinHandle<()>>> = Mutex::new(None);
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
 
-// ALVR diag (AK-black pose/view-params probe): append a line to the file named by
-// ALVR_DIAG_FILE, throttled to the first DIAG_MAX calls so the per-frame getters
-// don't spam. Runs in the bridge cdylib loaded by monado-service; reuses the same
-// opt-in ALVR_DIAG_FILE env the D3D12/instance probes use. No-op unless set.
-// See NEXT_STEPS.md AK pose/view feed entry.
-static DIAG_POSE_COUNT: AtomicU64 = AtomicU64::new(0);
-static DIAG_VIEW_COUNT: AtomicU64 = AtomicU64::new(0);
-const DIAG_MAX: u64 = 16;
-
-fn alvr_diag_append(line: &str) {
-    if let Ok(path) = std::env::var("ALVR_DIAG_FILE") {
-        if !path.is_empty() {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = writeln!(f, "{line}");
-            }
-        }
-    }
-}
-
 /// Latest client tracking `poll_timestamp` (nanoseconds), updated by the drain
 /// thread on `ServerCoreEvent::Tracking`. The encoder stamps each video frame
 /// with this so the client can correlate the decoded frame to a pose it sent —
@@ -670,19 +650,6 @@ pub unsafe extern "C" fn alvr_oxr_get_head_pose(
             };
         }
     }
-    if DIAG_POSE_COUNT.fetch_add(1, Ordering::Relaxed) < DIAG_MAX {
-        match motion {
-            Some(m) => alvr_diag_append(&format!(
-                "ALVR_OXR_HEAD_POSE ts_ns={at_timestamp_ns} result=MOTION pos=[{:.3},{:.3},{:.3}] \
-                 quat=[{:.3},{:.3},{:.3},{:.3}]",
-                m.pose.position.x, m.pose.position.y, m.pose.position.z,
-                m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w,
-            )),
-            None => alvr_diag_append(&format!(
-                "ALVR_OXR_HEAD_POSE ts_ns={at_timestamp_ns} result=NONE (identity, flags will be NONE)"
-            )),
-        }
-    }
     // No tracking yet (client hasn't connected, headset hasn't sent a
     // sample, etc.) → identity is fine; Monado treats Ok+identity as
     // "device present but uninitialised". Returning NotInitialised here
@@ -792,21 +759,6 @@ pub unsafe extern "C" fn alvr_oxr_get_view_params(
         return AlvrOxrResult::Failed;
     }
     let params = LOCAL_VIEW_PARAMS.read()[side as usize];
-    if DIAG_VIEW_COUNT.fetch_add(1, Ordering::Relaxed) < DIAG_MAX {
-        // DUMMY is identity pose + fov ±1.0 rad; real values differ. Log raw so
-        // the reader can tell "view config never arrived" (DUMMY) from real params.
-        let is_dummy = params.fov.left == -1.0
-            && params.fov.right == 1.0
-            && params.fov.up == 1.0
-            && params.fov.down == -1.0;
-        alvr_diag_append(&format!(
-            "ALVR_OXR_VIEW_PARAMS side={} dummy={is_dummy} fov=[{:.4},{:.4},{:.4},{:.4}] \
-             eye_pos=[{:.4},{:.4},{:.4}]",
-            side as usize,
-            params.fov.left, params.fov.right, params.fov.up, params.fov.down,
-            params.pose.position.x, params.pose.position.y, params.pose.position.z,
-        ));
-    }
     unsafe {
         *out_params = AlvrOxrViewParams {
             pose: AlvrOxrPose {
@@ -1521,33 +1473,6 @@ mod encoder_bridge {
             return;
         }
         let nal = raw[off..].to_vec();
-
-        // ALVR bitstream-size diagnostic: log cumulative NAL bytes + count +
-        // IDR count every `BITSTREAM_DIAG_WINDOW` packets. Distinguishes
-        // "encoder consuming black input" (avg per-frame bytes near the
-        // motion-estimation floor) from "encoder producing real content"
-        // (avg in the tens of KB for 30 Mbps target). Single source of truth
-        // for "is the encoder seeing anything" at the bridge boundary.
-        {
-            use std::sync::atomic::AtomicU64;
-            static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
-            static TOTAL_PACKETS: AtomicU64 = AtomicU64::new(0);
-            static IDR_PACKETS: AtomicU64 = AtomicU64::new(0);
-            const BITSTREAM_DIAG_WINDOW: u64 = 150;
-            let total = TOTAL_BYTES.fetch_add(nal.len() as u64, std::sync::atomic::Ordering::Relaxed) + nal.len() as u64;
-            let count = TOTAL_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            let idrs = if is_idr {
-                IDR_PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-            } else {
-                IDR_PACKETS.load(std::sync::atomic::Ordering::Relaxed)
-            };
-            if count.is_multiple_of(BITSTREAM_DIAG_WINDOW) {
-                let avg = total as f64 / count as f64;
-                info!(
-                    "OpenXR encoder bitstream diag: packets={count} idrs={idrs} total_bytes={total} avg_bytes_per_packet={avg:.1}"
-                );
-            }
-        }
 
         if let Some(ctx) = SERVER_CORE_CONTEXT.read().as_ref() {
             // The client reprojects the decoded frame using these per-eye view

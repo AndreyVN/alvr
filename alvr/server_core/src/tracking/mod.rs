@@ -435,28 +435,6 @@ pub fn tracking_loop(
 
         let timestamp = tracking.poll_timestamp;
 
-        // ALVR diag (AK-black tracking-feed probe): confirm TrackingData actually
-        // arrives over the stream socket during streaming and that it carries a
-        // HEAD_ID device motion. If this never logs, the client isn't sending
-        // tracking (or recv never returns Ok); if it logs head_present=false the
-        // client sends tracking without a head pose. Throttled to first 16 packets.
-        {
-            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-            static TRACKING_RECV_COUNTER: AtomicU32 = AtomicU32::new(0);
-            let n = TRACKING_RECV_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-            if n < 16 {
-                let head_present = tracking
-                    .device_motions
-                    .iter()
-                    .any(|(id, _)| *id == *inp::HEAD_ID);
-                info!(
-                    "ALVR_TRACKING_RECV n={n} ts_ns={} device_motions={} head_present={head_present}",
-                    timestamp.as_nanos(),
-                    tracking.device_motions.len(),
-                );
-            }
-        }
-
         if let Some(stats) = &mut *ctx.statistics_manager.write() {
             stats.report_tracking_received(timestamp);
         }
