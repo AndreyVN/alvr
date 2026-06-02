@@ -18,7 +18,7 @@ All genuinely-remaining work is **hardware- or Linux-host-gated** — nothing is
 - **Encoder backends** — only Vulkan-input **NVENC** ships for OpenXR mode. AMF + VPL Vulkan-input bodies (Slice 3.4) are RTX-host / hardware-gated.
 - **Linux-host-gated encoder tails** — conform Linux `EncodePipeline` to `IEncoderBackend` (`PHASE3_0_SCOPE.md` sub-slice 2.4), `FrameRender`↔`protocol.h` decoupling, the Slice-1 `--gpl` functional build.
 - **Optional / perf** — Slice 2e (GFX→CS squasher dispatch swap, only if measured); replace `compose_via_squasher`'s `vkQueueWaitIdle` CPU stall with a semaphore handoff; Gate H (per-eye foveation behaviour) on an eye-tracked headset.
-- **Small ergonomics** — optionally surface `ALVR_MONADO_SOURCE_DIR` as a setting; propagate encoder-unavailable out of `alvr_oxr_submit_layers` as non-OK; populate `comp_scratch_single_images::native_images[idx].size` for the FFR-off path. (The "auto-build the cdylib" item that used to live here **landed** in `5dc8d270` — see the stale-cdylib lesson below.)
+- **Small ergonomics** — propagate encoder-unavailable out of `alvr_oxr_submit_layers` as non-OK; populate `comp_scratch_single_images::native_images[idx].size` for the FFR-off path. (Two items that used to live here have **landed**: auto-build the cdylib in `5dc8d270`, and the `--monado-source` build flag — see the stale-cdylib lesson below.)
 
 Verify the tree at any point:
 

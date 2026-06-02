@@ -36,6 +36,9 @@ SUBCOMMANDS:
                         Does not affect the OpenVR/SteamVR path. Requires the
                         openxr/ source tree to be present. Pass --enable-alvr-driver
                         to also build the in-tree ALVR Monado driver.
+                        --monado-source <path> builds from a sibling Monado clone
+                        instead of the openxr/ submodule (overrides the
+                        ALVR_MONADO_SOURCE_DIR env var).
     register-openxr-runtime
                         Register the built Monado-as-ALVR runtime as the per-user
                         OpenXR active runtime. Windows: HKCU registry value.
@@ -212,6 +215,7 @@ fn main() {
 
         let version: Option<String> = args.opt_value_from_str("--version").unwrap();
         let root: Option<String> = args.opt_value_from_str("--root").unwrap();
+        let monado_source: Option<String> = args.opt_value_from_str("--monado-source").unwrap();
 
         let package_flavor = if args.contains("--meta-store") {
             ReleaseFlavor::MetaStore
@@ -257,7 +261,7 @@ fn main() {
                     build::build_android_client_openxr_lib(profile, link_stdcpp)
                 }
                 "build-openxr-runtime" => {
-                    build_openxr::build_openxr_runtime(profile, enable_alvr_driver)
+                    build_openxr::build_openxr_runtime(profile, enable_alvr_driver, monado_source)
                 }
                 "register-openxr-runtime" => build_openxr::register_openxr_runtime(profile),
                 "unregister-openxr-runtime" => build_openxr::unregister_openxr_runtime(profile),

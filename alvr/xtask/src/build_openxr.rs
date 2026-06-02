@@ -22,11 +22,19 @@ use std::{
 use sysinfo::System;
 use xshell::{Shell, cmd};
 
-/// Where to find Monado source. Defaults to the vendored submodule at
-/// `<workspace>/openxr/`. Override with `ALVR_MONADO_SOURCE_DIR` to point at a
-/// sibling clone (e.g., a local fork that hasn't been pushed + submodule-bumped
-/// yet) without churning the alvr-repo submodule pointer for every iteration.
-fn openxr_source_dir() -> PathBuf {
+/// Where to find Monado source. Resolution order (first non-empty wins):
+/// 1. the `--monado-source <path>` xtask flag (`cli_override`),
+/// 2. the `ALVR_MONADO_SOURCE_DIR` env var,
+/// 3. the vendored submodule at `<workspace>/openxr/`.
+///
+/// The override points at a sibling clone (e.g., a local fork that hasn't been
+/// pushed + submodule-bumped yet) without churning the alvr-repo submodule
+/// pointer for every iteration. The flag is the discoverable surface (shows in
+/// `--help`); the env var stays for shells/CI that already export it.
+fn openxr_source_dir(cli_override: Option<&str>) -> PathBuf {
+    if let Some(custom) = cli_override.filter(|s| !s.is_empty()) {
+        return PathBuf::from(custom);
+    }
     if let Some(custom) = env::var_os("ALVR_MONADO_SOURCE_DIR").filter(|s| !s.is_empty()) {
         return PathBuf::from(custom);
     }
@@ -213,8 +221,7 @@ fn ensure_eigen3_windows() -> Option<PathBuf> {
 
 /// Returns Ok(()) if `openxr/` exists and looks like the Monado source tree;
 /// otherwise prints a helpful message and exits.
-fn check_source_present() {
-    let src = openxr_source_dir();
+fn check_source_present(src: &Path) {
     if !src.join("CMakeLists.txt").exists() {
         eprintln!(
             "error: {src:?} does not look like a Monado source tree.\n\n\
@@ -231,8 +238,16 @@ fn check_source_present() {
 ///
 /// `enable_alvr_driver` toggles the `XRT_BUILD_DRIVER_ALVR` cmake option. Default
 /// is `false` so the build works against an unmodified Monado snapshot.
-pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
-    check_source_present();
+///
+/// `monado_source` is the optional `--monado-source <path>` override; see
+/// [`openxr_source_dir`] for the full resolution order.
+pub fn build_openxr_runtime(
+    profile: Profile,
+    enable_alvr_driver: bool,
+    monado_source: Option<String>,
+) {
+    let src = openxr_source_dir(monado_source.as_deref());
+    check_source_present(&src);
 
     let sh = Shell::new().unwrap();
 
@@ -247,7 +262,6 @@ pub fn build_openxr_runtime(profile: Profile, enable_alvr_driver: bool) {
         build_bridge_cdylib(&sh, profile);
     }
 
-    let src = openxr_source_dir();
     let build = openxr_build_dir(profile);
     fs::create_dir_all(&build).unwrap();
 
