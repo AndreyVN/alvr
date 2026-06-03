@@ -305,6 +305,23 @@ pub fn build_openxr_runtime(
         extra_cmake_args.push(format!("-DCMAKE_PREFIX_PATH={}", prefix.to_string_lossy()));
     }
 
+    // Point Monado at the bridge cdylib for THIS profile. `build_bridge_cdylib`
+    // builds it into target/release for non-Debug (target/debug for Debug); the
+    // CMakeLists default is target/debug, so a --release build would otherwise
+    // link a stale debug import lib and fail to resolve any newly-added bridge
+    // symbol (only surfaces once comp_alvr consumes a new export).
+    if enable_alvr_driver {
+        let lib_subdir = match profile {
+            Profile::Debug => "debug",
+            Profile::Release | Profile::Distribution => "release",
+        };
+        let lib_dir = afs::target_dir().join(lib_subdir);
+        extra_cmake_args.push(format!(
+            "-DALVR_SERVER_OPENXR_LIB_DIR={}",
+            lib_dir.to_string_lossy()
+        ));
+    }
+
     println!(
         "Configuring Monado:\n  source  = {src_str}\n  build   = {build_str}\n  profile = {profile}\n  alvr_driver+compositor = {enable_alvr_driver}"
     );
