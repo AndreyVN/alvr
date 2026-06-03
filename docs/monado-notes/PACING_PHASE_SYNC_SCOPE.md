@@ -49,22 +49,35 @@ Each slice is independently committable; the early ones are behaviour-preserving
 or gated so master stays shippable. Re-run the 30 s jitter measurement (see
 `[[openxr-pacing-smoothness]]` method) as the gate between slices.
 
-- **Slice 0 — bridge the cadence (additive, inert).** Add
-  `alvr_oxr_duration_until_next_vsync(uint64_t *out_ns) -> bool` to the bridge
-  (server_openxr/src/lib.rs), wrapping `ServerCoreContext::duration_until_next_vsync()`
-  exactly like `alvr_duration_until_next_vsync` in server_core/c_api.rs:496.
-  Bridge ABI bump → **v11** (additive getter). Nothing consumes it yet → no
-  behaviour change. Verify it returns sane values (~0–13.9 ms) in a session.
+- **Slice 0 — bridge the cadence (additive, inert).** ✅ **LANDED + verified
+  2026-06-03** (master `ec5f5c8e`). Added
+  `alvr_oxr_duration_until_next_vsync(uint64_t *out_ns) -> bool` wrapping
+  `ServerCoreContext::duration_until_next_vsync()`. Bridge ABI **v10 → v11**.
+  Verified via a throttled probe: returns sane values cycling **0–13.9 ms** with
+  a client connected. (Also fixed a latent xtask bug it surfaced — the
+  `target/debug` vs `target/release` bridge import-lib mismatch, master
+  `8c696861`.) comp_alvr's `U_LOG` lands in `%TEMP%\monado-service.stderr.log`.
 
 - **Slice 1 — enforce the cadence on the comp_alvr producer (the core win).**
-  In `comp_alvr_predict_frame`, after `u_pc_predict`, override the wake/present
-  phase using the bridged duration: align `out_wake_time_ns` /
-  `out_predicted_display_time_ns` to `now + duration_until_next_vsync (+ period)`
-  so the app is woken and targets the client's cadence rather than the
-  free-running one. Keep `u_pc_fake` for `frame_id`/period bookkeeping. Gate on
-  the existing `video.enforce_server_frame_pacing` setting (off → current
-  behaviour, so it's opt-in and reversible). **Measure jitter; expect the
-  bursting (min 0 / max 33) to shrink.**
+  ❌ **First approach (snap `u_pc_predict`'s outputs) ATTEMPTED + REVERTED — it
+  REGRESSED pacing** (2026-06-03, measured: 72.9→**48.6 fps**, jitter
+  2.35→**11.1 ms**, max 33→**151 ms**, drops 8→**47**/30s). Root cause: shifting
+  `out_wake_time_ns` then letting Monado feed the *actual* wake back into the
+  **same** `u_pc` via `mark_frame`→`u_pc_mark_point` makes u_pc see a constant
+  ~3 ms misprediction every frame → its corrector oscillates. **Do not perturb
+  u_pc's outputs.** The phase signal is fine (stable ~−2.92 ms offset); the
+  application mechanism was wrong.
+  **Corrected approach (Approach A, not yet built):** when
+  `video.enforce_server_frame_pacing` is on, *replace* the wake/display
+  prediction with a cadence-locked computation — `display = next suitable client
+  vsync`, `wake = display − render_margin` derived directly from
+  `duration_until_next_vsync` — and use `u_pc` **only** for `frame_id` (its marks
+  then update an ignored model, no oscillation). Pick a conservative
+  `render_margin` (≥ measured squash+FFR+encode ≈ 5 ms; refine in Slice 3).
+  Alternative (Approach C): re-anchor u_pc's phase epoch to the cadence rather
+  than editing per-frame outputs, if a `u_pc_fake` helper allows it. Gate stays
+  on `enforce_server_frame_pacing` (default true; flip off = revert to
+  `u_pc_fake`). **Measure jitter vs the 2.35 ms baseline.**
 
 - **Slice 2 — pace the submit, not just the prediction.** If Slice 1 isn't
   enough (the app render loop and squash scheduling can still bunch up), add an
