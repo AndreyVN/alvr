@@ -417,7 +417,13 @@ fn event_loop(
 ///   uses to let `comp_alvr` reuse a scratch ring slot without the CPU wait).
 ///   In this slice (B2.2a) the encoder imports + signals the reverse semaphore
 ///   but `comp_alvr` still CPU-waits and ignores it, so behaviour is unchanged.
-pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 10;
+/// - v11: added [`alvr_oxr_duration_until_next_vsync`] — exposes
+///   `ServerCoreContext::duration_until_next_vsync()` (the steady client-display
+///   cadence ALVR already tracks; SteamVR mode paces to it via `wait_for_vsync`)
+///   so `comp_alvr` can phase-align its pacer instead of Monado's free-running
+///   `u_pc_fake`. Additive getter; nothing consumes it yet, so behaviour is
+///   unchanged (phase-sync pacer Slice 0 — see `PACING_PHASE_SYNC_SCOPE.md`).
+pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 11;
 
 /// Return the bridge ABI version baked into this cdylib at compile time.
 /// See [`ALVR_OXR_BRIDGE_ABI_VERSION`].
@@ -427,6 +433,36 @@ pub const ALVR_OXR_BRIDGE_ABI_VERSION: u32 = 10;
 #[unsafe(no_mangle)]
 pub extern "C" fn alvr_oxr_get_bridge_abi_version() -> u32 {
     ALVR_OXR_BRIDGE_ABI_VERSION
+}
+
+/// Time in nanoseconds from now until the next predicted client-display vsync,
+/// from [`ServerCoreContext::duration_until_next_vsync`] — the same steady
+/// cadence SteamVR mode paces to in `wait_for_vsync`. Lets `comp_alvr`
+/// phase-align its frame pacing to the client instead of running Monado's
+/// free-running `u_pc_fake` (phase-sync pacer Slice 0).
+///
+/// Deliberately a **relative** duration, not an absolute timestamp: it sidesteps
+/// any server/compositor clock-domain mismatch — `comp_alvr` adds it to its own
+/// `os_monotonic_get_ns()`. Returns `false` (leaving `*out_ns` untouched) when
+/// there's no context or no client cadence yet (pre-connection); the caller
+/// falls back to its default pacing.
+///
+/// # Safety
+/// `out_ns` must point to a writable `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_oxr_duration_until_next_vsync(out_ns: *mut u64) -> bool {
+    if out_ns.is_null() {
+        return false;
+    }
+
+    if let Some(context) = &*SERVER_CORE_CONTEXT.read()
+        && let Some(duration) = context.duration_until_next_vsync()
+    {
+        unsafe { *out_ns = duration.as_nanos() as u64 };
+        true
+    } else {
+        false
+    }
 }
 
 /// Negotiated per-eye streaming resolution (`openvr_config.eye_resolution`), in

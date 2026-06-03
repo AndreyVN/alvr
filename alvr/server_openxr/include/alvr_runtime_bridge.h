@@ -89,11 +89,17 @@
  *   so the encoder imports them without probing) and `consumed_handle` (the
  *   native handle of a second, **reverse** "consumed" timeline semaphore the
  *   encoder signals once it has copied the scratch out — the hook Slice B2.2b
- *   uses to let `comp_alvr` reuse a scratch ring slot without the CPU wait). In
- *   Slice B2.2a the encoder imports + signals the reverse semaphore but
- *   `comp_alvr` still CPU-waits and ignores it, so behaviour is unchanged.
+ *   uses to let `comp_alvr` reuse a scratch ring slot without the CPU wait).
+ *   In this slice (B2.2a) the encoder imports + signals the reverse semaphore
+ *   but `comp_alvr` still CPU-waits and ignores it, so behaviour is unchanged.
+ * - v11: added [`alvr_oxr_duration_until_next_vsync`] — exposes
+ *   `ServerCoreContext::duration_until_next_vsync()` (the steady client-display
+ *   cadence ALVR already tracks; SteamVR mode paces to it via `wait_for_vsync`)
+ *   so `comp_alvr` can phase-align its pacer instead of Monado's free-running
+ *   `u_pc_fake`. Additive getter; nothing consumes it yet, so behaviour is
+ *   unchanged (phase-sync pacer Slice 0 — see `PACING_PHASE_SYNC_SCOPE.md`).
  */
-#define ALVR_OXR_BRIDGE_ABI_VERSION 10
+#define ALVR_OXR_BRIDGE_ABI_VERSION 11
 
 #define ALVR_OXR_BUTTON_A_CLICK (1 << 0)
 
@@ -127,12 +133,6 @@
 
 #define ALVR_OXR_BUTTON_THUMBREST_TOUCH (1 << 15)
 
-#define ALVR_OXR_SEM_HANDLE_TYPE_NONE 0
-
-#define ALVR_OXR_SEM_HANDLE_TYPE_OPAQUE_WIN32 1
-
-#define ALVR_OXR_SEM_HANDLE_TYPE_D3D12_FENCE 2
-
 #define ALVR_OXR_DEVICE_KIND_OTHER 0
 
 #define ALVR_OXR_DEVICE_KIND_HMD 1
@@ -140,6 +140,19 @@
 #define ALVR_OXR_DEVICE_KIND_LEFT_CONTROLLER 2
 
 #define ALVR_OXR_DEVICE_KIND_RIGHT_CONTROLLER 3
+
+/**
+ * CUDA-compatible external handle type of the squash/FFR timeline semaphores
+ * (forward + reverse), reported by `comp_alvr` over the bridge (ABI v10) so the
+ * encoder imports them with `cuImportExternalSemaphore` using the exact type
+ * Monado exported rather than probing. Mirrors the choice
+ * `vk_get_timeline_semaphore_handle_type` makes on Windows.
+ */
+#define ALVR_OXR_SEM_HANDLE_TYPE_NONE 0
+
+#define ALVR_OXR_SEM_HANDLE_TYPE_OPAQUE_WIN32 1
+
+#define ALVR_OXR_SEM_HANDLE_TYPE_D3D12_FENCE 2
 
 /**
  * Resolution of the basis-points gauge encoding in [`encode_battery`]:
@@ -413,6 +426,8 @@ typedef struct VkSubmitDesc {
   uint32_t image_height;
   uint64_t sync_semaphore_handle;
   uint64_t sync_semaphore_value;
+  uint32_t sync_semaphore_handle_type;
+  uint64_t consumed_semaphore_handle;
   uint64_t presentation_time_ns;
   uint64_t target_timestamp_ns;
 } VkSubmitDesc;
@@ -431,6 +446,24 @@ extern "C" {
  * Always safe to call; no preconditions, no shared state touched.
  */
 uint32_t alvr_oxr_get_bridge_abi_version(void);
+
+/**
+ * Time in nanoseconds from now until the next predicted client-display vsync,
+ * from [`ServerCoreContext::duration_until_next_vsync`] — the same steady
+ * cadence SteamVR mode paces to in `wait_for_vsync`. Lets `comp_alvr`
+ * phase-align its frame pacing to the client instead of running Monado's
+ * free-running `u_pc_fake` (phase-sync pacer Slice 0).
+ *
+ * Deliberately a **relative** duration, not an absolute timestamp: it sidesteps
+ * any server/compositor clock-domain mismatch — `comp_alvr` adds it to its own
+ * `os_monotonic_get_ns()`. Returns `false` (leaving `*out_ns` untouched) when
+ * there's no context or no client cadence yet (pre-connection); the caller
+ * falls back to its default pacing.
+ *
+ * # Safety
+ * `out_ns` must point to a writable `u64`.
+ */
+bool alvr_oxr_duration_until_next_vsync(uint64_t *out_ns);
 
 /**
  * Negotiated per-eye streaming resolution (`openvr_config.eye_resolution`), in
@@ -625,17 +658,17 @@ AlvrOxrResult alvr_oxr_get_foveation_vars(struct AlvrOxrFoveationVars *out_vars)
  * `sync_handle` + `sync_value` (ABI v9) carry the Monado-side squash/FFR
  * **forward** timeline semaphore: `sync_handle` is the exported native semaphore
  * handle and `sync_value` is the timeline value that submit signalled.
- * `sync_handle == 0` means "no semaphore, the image is already GPU-complete" (the
- * fallback when `comp_alvr` couldn't export a timeline semaphore, in which case
- * it CPU-waited before this call).
+ * `sync_handle == 0` means "no semaphore, the image is already GPU-complete"
+ * (the fallback when `comp_alvr` couldn't export a timeline semaphore, in which
+ * case it CPU-waited before this call).
  *
  * `sync_handle_type` (ABI v10) is the `ALVR_OXR_SEM_HANDLE_TYPE_*` of both
- * timeline semaphores so the encoder imports them with the exact CUDA handle type
- * instead of probing (`NONE` => probe). `consumed_handle` (ABI v10) is the native
- * handle of the **reverse** "consumed" timeline semaphore the encoder signals (at
- * `sync_value`) once the scratch has been copied into NVENC's input — the hook
- * Slice B2.2b uses to free the scratch ring slot without a CPU wait. In Slice
- * B2.2a `comp_alvr` still CPU-waits and ignores it.
+ * timeline semaphores so the encoder imports them with the exact CUDA handle
+ * type instead of probing (`NONE` ⇒ probe). `consumed_handle` (ABI v10) is the
+ * native handle of the **reverse** "consumed" timeline semaphore: the encoder
+ * signals it (at `sync_value`) once the scratch has been copied into NVENC's
+ * input, the hook Slice B2.2b uses to free the scratch ring slot without a CPU
+ * wait. In Slice B2.2a `comp_alvr` still CPU-waits and ignores it.
  *
  * # Safety
  * `layers` must point to `layer_count` valid `AlvrOxrLayer`s.
@@ -720,6 +753,10 @@ AlvrOxrResult alvr_oxr_report_layer_types(int64_t frame_id,
 AlvrOxrResult alvr_oxr_poll_session_event(struct AlvrOxrEvent *out_event);
 
 extern const char *alvr_vk_encoder_last_error(void);
+
+extern const char *alvr_vk_encoder_import_diag(void);
+
+extern double alvr_vk_encoder_take_avg_encode_us(void);
 
 extern void *alvr_vk_encoder_create(const struct VkNvencConfig *cfg);
 
