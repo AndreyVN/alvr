@@ -696,14 +696,19 @@ pub unsafe extern "C" fn alvr_oxr_get_head_pose(
         return AlvrOxrResult::NotInitialised;
     };
 
-    // get_device_motion returns the latest received tracking sample at or
-    // before the requested timestamp. Phase 3.1.2 mirrors the OpenVR
-    // pattern (server_openvr/src/lib.rs L96-L116) sans the explicit
-    // predict() step — Monado already gives us a future predicted
-    // timestamp, and an internal predict layer would require us to know
-    // the source poll_timestamp. If timing accuracy turns out to need it,
-    // a 3.1.5 follow-up can wire `motion.predict(now, target)` in.
-    let motion = context.get_device_motion(*HEAD_ID, target);
+    // get_device_motion returns the latest received tracking sample; we then
+    // predict it forward by the motion-to-photon latency so Monado renders the
+    // view at the head pose for the moment the frame will actually be displayed
+    // — mirroring server_openvr (lib.rs:99-108). Without this `predict()` step
+    // (it was deferred at Phase 3.1.2) the rendered pose is stale by the full
+    // pipeline latency, so the world lags/swims on head motion. The horizon is
+    // the client-reported `total_pipeline_latency` — computed entirely in the
+    // client's own clock, so it's valid despite the lack of client/server clock
+    // sync — clamped to `max_prediction_ms`.
+    let horizon = context.get_motion_to_photon_latency();
+    let motion = context
+        .get_device_motion(*HEAD_ID, target)
+        .map(|m| m.predict(Duration::ZERO, horizon));
     if let Some(motion) = motion {
         unsafe {
             *out_pose = AlvrOxrPose {
@@ -1562,7 +1567,16 @@ mod encoder_bridge {
             // off the current head pose → off-screen → black.
             let local = *LOCAL_VIEW_PARAMS.read();
             let stamp = Duration::from_nanos(target_timestamp_ns);
-            let global_view_params = match ctx.get_device_motion(*HEAD_ID, stamp) {
+            // Predict the head pose forward by the motion-to-photon latency so the
+            // pose the client reprojects against matches the (also-predicted) pose
+            // Monado rendered the frame with — consistent with the render path in
+            // alvr_oxr_get_head_pose. A stale or mismatched tag pose makes the
+            // client reproject from the wrong reference → swim on head motion.
+            let horizon = ctx.get_motion_to_photon_latency();
+            let global_view_params = match ctx
+                .get_device_motion(*HEAD_ID, stamp)
+                .map(|m| m.predict(Duration::ZERO, horizon))
+            {
                 Some(head) => [
                     ViewParams {
                         pose: head.pose * local[0].pose,
