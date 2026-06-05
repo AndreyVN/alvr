@@ -98,20 +98,42 @@ or gated so master stays shippable. Re-run the 30 s jitter measurement (see
   straight to Slice 2. The 5 ms `render_margin` value and the getter's
   `enforce_server_frame_pacing` gate are both reusable when Slice 2 is built.
 
-- **Slice 2 — pace the submit, not just the prediction. ⭐ NOW THE PRIMARY PATH**
-  (Slice 1 measured-regressed; the submit choke point is the real analogue of
-  SteamVR's `wait_for_vsync`). Add an explicit sleep-to-cadence at the producer
-  choke point so `compose_via_squasher`/`alvr_oxr_submit_layers` fire on an even
-  beat regardless of when the app/compositor loop ran. Shape: just before the
-  squash/submit, read `alvr_oxr_duration_until_next_vsync`; sleep
-  `until_next_vsync − pipeline_cost` (squash + FFR + encode ≈ 5 ms measured) so
-  the frame lands just before the target vsync. **Leave `u_pc_predict` untouched**
-  (the lesson from Slice 1) — pace only the submit. Gate on
-  `enforce_server_frame_pacing`; fall back to no-sleep when the getter returns
-  false. Watch for: the sleep must not stall Monado's compositor thread in a way
-  that starves the app (measure fps doesn't drop like Approach A's spikes did).
-  **A/B vs the 2.33 ms `u_pc_fake` arm, same harness** (`cap_jitter.cmd` on the
-  TESTHOST console + the `[GRAPH]`-interval analyzer; see `[[openxr-pacing-smoothness]]`).
+- **Slice 2 — pace the submit (sleep-to-cadence at `layer_commit` end). ❌ BUILT +
+  MEASURED-NEUTRAL/WORSE 2026-06-05, REVERTED.** Added an `os_precise_sleeper`
+  (Windows waitable timer) and slept `alvr_oxr_duration_until_next_vsync` at the
+  *end* of `comp_alvr_layer_commit` (after submit; encode already off-thread), to
+  back-pressure the app's next frame onto the grid. `u_pc_predict` left untouched.
+  Built clean, boot-verified. **A/B vs the same-session 2.33 ms `u_pc_fake` arm:**
+
+  | | u_pc_fake | Slice 2 (full / best-30s) |
+  | --- | --- | --- |
+  | jitter stddev | 2.33 ms | 2.87 / 2.37 ms (no better) |
+  | max interval | 38 ms | 41 / 36 ms |
+  | fps | 71.9 | **70.2** (dropped) |
+  | drops >2× /30 s | ~9 | ~24 / ~11 |
+
+  Even the steadiest window only *matched* baseline jitter (2.37 vs 2.33 ms), and
+  **fps dropped to ~70**: a waitable timer always *over*-sleeps slightly (~0.5 ms
+  past target even with `timeBeginPeriod(1)`), so sleeping all the way to each grid
+  point pushes every frame long → the loop drifts under 72 Hz and misses beats. So
+  the submit-sleep over-throttles *without* smoothing. Reverted (was never
+  committed — working-tree restore only).
+
+  **Durable conclusion after Slices 1 + 2: NEITHER prediction-editing NOR
+  submit-sleeping beats the `u_pc_fake` baseline** — both built on
+  `duration_until_next_vsync`, which is a *free-running synthetic* cadence
+  (anchored at connect, never corrected from the client's actual vsync). Locking a
+  second free-running clock to a first doesn't phase-align either to the *client
+  display*; it just swaps grids and adds mechanism jitter. **Before any more
+  pacing work, get the decisive datapoint: measure SteamVR-mode `[GRAPH]` jitter
+  the same way** (`cap_steamvr.cmd` on TESTHOST). If SteamVR mode is also ~2.3 ms,
+  the "less smooth" feel is *not* a jitter gap — it's the structural extra-hop
+  *latency*, and pacing is the wrong investment (pivot to latency: the hop itself,
+  `max_buffering_frames`, Slice 3 closed-loop). If SteamVR is materially tighter
+  (e.g. <1.5 ms), only then is a *client-feedback closed-loop* (Slice 3) — not the
+  synthetic cadence — worth building. A margin-subtracted submit-sleep (sleep
+  `until − ~1 ms` to absorb timer bias) is a cheap retry that would fix the fps
+  drop but, per the best-window data, is unlikely to beat baseline jitter.
 
 - **Slice 3 — close the loop + latency budget.** Drive the target display time
   from the measured motion-to-photon / pipeline latency so the frame arrives
