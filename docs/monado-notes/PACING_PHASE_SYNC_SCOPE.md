@@ -15,6 +15,35 @@ latency was not captured (dashboard/ClickHouse only) but the extra Monado
 compositor hop (squash + FFR + residual `vkQueueWaitIdle`) is the structural
 "laggy" contributor.
 
+## ⭐ Measured A/B baseline + decision (2026-06-05) — READ FIRST
+
+Same-host, same-settings (72 Hz, H.264, `enforce_server_frame_pacing` on,
+buffering 2.0), same AK app, head moving; steadiest 30 s `[GRAPH]` window each:
+
+| | SteamVR mode | OpenXR mode (`u_pc_fake`) |
+| --- | --- | --- |
+| jitter stddev | **1.68 ms** | 2.33 ms |
+| max interval | 31 ms | 38 ms |
+| drops >2× /30 s | **~3** | ~9 |
+| fps | 71.98 | 71.9 |
+
+There **is** a real jitter gap, but it's **modest** (~0.65 ms stddev; the
+perceptible part is the ~3× drop rate). **The synthetic-cadence pacer cannot
+close it** — Slice 1 (predict-edit) regressed and Slice 2 (submit-sleep) was
+neutral/worse, because `duration_until_next_vsync` is a free-running synthetic
+grid, never client-corrected. SteamVR's advantage is *structural*: it **is** the
+single compositor and sleeps the one present point (`wait_for_vsync`); OpenXR has
+the extra Monado hop + two render loops (app + comp_alvr) that a server-side
+sleep can't unify.
+
+**DECISION: park the synthetic-cadence pacer track** (Slices 1–2 exhausted it).
+The remaining gap is small enough that it's not worth Slice 3's complexity until
+we know the bigger half. **Next: measure absolute motion-to-photon latency
+(SteamVR vs OpenXR, dashboard/ClickHouse)** — the "laggier" complaint is almost
+certainly the extra-hop *latency*, not this ~0.65 ms jitter. Only revisit pacing
+(as Slice 3 closed-loop from client frame-timing, NOT the synthetic cadence) if
+latency turns out fine and the drop rate is the dominant complaint.
+
 ## Root cause
 
 `comp_alvr_predict_frame` (comp_alvr.c:837) paces with Monado's generic
