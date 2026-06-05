@@ -37,12 +37,54 @@ the extra Monado hop + two render loops (app + comp_alvr) that a server-side
 sleep can't unify.
 
 **DECISION: park the synthetic-cadence pacer track** (Slices 1–2 exhausted it).
-The remaining gap is small enough that it's not worth Slice 3's complexity until
-we know the bigger half. **Next: measure absolute motion-to-photon latency
-(SteamVR vs OpenXR, dashboard/ClickHouse)** — the "laggier" complaint is almost
-certainly the extra-hop *latency*, not this ~0.65 ms jitter. Only revisit pacing
-(as Slice 3 closed-loop from client frame-timing, NOT the synthetic cadence) if
-latency turns out fine and the drop rate is the dominant complaint.
+
+### Latency measured too (2026-06-05) — comparable, NOT the cause
+
+Enabled `metrics_export` → the ClickHouse ingest (`193.104.57.232`,
+`alvr.streaming_metrics`) for both modes, same AK app, and compared the per-stage
+latency (avg ms, full 72-fps windows):
+
+| stage | OpenXR | SteamVR | note |
+| --- | --- | --- | --- |
+| **total_pipeline** | 53.9 | 72.8 | OpenXR *lower* — but see caveat |
+| game_time | **0** | 14.2 | OpenXR reports 0 (n>0, value 0) |
+| server_compositor | **0** | 0.23 | OpenXR reports 0 |
+| encoder | 7.3 | 7.1 | = |
+| network | 3.2 | 4.5 | = |
+| decoder | 7.1 | 10.0 | = |
+| decoder_queue | 13.3 | 13.1 | = |
+| client_compositor | 2.4 | 2.8 | = |
+| vsync_queue | 20.6 | 20.9 | = (buffering, `max_buffering_frames` 2.0) |
+
+**Caveat that decides it:** OpenXR's `game_time`/`server_compositor`/total cross
+the client↔server boundary, and **OpenXR mode has no client/server clock sync**
+(durable rule, `[[openxr_mode_quirks_windows]]`), so those are unreliable there —
+hence the spurious 0 s and the spurious 19 ms "advantage." The stages within a
+**single** clock domain (encoder, network, decoder, decoder_queue,
+client_compositor, vsync_queue) are the trustworthy comparison and are
+**essentially identical** (every OpenXR stage = equal-or-slightly-lower). So
+**there is no evidence of materially higher latency in OpenXR.** Latency is *not*
+the cause of "laggier."
+
+### Synthesis — what "less smooth / laggier" actually is
+
+- **Latency:** comparable across modes (reliable stages within ~3 ms).
+- **Jitter:** OpenXR modestly worse — but the perceptible part is the **~3× drop
+  rate** (~9 vs ~3 hitches/30 s); a dropped frame reads as *both* a stutter and a
+  lag spike. This drop rate is the only real differentiator found.
+- **The drops are structural** (extra Monado hop + app/comp_alvr two-loop
+  bunching), and the synthetic-cadence pacer can't fix them (Slices 1–2 proved
+  it). The largest single latency component in *both* modes is buffering
+  (`vsync_queue` ~20 ms + `decoder_queue` ~13 ms ≈ 33 ms, from
+  `max_buffering_frames` 2.0) — identical in both, so not a differentiator, and
+  lowering it trades latency for *more* drops (worse for OpenXR).
+
+**Bottom line: OpenXR mode is in good shape — comparable latency, only a modest
+drop-rate gap.** Every cheap lever is exhausted. Closing the residual drop gap
+needs either a Slice-3 **client-feedback closed-loop** pacer (real work, uncertain
+payoff for ~6 fewer hitches/30 s) or structural compositor changes (collapse the
+two-loop / reduce the hop). Recommend **not** investing further now; revisit only
+if the drop rate becomes a concrete user-blocking complaint.
 
 ## Root cause
 
